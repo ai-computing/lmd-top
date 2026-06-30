@@ -1,0 +1,22 @@
+[package]
+name = "lmd-top"
+version = "0.1.0"
+edition = "2021"
+description = "llm-d 클러스터용 터미널 관측·운영 도구 (Phase 1: monitor)"
+
+[[bin]]
+name = "lmd-top"
+path = "src/main.rs"
+
+[dependencies]
+# 순수 Rust만 (이 빌드 환경엔 C 컴파일러 없음 → ring/openssl 계열 금지)
+ratatui = "0.29"            # crossterm 0.28 재export 포함 (ratatui::crossterm 사용)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "sync", "net", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"         # 순수 Rust(unsafe-libyaml) — EPP ConfigMap 파싱
+anyhow = "1"
+unicode-width = "0.2"      # CJK 등 표시 폭 정확 계산(절단/정렬 깨짐 방지)
+
+[profile.release]
+opt-level = 2

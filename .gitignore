@@ -1,0 +1,14 @@
+# Rust 빌드 산출물
+/target/
+**/*.rs.bk
+*.pdb
+
+# 로컬 설정/시크릿
+.env
+*.kubeconfig
+config/local.toml
+
+# editor / OS
+.DS_Store
+*.swp
+*~
