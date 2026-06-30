@@ -279,8 +279,15 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
                 format!(" {:.0}/{:.0}G", a.mem_used_gb, a.mem_total_gb),
                 Style::default().fg(C_DIM),
             ));
+            let kc = if !a.alive {
+                C_BAD
+            } else if a.throttle > 0.0 {
+                C_WARN
+            } else {
+                kind_color(a.kind)
+            };
             Row::new(vec![
-                Cell::from(Span::styled(a.kind.label(), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD))),
+                Cell::from(Span::styled(a.kind.label(), Style::default().fg(kc).add_modifier(Modifier::BOLD))),
                 cellw(a.id.clone(), 6),
                 cellw(a.node.clone(), 16),
                 Cell::from(Line::from(util)),
@@ -454,6 +461,19 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
         }
         None => lines.push(Line::from(Span::styled("EPP ConfigMap 미발견 (llmd-router-epp)", Style::default().fg(C_DIM)))),
     }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("prefix indexer size: ", Style::default().fg(C_DIM)),
+        Span::styled(
+            if app.snap.prefix_idx.is_nan() { "–".to_string() } else { format!("{:.0}", app.snap.prefix_idx) },
+            Style::default().fg(Color::White),
+        ),
+        Span::styled("    EPP in request path: ", Style::default().fg(C_DIM)),
+        Span::styled(
+            if app.snap.epp_in_path { "yes" } else { "no (HTTPRoute가 Service 직접 → 우회)" },
+            Style::default().fg(if app.snap.epp_in_path { C_OK } else { C_WARN }),
+        ),
+    ]));
     f.render_widget(Paragraph::new(lines).block(block("EPP Inspector · active scorers (ConfigMap)")), split[0]);
 
     let bottom = Layout::default()
@@ -550,7 +570,7 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
 
     let top = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(8)])
+        .constraints([Constraint::Min(4), Constraint::Length(10)])
         .split(area);
     f.render_widget(Paragraph::new(lines).block(block("Topology · Gateway → HTTPRoute → backend")), top[0]);
 
@@ -561,18 +581,14 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     }
     for p in &s.pools {
         pl.push(Line::from(vec![
-            Span::styled("pool ", Style::default().fg(C_DIM)),
-            Span::styled(p.name.clone(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  EPP:{}", if p.epp.is_empty() { "–" } else { &p.epp }), Style::default().fg(C_ACC)),
+            Span::styled(format!("{:<18}", truncw(&p.name, 18)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             Span::styled(
-                format!("  endpoints {}/{}", p.ep_ready, p.ep_total),
+                format!("ep {}/{} ", p.ep_ready, p.ep_total),
                 Style::default().fg(if p.ep_total == 0 { C_WARN } else { C_OK }),
             ),
+            Span::styled(format!("EPP:{} ", if p.epp.is_empty() { "–" } else { &p.epp }), Style::default().fg(C_ACC)),
+            Span::styled(format!("sel={}", if p.selector.is_empty() { "–" } else { &p.selector }), Style::default().fg(C_DIM)),
         ]));
-        pl.push(Line::from(Span::styled(
-            format!("     selector {}", if p.selector.is_empty() { "–" } else { &p.selector }),
-            Style::default().fg(C_DIM),
-        )));
     }
     if !s.objectives.is_empty() {
         let so: Vec<String> = s.objectives.iter().map(|o| format!("{}(p{}→{})", o.name, o.priority, o.pool)).collect();
@@ -581,7 +597,17 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(so.join("  "), Style::default().fg(Color::White)),
         ]));
     }
-    f.render_widget(Paragraph::new(pl).block(block("InferencePool / EPP / SLO (InferenceObjective)")), top[1]);
+    for a in &s.autoscalers {
+        pl.push(Line::from(vec![
+            Span::styled("autoscale ", Style::default().fg(C_DIM)),
+            Span::styled(truncw(&a.target, 26), Style::default().fg(Color::White)),
+            Span::styled(format!("  {}↔{} rep={} ", a.min, a.max, a.replicas), Style::default().fg(C_DIM)),
+            Span::styled(if a.active { "active" } else { "idle" }, Style::default().fg(if a.active { C_OK } else { C_DIM })),
+            Span::styled(if a.ready { " ✓" } else { " ⚠notready" }, Style::default().fg(if a.ready { C_OK } else { C_WARN })),
+            Span::styled(format!(" [{}]", a.triggers), Style::default().fg(C_DIM)),
+        ]));
+    }
+    f.render_widget(Paragraph::new(pl).block(block("InferencePool / EPP / SLO / Autoscale")), top[1]);
 }
 
 // ── Overview ───────────────────────────────────────────
@@ -656,6 +682,14 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(m));
         lines.push(kv("temp", &format!("{:.0} °C", a.temp), temp_color(a.temp)));
         lines.push(kv("power", &format!("{:.0} W", a.power), Color::White));
+        let health = if !a.alive {
+            ("✗ not alive".to_string(), C_BAD)
+        } else if a.throttle > 0.0 {
+            (format!("⚠ alive · throttling {:.0}", a.throttle), C_WARN)
+        } else {
+            ("● healthy".to_string(), C_OK)
+        };
+        lines.push(kv("health", &health.0, health.1));
         lines.push(kv("model/pod", if a.busy_model.is_empty() { "(idle)" } else { a.busy_model.as_str() }, C_ACC));
     } else if let Some(m) = app.selected_model() {
         title = "Model detail · esc 닫기";

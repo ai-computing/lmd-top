@@ -48,6 +48,8 @@ pub struct Accel {
     pub temp: f64,
     pub power: f64,
     pub busy_model: String, // exported_pod 등
+    pub alive: bool,        // furiosa_npu_alive / RBLN HEALTH
+    pub throttle: f64,      // furiosa throttling events (>0 = 스로틀링)
 }
 
 #[derive(Clone)]
@@ -127,11 +129,24 @@ pub struct Snapshot {
     pub routes: Vec<Route>,
     pub objectives: Vec<Objective>,
     pub decisions: Vec<(String, f64)>, // (pod, 라우팅 픽 횟수) — 트래픽이 EPP 경유 시
+    pub autoscalers: Vec<Autoscale>,
     pub epp: Option<EppCfg>,
     pub epp_in_path: bool, // HTTPRoute backend 중 InferencePool 이 있는가(없으면 EPP 우회)
+    pub prefix_idx: f64,   // inference_extension_prefix_indexer_size
     pub gw_addr: String,
     pub gw_ok: bool,
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct Autoscale {
+    pub target: String, // scaleTargetRef (deployment)
+    pub min: i64,
+    pub max: i64,
+    pub replicas: i64,
+    pub ready: bool,
+    pub active: bool,
+    pub triggers: String,
 }
 
 fn to_gb(v: f64) -> f64 {
@@ -208,6 +223,8 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     let f_pow = map_by(q(cfg, "max by (uuid) (furiosa_npu_hw_power)", &mut warn).await, "uuid");
     let f_du = map_by(q(cfg, "max by (uuid) (furiosa_npu_dram_usage)", &mut warn).await, "uuid");
     let f_dt = map_by(q(cfg, "max by (uuid) (furiosa_npu_dram_total)", &mut warn).await, "uuid");
+    let f_alive = map_by(q(cfg, "max by (uuid) (furiosa_npu_alive)", &mut warn).await, "uuid");
+    let f_thr = map_by(q(cfg, "max by (uuid) (furiosa_npu_throttling_events_count)", &mut warn).await, "uuid");
     for s in &f_util {
         let uuid = s.l("uuid");
         snap.accel.push(Accel {
@@ -220,6 +237,8 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             temp: f_temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
             power: f_pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
             busy_model: String::new(),
+            alive: f_alive.get(uuid).map(|x| x.value > 0.0).unwrap_or(true),
+            throttle: f_thr.get(uuid).map(|x| x.value).unwrap_or(0.0),
         });
     }
 
@@ -229,6 +248,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     let r_pow = map_by(q(cfg, "RBLN_DEVICE_STATUS:CARD_POWER", &mut warn).await, "uuid");
     let r_du = map_by(q(cfg, "RBLN_DEVICE_STATUS:DRAM_USED", &mut warn).await, "uuid");
     let r_dt = map_by(q(cfg, "RBLN_DEVICE_STATUS:DRAM_TOTAL", &mut warn).await, "uuid");
+    let r_health = map_by(q(cfg, "RBLN_DEVICE_STATUS:HEALTH", &mut warn).await, "uuid");
     for s in &r_util {
         let uuid = s.l("uuid");
         let pod = s.l("exported_pod");
@@ -242,6 +262,8 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             temp: r_temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
             power: r_pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
             busy_model: pod.to_string(),
+            alive: r_health.get(uuid).map(|x| x.value > 0.0).unwrap_or(true),
+            throttle: 0.0,
         });
     }
 
@@ -262,6 +284,8 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             temp: g_temp.get(gpu).map(|x| x.value).unwrap_or(0.0),
             power: g_pow.get(gpu).map(|x| x.value).unwrap_or(0.0),
             busy_model: String::new(),
+            alive: true,
+            throttle: 0.0,
         });
     }
     // 정렬: kind, node, id
@@ -312,6 +336,8 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         }
     }
     snap.decisions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let pidx = q(cfg, "max(inference_extension_prefix_indexer_size)", &mut warn).await;
+    snap.prefix_idx = pidx.first().map(|s| s.value).unwrap_or(f64::NAN);
     for s in &p_ready {
         let name = s.l("name");
         snap.pools.push(Pool {
@@ -592,6 +618,38 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
         }
     }
     snap.objectives.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+    // 오토스케일링 (KEDA ScaledObject + 상태)
+    if let Ok(v) = kube::get_json(&["get", "scaledobject", "-n", &cfg.ns, "-o", "json"]).await {
+        if let Some(items) = v["items"].as_array() {
+            for so in items {
+                let target = so["spec"]["scaleTargetRef"]["name"].as_str().unwrap_or("").to_string();
+                let min = so["spec"]["minReplicaCount"].as_i64().unwrap_or(0);
+                let max = so["spec"]["maxReplicaCount"].as_i64().unwrap_or(0);
+                let conds = so["status"]["conditions"].as_array();
+                let cond = |t: &str| {
+                    conds
+                        .and_then(|c| c.iter().find(|x| x["type"] == t))
+                        .map(|x| x["status"] == "True")
+                        .unwrap_or(false)
+                };
+                let triggers = so["spec"]["triggers"]
+                    .as_array()
+                    .map(|ts| ts.iter().filter_map(|t| t["type"].as_str()).collect::<Vec<_>>().join(","))
+                    .unwrap_or_default();
+                let replicas = snap.models.iter().find(|m| m.name == target).map(|m| m.ready).unwrap_or(0);
+                snap.autoscalers.push(Autoscale {
+                    target,
+                    min,
+                    max,
+                    replicas,
+                    ready: cond("Ready"),
+                    active: cond("Active"),
+                    triggers,
+                });
+            }
+        }
+    }
 }
 
 fn match_model(deploy: &str, v_run: &BTreeMap<String, Series>) -> Option<String> {
