@@ -227,9 +227,12 @@ fn print_snapshot(s: &collect::Snapshot, cfg: &Config) {
             m.status
         );
     }
-    println!("\n[routes] {}", s.routes.len());
-    for (p, b) in &s.routes {
-        println!("  {:<10} → {}", p, b);
+    println!("\n[routes] {} (epp_in_path={})", s.routes.len(), s.epp_in_path);
+    for r in &s.routes {
+        println!("  {:<10} → {}/{}", r.path, r.kind, r.backend);
+    }
+    if !s.objectives.is_empty() {
+        println!("[SLO] {}", s.objectives.iter().map(|o| format!("{}(p{})", o.name, o.priority)).collect::<Vec<_>>().join(", "));
     }
     println!("\n[pods] {}", s.pods.len());
     for p in &s.pods {

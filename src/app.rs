@@ -31,7 +31,7 @@ impl View {
             View::Accel => "Accel",
             View::Models => "Models",
             View::Epp => "EPP",
-            View::Routing => "Route",
+            View::Routing => "Topo",
             View::Pods => "Pods",
         }
     }

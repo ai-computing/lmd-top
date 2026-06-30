@@ -456,16 +456,21 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
     }
     f.render_widget(Paragraph::new(lines).block(block("EPP Inspector · active scorers (ConfigMap)")), split[0]);
 
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(split[1]);
+
+    // 왼쪽: InferencePool 상태(endpoints/queue/sat)
     let rows: Vec<Row> = app
         .snap
         .pools
         .iter()
         .map(|p| {
             Row::new(vec![
-                cellw(p.name.clone(), 18),
-                cellw(format!("{:.0}", p.ready), 8),
-                cellw(fmt_nan(p.queue, 1), 10),
-                cellw(fmt_nan(p.kv, 2), 8),
+                cellw(p.name.clone(), 14),
+                cellw(format!("{}/{}", p.ep_ready, p.ep_total), 7),
+                cellw(fmt_nan(p.queue, 1), 8),
                 Cell::from(Span::styled(
                     fmt_nan(p.sat, 2),
                     Style::default().fg(if p.sat > 0.8 { C_BAD } else if p.sat > 0.5 { C_WARN } else { C_DIM }),
@@ -475,37 +480,108 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
         .collect();
     let t = Table::new(
         rows,
-        [Constraint::Min(16), Constraint::Length(8), Constraint::Length(10), Constraint::Length(8), Constraint::Length(8)],
+        [Constraint::Min(12), Constraint::Length(7), Constraint::Length(8), Constraint::Length(6)],
     )
-    .header(hrow(&["POOL", "READY", "QUEUEavg", "KV", "SAT"]))
-    .block(block("InferencePool status"));
-    f.render_widget(t, split[1]);
+    .header(hrow(&["POOL", "EP r/t", "QUEUE", "SAT"]))
+    .block(block("InferencePool"));
+    f.render_widget(t, bottom[0]);
+
+    // 오른쪽: 요청 분배 (scheduler_attempts_total)
+    let mut dl: Vec<Line> = Vec::new();
+    let total: f64 = app.snap.decisions.iter().map(|(_, c)| c).sum();
+    if app.snap.decisions.is_empty() || total <= 0.0 {
+        dl.push(Line::from(Span::styled("요청 분배 데이터 없음", Style::default().fg(C_DIM))));
+        dl.push(Line::from(Span::styled(
+            if app.snap.epp_in_path { "(트래픽 대기 중)" } else { "(EPP 우회 — Topo 뷰 참조)" },
+            Style::default().fg(C_DIM),
+        )));
+    } else {
+        for (pod, cnt) in app.snap.decisions.iter().take(6) {
+            let share = cnt / total * 100.0;
+            let mut sp = vec![Span::styled(format!("{:<22} ", truncw(pod, 22)), Style::default().fg(Color::White))];
+            sp.extend(bar_line(share, 8, C_ACC).spans);
+            sp.push(Span::styled(format!(" {:>3.0}%", share), Style::default().fg(C_DIM)));
+            dl.push(Line::from(sp));
+        }
+    }
+    f.render_widget(Paragraph::new(dl).block(block("요청 분배 (EPP 라우팅 결정)")), bottom[1]);
 }
 
-// ── Routing ────────────────────────────────────────────
+// ── Topology (구성/라우팅/분배 한눈에) ──────────────────
 fn view_routing(f: &mut Frame, area: Rect, app: &App) {
+    let s = &app.snap;
     let mut lines: Vec<Line> = Vec::new();
-    let gw = if app.snap.gw_addr.is_empty() {
+
+    // Gateway → HTTPRoute → backend (모델 상태/가속기/노드 주석)
+    let gw = if s.gw_addr.is_empty() {
         "llm-d-gateway (—)".to_string()
     } else {
-        format!("llm-d-gateway ({} {})", app.snap.gw_addr, if app.snap.gw_ok { "●" } else { "○" })
+        format!("llm-d-gateway  {}  {}", s.gw_addr, if s.gw_ok { "●Programmed" } else { "○" })
     };
-    lines.push(Line::from(Span::styled(gw, Style::default().fg(C_OK))));
-    if app.snap.routes.is_empty() {
-        lines.push(Line::from(Span::styled("  (no HTTPRoute)", Style::default().fg(C_DIM))));
-    }
-    for (i, (path, backend)) in app.snap.routes.iter().enumerate() {
-        let branch = if i + 1 == app.snap.routes.len() { "└─" } else { "├─" };
-        // backend 가 서빙 중인지 색
-        let up = app.snap.models.iter().any(|m| &m.name == backend && m.ready > 0);
+    lines.push(Line::from(Span::styled(gw, Style::default().fg(C_OK).add_modifier(Modifier::BOLD))));
+    for (i, r) in s.routes.iter().enumerate() {
+        let branch = if i + 1 == s.routes.len() { "└─" } else { "├─" };
+        let m = s.models.iter().find(|m| m.name == r.backend);
+        let up = m.map(|m| m.ready > 0).unwrap_or(false);
+        let annot = match m {
+            Some(m) => format!("{}/{}  {}", m.ready, m.desired, m.accel),
+            None => "?".into(),
+        };
         lines.push(Line::from(vec![
             Span::styled(format!(" {} ", branch), Style::default().fg(C_DIM)),
-            Span::styled(format!("{:<10}", truncw(path, 10)), Style::default().fg(Color::White)),
-            Span::raw(" → "),
-            Span::styled(backend.clone(), Style::default().fg(if up { C_OK } else { C_DIM })),
+            Span::styled(format!("{:<10}", truncw(&r.path, 10)), Style::default().fg(Color::White)),
+            Span::styled("→ ", Style::default().fg(C_DIM)),
+            Span::styled(format!("{}:", r.kind), Style::default().fg(C_DIM)),
+            Span::styled(format!("{:<24}", truncw(&r.backend, 24)), Style::default().fg(if up { C_OK } else { C_DIM })),
+            Span::styled(annot, Style::default().fg(C_DIM)),
         ]));
     }
-    f.render_widget(Paragraph::new(lines).block(block("Routing · Gateway → HTTPRoute → backend")), area);
+    // EPP 경유 여부 진단
+    if !s.routes.is_empty() {
+        if s.epp_in_path {
+            lines.push(Line::from(Span::styled("  ✓ 라우팅이 InferencePool(EPP) 경유", Style::default().fg(C_OK))));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  ⚠ HTTPRoute 가 Service 로 직접 라우팅 → InferencePool/EPP 우회 (EPP 메트릭 비어있음)",
+                Style::default().fg(C_WARN),
+            )));
+        }
+    }
+
+    let top = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(8)])
+        .split(area);
+    f.render_widget(Paragraph::new(lines).block(block("Topology · Gateway → HTTPRoute → backend")), top[0]);
+
+    // InferencePool + EPP + SLO
+    let mut pl: Vec<Line> = Vec::new();
+    if s.pools.is_empty() {
+        pl.push(Line::from(Span::styled("(InferencePool 없음)", Style::default().fg(C_DIM))));
+    }
+    for p in &s.pools {
+        pl.push(Line::from(vec![
+            Span::styled("pool ", Style::default().fg(C_DIM)),
+            Span::styled(p.name.clone(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  EPP:{}", if p.epp.is_empty() { "–" } else { &p.epp }), Style::default().fg(C_ACC)),
+            Span::styled(
+                format!("  endpoints {}/{}", p.ep_ready, p.ep_total),
+                Style::default().fg(if p.ep_total == 0 { C_WARN } else { C_OK }),
+            ),
+        ]));
+        pl.push(Line::from(Span::styled(
+            format!("     selector {}", if p.selector.is_empty() { "–" } else { &p.selector }),
+            Style::default().fg(C_DIM),
+        )));
+    }
+    if !s.objectives.is_empty() {
+        let so: Vec<String> = s.objectives.iter().map(|o| format!("{}(p{}→{})", o.name, o.priority, o.pool)).collect();
+        pl.push(Line::from(vec![
+            Span::styled("SLO  ", Style::default().fg(C_DIM)),
+            Span::styled(so.join("  "), Style::default().fg(Color::White)),
+        ]));
+    }
+    f.render_widget(Paragraph::new(pl).block(block("InferencePool / EPP / SLO (InferenceObjective)")), top[1]);
 }
 
 // ── Overview ───────────────────────────────────────────

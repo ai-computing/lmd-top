@@ -48,10 +48,13 @@ lmd-top 은 그 빈자리를 채우며, 특히 **EPP 라우팅 의사결정**을
 |---|---|---|
 | **0** | **Overview** | 가속기 요약 + EPP 풀 + 모델 + **cross-layer 1줄 진단** |
 | 1 | **Accel** | 디바이스별 카드(util 바 / VRAM / 온도 / 전력) + util 스파크라인. NVIDIA·RBLN·Furiosa 통합 |
-| 2 | **Models** | 모델별 ready / running / waiting / t/s / 라우팅 path / 상태 |
-| 3 | **EPP** | 활성 scorer 와 가중치(ConfigMap introspect) + picker + InferencePool 상태 |
-| 4 | **Route** | Gateway → HTTPRoute path → backend 트리 |
+| 2 | **Models** | 모델별 가속기/노드(ACCEL) · ready · running/waiting · KV · t/s · 라우팅 path · 상태 |
+| 3 | **EPP** | 활성 scorer·가중치(ConfigMap introspect) + picker + InferencePool endpoints + **요청 분배**(라우팅 결정) |
+| 4 | **Topo** | **전체 구성 한눈에** — Gateway → HTTPRoute → backend(모델 상태/가속기/노드) + InferencePool/EPP/**SLO**(InferenceObjective) + *EPP 우회 진단* |
 | 5 | **Pods** | llm-serving 파드 상태 |
+
+> **Topo 뷰**가 "어느 모델이 어디서 돌고, 어디로 라우팅되며, 요청이 어떻게 분배되는가"를 답합니다.
+> 특히 HTTPRoute 가 InferencePool(EPP) 을 경유하는지/우회하는지 자동 진단합니다.
 
 - **2초 자동 갱신**, 가속기 util 히스토리 스파크라인
 - **액션**: `s` = 선택 모델 scale up/down (꺼진 모델 켜기)

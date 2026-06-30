@@ -58,13 +58,31 @@ pub struct NodeInfo {
     pub mem_total_gb: f64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Pool {
     pub name: String,
     pub ready: f64,
     pub queue: f64,
     pub kv: f64,
     pub sat: f64,
+    pub selector: String,    // app=vllm-rbln-llama31-8b
+    pub epp: String,         // endpointPickerRef (EPP service)
+    pub ep_ready: i64,       // selector 매칭 파드 중 ready
+    pub ep_total: i64,       // selector 매칭 파드 총수
+}
+
+#[derive(Clone)]
+pub struct Route {
+    pub path: String,
+    pub backend: String,
+    pub kind: String, // Service | InferencePool
+}
+
+#[derive(Clone)]
+pub struct Objective {
+    pub name: String,
+    pub priority: i64,
+    pub pool: String,
 }
 
 #[derive(Clone)]
@@ -106,8 +124,11 @@ pub struct Snapshot {
     pub pools: Vec<Pool>,
     pub models: Vec<ModelRow>,
     pub pods: Vec<PodRow>,
-    pub routes: Vec<(String, String)>, // (path, backend)
+    pub routes: Vec<Route>,
+    pub objectives: Vec<Objective>,
+    pub decisions: Vec<(String, f64)>, // (pod, 라우팅 픽 횟수) — 트래픽이 EPP 경유 시
     pub epp: Option<EppCfg>,
+    pub epp_in_path: bool, // HTTPRoute backend 중 InferencePool 이 있는가(없으면 EPP 우회)
     pub gw_addr: String,
     pub gw_ok: bool,
     pub warnings: Vec<String>,
@@ -282,6 +303,15 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         q(cfg, "inference_extension_flow_control_pool_saturation", &mut warn).await,
         "name",
     );
+    // 라우팅 결정 분배 (트래픽이 EPP 경유 시 채워짐)
+    let dec = q(cfg, "sum by (pod_name) (inference_extension_scheduler_attempts_total)", &mut warn).await;
+    for s in &dec {
+        let pod = s.l("pod_name");
+        if !pod.is_empty() {
+            snap.decisions.push((pod.to_string(), s.value));
+        }
+    }
+    snap.decisions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     for s in &p_ready {
         let name = s.l("name");
         snap.pools.push(Pool {
@@ -290,6 +320,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             queue: p_q.get(name).map(|x| x.value).unwrap_or(f64::NAN),
             kv: p_kv.get(name).map(|x| x.value).unwrap_or(f64::NAN),
             sat: p_sat.get(name).map(|x| x.value).unwrap_or(f64::NAN),
+            ..Default::default()
         });
     }
 
@@ -356,17 +387,25 @@ async fn node_ip_map(cfg: &Config, warn: &mut Vec<String>) -> BTreeMap<String, S
 }
 
 async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut Vec<String>) {
-    // routes: path -> backend
+    // routes: path -> backend (+ kind: Service|InferencePool)
     if let Ok(v) = kube::get_json(&["get", "httproute", "-n", &cfg.ns, "-o", "json"]).await {
         if let Some(items) = v["items"].as_array() {
             for r in items {
                 if let Some(rules) = r["spec"]["rules"].as_array() {
                     for rule in rules {
                         let backend = rule["backendRefs"][0]["name"].as_str().unwrap_or("").to_string();
+                        let kind = rule["backendRefs"][0]["kind"].as_str().unwrap_or("Service").to_string();
+                        if kind == "InferencePool" {
+                            snap.epp_in_path = true;
+                        }
                         if let Some(matches) = rule["matches"].as_array() {
                             for m in matches {
                                 if let Some(p) = m["path"]["value"].as_str() {
-                                    snap.routes.push((p.to_string(), backend.clone()));
+                                    snap.routes.push(Route {
+                                        path: p.to_string(),
+                                        backend: backend.clone(),
+                                        kind: kind.clone(),
+                                    });
                                 }
                             }
                         }
@@ -380,8 +419,8 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     let route_for = |backend: &str| -> String {
         snap.routes
             .iter()
-            .filter(|(_, b)| b == backend)
-            .map(|(p, _)| p.clone())
+            .filter(|r| r.backend == backend)
+            .map(|r| r.path.clone())
             .collect::<Vec<_>>()
             .join(",")
     };
@@ -483,6 +522,76 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
             snap.epp = parse_epp(text);
         }
     }
+
+    // InferencePool 스펙(selector / EPP / endpoints) → prom Pool 과 병합
+    if let Ok(v) = kube::get_json(&["get", "inferencepool", "-n", &cfg.ns, "-o", "json"]).await {
+        if let Some(items) = v["items"].as_array() {
+            for ip in items {
+                let name = ip["metadata"]["name"].as_str().unwrap_or("").to_string();
+                let epp = ip["spec"]["endpointPickerRef"]["name"].as_str().unwrap_or("").to_string();
+                let mut sel = Vec::new();
+                if let Some(ml) = ip["spec"]["selector"]["matchLabels"].as_object() {
+                    for (k, val) in ml {
+                        if let Some(s) = val.as_str() {
+                            sel.push(format!("{}={}", k, s));
+                        }
+                    }
+                }
+                let selector = sel.join(",");
+                let (mut ep_total, mut ep_ready) = (0i64, 0i64);
+                if !selector.is_empty() {
+                    if let Ok(pj) =
+                        kube::get_json(&["get", "pods", "-n", &cfg.ns, "-l", &selector, "-o", "json"]).await
+                    {
+                        if let Some(ps) = pj["items"].as_array() {
+                            ep_total = ps.len() as i64;
+                            for p in ps {
+                                let ready = p["status"]["containerStatuses"]
+                                    .as_array()
+                                    .map(|cs| !cs.is_empty() && cs.iter().all(|c| c["ready"].as_bool().unwrap_or(false)))
+                                    .unwrap_or(false);
+                                if ready {
+                                    ep_ready += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(pool) = snap.pools.iter_mut().find(|p| p.name == name) {
+                    pool.selector = selector;
+                    pool.epp = epp;
+                    pool.ep_total = ep_total;
+                    pool.ep_ready = ep_ready;
+                } else {
+                    snap.pools.push(Pool {
+                        name,
+                        selector,
+                        epp,
+                        ep_total,
+                        ep_ready,
+                        ready: f64::NAN,
+                        queue: f64::NAN,
+                        kv: f64::NAN,
+                        sat: f64::NAN,
+                    });
+                }
+            }
+        }
+    }
+
+    // InferenceObjective (SLO priority)
+    if let Ok(v) = kube::get_json(&["get", "inferenceobjective", "-n", &cfg.ns, "-o", "json"]).await {
+        if let Some(items) = v["items"].as_array() {
+            for o in items {
+                snap.objectives.push(Objective {
+                    name: o["metadata"]["name"].as_str().unwrap_or("").to_string(),
+                    priority: o["spec"]["priority"].as_i64().unwrap_or(0),
+                    pool: o["spec"]["poolRef"]["name"].as_str().unwrap_or("").to_string(),
+                });
+            }
+        }
+    }
+    snap.objectives.sort_by(|a, b| b.priority.cmp(&a.priority));
 }
 
 fn match_model(deploy: &str, v_run: &BTreeMap<String, Series>) -> Option<String> {
