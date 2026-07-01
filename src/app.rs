@@ -180,6 +180,7 @@ impl App {
             View::Models | View::Overview => self.snap.models.get(i).map(|m| format!("{} {}", m.name, m.accel)).unwrap_or_default(),
             View::Pods => self.snap.pods.get(i).map(|p| format!("{} {}", p.name, p.node)).unwrap_or_default(),
             View::Launch => self.catalog.get(i).map(|m| format!("{} {}", m.id, m.display)).unwrap_or_default(),
+            View::Epp => self.snap.epp.as_ref().and_then(|e| e.scorers.get(i)).map(|(n, _)| n.clone()).unwrap_or_default(),
             _ => String::new(),
         }
     }
@@ -345,6 +346,7 @@ impl App {
                 idx
             }
             View::Launch => (0..self.catalog.len()).collect(),
+            View::Epp => (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect(),
             _ => Vec::new(),
         };
         if !self.filter.is_empty() {

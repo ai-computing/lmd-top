@@ -107,15 +107,15 @@ fn help_overlay(f: &mut Frame) {
     let sec = |t: &str| Line::from(Span::styled(format!(" {}", t), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD)));
     let lines = vec![
         sec("navigation"),
-        g("0–6 / Tab", "뷰 전환 (Overview/Accel/Models/EPP/Topo/Pods/Perf)"),
-        g("↑↓ / j k", "행 선택"),
-        g("⏎", "선택 항목 상세(drill-down)"),
-        g("o", "정렬 순환"),
-        g("/", "필터 (부분일치)"),
-        g("s", "선택 모델 scale up/down"),
-        g("t", "테마 전환 (default/고대비/색맹친화)"),
-        g("g", "Grafana 대시보드 열기 ↗"),
-        g("? / Esc", "도움말 / 닫기·뒤로   q 종료"),
+        g("0-7 / Tab", "switch view (Overview/Accel/Models/EPP/Topo/Pods/Perf/Launch)"),
+        g("up/dn j k", "select row (mouse scroll works too)"),
+        g("Enter", "detail (drill-down)"),
+        g("o", "cycle sort"),
+        g("/", "filter (substring)"),
+        g("s", "scale selected model up/down"),
+        g("t", "cycle theme (default/high-contrast/colorblind)"),
+        g("g", "open Grafana dashboard"),
+        g("? / Esc", "help / close-back   q quit"),
         Line::from(""),
         sec("color / glyph"),
         Line::from(vec![
@@ -127,9 +127,9 @@ fn help_overlay(f: &mut Frame) {
         ]),
         Line::from(vec![
             Span::styled("  util/mem/temp: ", Style::default().fg(C_DIM())),
-            Span::styled("낮음", Style::default().fg(C_OK())), Span::raw(" "),
-            Span::styled("중간", Style::default().fg(C_WARN())), Span::raw(" "),
-            Span::styled("높음", Style::default().fg(C_BAD())),
+            Span::styled("low", Style::default().fg(C_OK())), Span::raw(" "),
+            Span::styled("mid", Style::default().fg(C_WARN())), Span::raw(" "),
+            Span::styled("high", Style::default().fg(C_BAD())),
         ]),
         Line::from(vec![
             Span::styled("  vendor: ", Style::default().fg(C_DIM())),
@@ -144,7 +144,7 @@ fn help_overlay(f: &mut Frame) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(C_ACC()))
-                .title(Span::styled(" lmd-top · 도움말 (아무 키나 닫기) ", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD))),
+                .title(Span::styled(" lmd-top · help (press any key to close) ", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD))),
         ),
         area,
     );
@@ -227,7 +227,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled(" / ", Style::default().fg(Color::Black).bg(C_ACC()).add_modifier(Modifier::BOLD)),
                 Span::styled(format!(" {}", app.filter), Style::default().fg(Color::White)),
                 Span::styled("▏", Style::default().fg(C_ACC())),
-                Span::styled("   Enter/Esc 확정", Style::default().fg(C_DIM())),
+                Span::styled("   Enter/Esc to apply", Style::default().fg(C_DIM())),
             ])),
             area,
         );
@@ -598,55 +598,87 @@ fn view_pods(f: &mut Frame, area: Rect, app: &App) {
 }
 
 // ── EPP ────────────────────────────────────────────────
+fn scorer_desc(name: &str) -> &'static str {
+    match name {
+        "queue-scorer" => "Prefers endpoints with shorter waiting queues — balances load across pods.",
+        "kv-cache-utilization-scorer" => "Prefers endpoints with lower KV-cache usage — avoids memory pressure and preemption.",
+        "prefix-cache-scorer" => "Prefers endpoints that already hold the prompt's prefix in KV cache — reuse means faster TTFT.",
+        "no-hit-lru-scorer" => "On a prefix-cache miss, biases toward the LRU eviction target so future prefixes hit more often.",
+        "load-aware-scorer" => "Factors each pod's utilization and capacity into the score.",
+        "active-request-scorer" => "Prefers endpoints with fewer in-flight requests.",
+        "session-affinity-scorer" => "Keeps a session's requests pinned to the same endpoint.",
+        "latency-prediction-scorer" => "Uses a predicted-latency model to pick the fastest endpoint.",
+        _ => "EPP scoring plugin. Weighted scores are summed; the max-score endpoint is picked.",
+    }
+}
+
 fn view_epp(f: &mut Frame, area: Rect, app: &App) {
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(6)])
+        .constraints([Constraint::Min(6), Constraint::Length(6)])
         .split(area);
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(split[0]);
 
-    let mut lines: Vec<Line> = Vec::new();
     match &app.snap.epp {
         Some(cfg) => {
-            lines.push(Line::from(vec![
-                Span::styled("profile: ", Style::default().fg(C_DIM())),
-                Span::styled(cfg.profile.clone(), Style::default().fg(Color::White)),
-                Span::styled("    picker: ", Style::default().fg(C_DIM())),
-                Span::styled(cfg.picker.clone(), Style::default().fg(Color::White)),
-            ]));
-            lines.push(Line::from(""));
+            let order = app.order();
             let maxw = cfg.scorers.iter().map(|(_, w)| *w).fold(1.0, f64::max);
-            for (name, w) in &cfg.scorers {
-                let bw = ((w / maxw) * 16.0).round() as usize;
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{:<32}", truncw(name, 32)), Style::default().fg(Color::White)),
-                    Span::styled(format!("w{:>2.0} ", w), Style::default().fg(C_WARN())),
-                    Span::styled("█".repeat(bw), Style::default().fg(C_ACC())),
+            let srows: Vec<Row> = order
+                .iter()
+                .map(|&i| {
+                    let (name, w) = &cfg.scorers[i];
+                    let bw = ((w / maxw) * 10.0).round() as usize;
+                    Row::new(vec![
+                        cellw(name.clone(), 28),
+                        Cell::from(Span::styled(format!("{:.0}", w), Style::default().fg(C_WARN()))),
+                        Cell::from(Span::styled("█".repeat(bw), Style::default().fg(C_ACC()))),
+                    ])
+                })
+                .collect();
+            let t = Table::new(srows, [Constraint::Min(16), Constraint::Length(3), Constraint::Length(11)])
+                .header(hrow(&["SCORER", "WT", "WEIGHT"]))
+                .column_spacing(1)
+                .row_highlight_style(hl_style())
+                .highlight_symbol("▎")
+                .block(block("EPP scorers · select for description"));
+            let mut st = TableState::default();
+            st.select(Some(app.selected));
+            f.render_stateful_widget(t, top[0], &mut st);
+
+            let sel = order.get(app.selected).and_then(|&i| cfg.scorers.get(i));
+            let mut dl: Vec<Line> = vec![
+                Line::from(vec![
+                    Span::styled("profile: ", Style::default().fg(C_DIM())),
+                    Span::styled(cfg.profile.clone(), Style::default().fg(Color::White)),
+                    Span::styled("   picker: ", Style::default().fg(C_DIM())),
+                    Span::styled(cfg.picker.clone(), Style::default().fg(Color::White)),
+                ]),
+                Line::from(""),
+            ];
+            if let Some((name, w)) = sel {
+                dl.push(Line::from(vec![
+                    Span::styled(name.clone(), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("  (weight {:.0})", w), Style::default().fg(C_DIM())),
                 ]));
+                dl.push(Line::from(""));
+                dl.push(Line::from(Span::styled(scorer_desc(name), Style::default().fg(Color::White))));
             }
+            f.render_widget(Paragraph::new(dl).wrap(Wrap { trim: true }).block(block("what this scorer does")), top[1]);
         }
-        None => lines.push(Line::from(Span::styled("EPP ConfigMap 미발견 (llmd-router-epp)", Style::default().fg(C_DIM())))),
+        None => f.render_widget(
+            Paragraph::new(Line::from(Span::styled("EPP ConfigMap not found (llmd-router-epp)", Style::default().fg(C_DIM())))).block(block("EPP scorers")),
+            top[0],
+        ),
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("prefix indexer size: ", Style::default().fg(C_DIM())),
-        Span::styled(
-            if app.snap.prefix_idx.is_nan() { "–".to_string() } else { format!("{:.0}", app.snap.prefix_idx) },
-            Style::default().fg(Color::White),
-        ),
-        Span::styled("    EPP in request path: ", Style::default().fg(C_DIM())),
-        Span::styled(
-            if app.snap.epp_in_path { "yes" } else { "no (HTTPRoute가 Service 직접 → 우회)" },
-            Style::default().fg(if app.snap.epp_in_path { C_OK() } else { C_WARN() }),
-        ),
-    ]));
-    f.render_widget(Paragraph::new(lines).block(block("EPP Inspector · active scorers (ConfigMap)")), split[0]);
 
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
         .split(split[1]);
 
-    // 왼쪽: InferencePool 상태(endpoints/queue/sat)
     let rows: Vec<Row> = app
         .snap
         .pools
@@ -663,33 +695,39 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
             ])
         })
         .collect();
-    let t = Table::new(
-        rows,
-        [Constraint::Min(12), Constraint::Length(7), Constraint::Length(8), Constraint::Length(6)],
-    )
-    .header(hrow(&["POOL", "EP r/t", "QUEUE", "SAT"]))
-    .block(block("InferencePool"));
+    let t = Table::new(rows, [Constraint::Min(12), Constraint::Length(7), Constraint::Length(8), Constraint::Length(6)])
+        .header(hrow(&["POOL", "EP r/t", "QUEUE", "SAT"]))
+        .block(block("InferencePool"));
     f.render_widget(t, bottom[0]);
 
-    // 오른쪽: 요청 분배 (scheduler_attempts_total)
-    let mut dl: Vec<Line> = Vec::new();
+    // request distribution
+    let mut dl: Vec<Line> = vec![Line::from(vec![
+        Span::styled("EPP in path: ", Style::default().fg(C_DIM())),
+        Span::styled(
+            if app.snap.epp_in_path { "yes" } else { "no (bypassed)" },
+            Style::default().fg(if app.snap.epp_in_path { C_OK() } else { C_WARN() }),
+        ),
+        Span::styled(
+            format!("   prefix idx: {}", if app.snap.prefix_idx.is_nan() { "-".into() } else { format!("{:.0}", app.snap.prefix_idx) }),
+            Style::default().fg(C_DIM()),
+        ),
+    ])];
     let total: f64 = app.snap.decisions.iter().map(|(_, c)| c).sum();
     if app.snap.decisions.is_empty() || total <= 0.0 {
-        dl.push(Line::from(Span::styled("요청 분배 데이터 없음", Style::default().fg(C_DIM()))));
         dl.push(Line::from(Span::styled(
-            if app.snap.epp_in_path { "(트래픽 대기 중)" } else { "(EPP 우회 — Topo 뷰 참조)" },
+            if app.snap.epp_in_path { "no distribution data (waiting for traffic)" } else { "no distribution data (EPP bypassed - see Topo)" },
             Style::default().fg(C_DIM()),
         )));
     } else {
-        for (pod, cnt) in app.snap.decisions.iter().take(6) {
+        for (pod, cnt) in app.snap.decisions.iter().take(5) {
             let share = cnt / total * 100.0;
-            let mut sp = vec![Span::styled(format!("{:<22} ", truncw(pod, 22)), Style::default().fg(Color::White))];
+            let mut sp = vec![Span::styled(format!("{:<20} ", truncw(pod, 20)), Style::default().fg(Color::White))];
             sp.extend(bar_line(share, 8, C_ACC()).spans);
             sp.push(Span::styled(format!(" {:>3.0}%", share), Style::default().fg(C_DIM())));
             dl.push(Line::from(sp));
         }
     }
-    f.render_widget(Paragraph::new(dl).block(block("요청 분배 (EPP 라우팅 결정)")), bottom[1]);
+    f.render_widget(Paragraph::new(dl).block(block("request distribution (routing decisions)")), bottom[1]);
 }
 
 // ── Topology (구성/라우팅/분배 한눈에) ──────────────────
@@ -725,10 +763,10 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     // EPP 경유 여부 진단
     if !s.routes.is_empty() {
         if s.epp_in_path {
-            lines.push(Line::from(Span::styled("  ✓ 라우팅이 InferencePool(EPP) 경유", Style::default().fg(C_OK()))));
+            lines.push(Line::from(Span::styled("  ✓ routes go through InferencePool (EPP)", Style::default().fg(C_OK()))));
         } else {
             lines.push(Line::from(Span::styled(
-                "  ⚠ HTTPRoute 가 Service 로 직접 라우팅 → InferencePool/EPP 우회 (EPP 메트릭 비어있음)",
+                "  ⚠ HTTPRoute points to Service directly → InferencePool/EPP bypassed (EPP metrics empty)",
                 Style::default().fg(C_WARN()),
             )));
         }
@@ -743,7 +781,7 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     // InferencePool + EPP + SLO
     let mut pl: Vec<Line> = Vec::new();
     if s.pools.is_empty() {
-        pl.push(Line::from(Span::styled("(InferencePool 없음)", Style::default().fg(C_DIM()))));
+        pl.push(Line::from(Span::styled("(no InferencePool)", Style::default().fg(C_DIM()))));
     }
     for p in &s.pools {
         pl.push(Line::from(vec![
@@ -812,14 +850,14 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     if al.is_empty() {
         al.push(Line::from(Span::styled("  (no accelerator metrics)", Style::default().fg(C_DIM()))));
     }
-    f.render_widget(Paragraph::new(al).block(block("Accelerators (종류·노드별)")), rows[0]);
+    f.render_widget(Paragraph::new(al).block(block("Accelerators (by kind / node)")), rows[0]);
 
     // Inference: EPP 경로 + 풀 endpoints + scorers + autoscale
     let mut pl: Vec<Line> = Vec::new();
     pl.push(Line::from(vec![
-        Span::styled("EPP 경로 ", Style::default().fg(C_DIM())),
+        Span::styled("EPP path ", Style::default().fg(C_DIM())),
         Span::styled(
-            if s.epp_in_path { "InferencePool 경유 ●" } else { "우회 (HTTPRoute→Service 직접) ⚠" },
+            if s.epp_in_path { "via InferencePool ●" } else { "bypassed (HTTPRoute→Service) ⚠" },
             Style::default().fg(if s.epp_in_path { C_OK() } else { C_WARN() }),
         ),
     ]));
@@ -854,7 +892,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     let mut title = "Detail";
 
     if let Some(a) = app.selected_accel() {
-        title = "Accelerator detail · esc 닫기";
+        title = "Accelerator detail · esc to close";
         let mempct = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
         lines.push(kv("kind", a.kind.label(), kind_color(a.kind)));
         lines.push(kv("id / node", &format!("{} / {}", a.id, a.node), Color::White));
@@ -878,7 +916,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(kv("health", &health.0, health.1));
         lines.push(kv("model/pod", if a.busy_model.is_empty() { "(idle)" } else { a.busy_model.as_str() }, C_ACC()));
     } else if let Some(m) = app.selected_model() {
-        title = "Model detail · esc 닫기";
+        title = "Model detail · esc to close";
         lines.push(kv("model", &m.name, Color::White));
         lines.push(kv("status", &m.status, if m.ready > 0 { C_OK() } else { C_DIM() }));
         lines.push(kv("replicas", &format!("{}/{} (ready/desired)", m.ready, m.desired), Color::White));
@@ -887,7 +925,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled("inference (vLLM)", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))));
         lines.push(kv("  running / waiting", &format!("{} / {}", fmt_opt(m.running), fmt_opt(m.waiting)), Color::White));
-        lines.push(kv("  KV cache", &m.kv.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or("– (vLLM 메트릭 미수집)".into()), Color::White));
+        lines.push(kv("  KV cache", &m.kv.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or("- (no vLLM metrics)".into()), Color::White));
         lines.push(kv("  tokens/s", &m.tps.map(|x| format!("{:.1}", x)).unwrap_or("–".into()), Color::White));
         lines.push(kv("  TTFT p95", &m.ttft.map(|x| format!("{:.0} ms", x * 1000.0)).unwrap_or("–".into()), Color::White));
         lines.push(Line::from(""));
@@ -895,14 +933,14 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(kv("pods", &if pods.is_empty() { "(none)".to_string() } else { pods.join(", ") }, C_DIM()));
         lines.push(Line::from(Span::styled("  s = scale up/down", Style::default().fg(C_DIM()))));
     } else if let Some(p) = app.selected_pod() {
-        title = "Pod detail · esc 닫기";
+        title = "Pod detail · esc to close";
         lines.push(kv("pod", &p.name, Color::White));
         lines.push(kv("phase", &p.phase, if p.phase == "Running" { C_OK() } else { C_DIM() }));
         lines.push(kv("ready", &p.ready, Color::White));
         lines.push(kv("node", &p.node, Color::White));
         lines.push(kv("restarts", &p.restarts.to_string(), if p.restarts > 0 { C_WARN() } else { Color::White }));
     } else {
-        lines.push(Line::from(Span::styled("선택된 항목 없음", Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled("no item selected", Style::default().fg(C_DIM()))));
     }
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block(title)), area);
@@ -986,7 +1024,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(C_ACC()),
         ),
         Span::styled(
-            if any { "" } else { "· 값 없음: EPP 경유 트래픽+vLLM 메트릭 필요" },
+            if any { "" } else { "· no data: needs EPP-path traffic + vLLM metrics" },
             Style::default().fg(C_WARN()),
         ),
     ]);
@@ -1001,13 +1039,13 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     if app.snap.perf_rows.is_empty() {
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled("모델별 성능 데이터 없음", Style::default().fg(C_DIM()))),
+                Line::from(Span::styled("no per-model perf data", Style::default().fg(C_DIM()))),
                 Line::from(Span::styled(
-                    "EPP 경유 트래픽 + vLLM 메트릭 노출 시 모델별로 표시됩니다.",
+                    "shows per model once EPP-path traffic + vLLM metrics are present.",
                     Style::default().fg(C_DIM()),
                 )),
             ])
-            .block(block("모델별 성능 (p95) · 구간별 지연·토큰·처리량")),
+            .block(block("Per-model perf (p95) · latency / tokens / throughput")),
             bodyc[0],
         );
     } else {
@@ -1043,7 +1081,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         )
         .header(hrow(&["MODEL", "req/s", "tok/s", "TTFT", "TPOT", "E2E", "inTk", "outTk"]))
         .column_spacing(1)
-        .block(block("모델별 성능 (p95) · 지연은 ms/s"));
+        .block(block("Per-model perf (p95) · latency in ms/s"));
         f.render_widget(mt, bodyc[0]);
     }
 
@@ -1051,7 +1089,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     let mut ql: Vec<Line> = Vec::new();
     let maxq = app.snap.pod_queues.iter().map(|(_, q)| *q).fold(1.0, f64::max);
     if app.snap.pod_queues.is_empty() {
-        ql.push(Line::from(Span::styled("per-pod 큐 데이터 없음", Style::default().fg(C_DIM()))));
+        ql.push(Line::from(Span::styled("no per-pod queue data", Style::default().fg(C_DIM()))));
     } else {
         for (pod, q) in app.snap.pod_queues.iter().take(8) {
             let mut sp = vec![Span::styled(format!("{:<20} ", truncw(pod, 20)), Style::default().fg(Color::White))];
@@ -1060,7 +1098,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             ql.push(Line::from(sp));
         }
     }
-    f.render_widget(Paragraph::new(ql).block(block("요청 분배 (per-pod queue, 절대값)")), bodyc[1]);
+    f.render_widget(Paragraph::new(ql).block(block("request distribution (per-pod queue, absolute)")), bodyc[1]);
 }
 
 // ── Launch (모델 카탈로그 + 배치 솔버, 읽기전용) ────────
@@ -1071,7 +1109,7 @@ fn view_launch(f: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     // 가속기 재고
-    let mut inv: Vec<Span> = vec![Span::styled("가속기 여유(free/total): ", Style::default().fg(C_DIM()))];
+    let mut inv: Vec<Span> = vec![Span::styled("accelerators free/total: ", Style::default().fg(C_DIM()))];
     for (res, total, used) in &app.snap.inventory {
         let free = (total - used).max(0);
         let short = res.split('/').last().unwrap_or(res);
@@ -1080,7 +1118,7 @@ fn view_launch(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(if free > 0 { C_OK() } else { C_DIM() }),
         ));
     }
-    f.render_widget(Paragraph::new(Line::from(inv)).block(block("Launch · 배포 가능 모델 (읽기전용)")), rows[0]);
+    f.render_widget(Paragraph::new(Line::from(inv)).block(block("Launch · deployable models (read-only)")), rows[0]);
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -1103,7 +1141,7 @@ fn view_launch(f: &mut Frame, area: Rect, app: &App) {
         .header(hrow(&["MODEL", "ROLE"]))
         .row_highlight_style(hl_style())
         .highlight_symbol("▎")
-        .block(block("Catalog · ↑↓ 선택"));
+        .block(block("Catalog · up/dn to select"));
     let mut st = TableState::default();
     st.select(Some(app.selected));
     f.render_stateful_widget(lt, body[0], &mut st);
@@ -1132,27 +1170,27 @@ fn view_launch(f: &mut Frame, area: Rect, app: &App) {
         }
         pl.push(Line::from(""));
         pl.push(Line::from(Span::styled(
-            "읽기전용 — 실제 배포(ModelService)는 다음 단계",
+            "read-only — actual deploy (ModelService) is the next step",
             Style::default().fg(C_DIM()),
         )));
     } else {
-        pl.push(Line::from(Span::styled("← 모델을 선택하세요", Style::default().fg(C_DIM()))));
+        pl.push(Line::from(Span::styled("← select a model", Style::default().fg(C_DIM()))));
     }
-    f.render_widget(Paragraph::new(pl).block(block("배치 후보 × 라이브 재고")), body[1]);
+    f.render_widget(Paragraph::new(pl).block(block("placements × live inventory")), body[1]);
 }
 
 // ── 진단 ───────────────────────────────────────────────
 fn diagnose(s: &Snapshot) -> (String, Color) {
     let serving = s.models.iter().filter(|m| m.ready > 0).count();
     if s.accel.is_empty() && serving == 0 {
-        return ("⚠ 가속기 메트릭 없음 + 서빙 모델 없음 — Prometheus/모델 상태 점검".into(), C_BAD());
+        return ("⚠ no accelerator metrics + no serving models — check Prometheus / model state".into(), C_BAD());
     }
     if serving == 0 {
-        return ("⚠ 서빙 중인 모델 0 — Models 뷰에서 's'로 기동 (백엔드 없음)".into(), C_WARN());
+        return ("⚠ 0 models serving — press 's' in Models to start one (no backend)".into(), C_WARN());
     }
     let busy = s.accel.iter().filter(|a| a.util > 80.0).count();
     if busy > 0 {
-        return (format!("● {} 모델 서빙 중, 가속기 {}개 고부하(>80%)", serving, busy), C_OK());
+        return (format!("● {} model(s) serving, {} accelerator(s) hot (>80%)", serving, busy), C_OK());
     }
-    (format!("● {} 모델 서빙 중, 가속기 여유", serving), C_OK())
+    (format!("● {} model(s) serving, accelerators have headroom", serving), C_OK())
 }

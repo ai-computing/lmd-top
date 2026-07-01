@@ -168,7 +168,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                                 .stdout(Stdio::null())
                                 .stderr(Stdio::null())
                                 .spawn();
-                            app.toast = Some(format!("Grafana: {}  (브라우저에서 열기 · llm-models 대시보드)", base));
+                            app.toast = Some(format!("Grafana: {}  (open in browser · llm-models dashboard)", base));
                             terminal.clear().ok(); // 혹시 모를 잔상 제거 → 전체 재그리기
                         }
                         KeyCode::Char('/') => app.start_filter(),
@@ -189,10 +189,10 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                                         app.toast =
                                             Some(format!("scaled {} → {}", name, target))
                                     }
-                                    Err(e) => app.toast = Some(format!("scale 실패: {}", e)),
+                                    Err(e) => app.toast = Some(format!("scale failed: {}", e)),
                                 }
                             } else {
-                                app.toast = Some("scale: Models/Overview 뷰에서 모델 선택".into());
+                                app.toast = Some("scale: select a model in Models/Overview".into());
                             }
                         }
                         _ => {
