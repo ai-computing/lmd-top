@@ -2,6 +2,11 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.19.0]
+### Added — soft(Catppuccin Mocha) 테마
+- 거친 ANSI-16(순수 Red/Yellow) 대신 검증된 저채도 팔레트(Catppuccin Mocha)를 **테마 3 'soft'** 로 추가 — 눈편함·미감. 기본 테마(0)는 그대로라 무회귀. `t` 로 순환(default→high-contrast→colorblind→soft). truecolor 터미널 권장.
+- severity/chrome/prefill·decode/vendor(kind) 색 전반에 soft 팔레트 매핑.
+
 ## [0.18.5]
 ### Changed — Perf 디바이스 패널 가변 높이 + 무언의 잘림 방지
 - 상단 디바이스 패널 높이를 대수에 맞춰 가변(6~18줄): 소형 클러스터는 컴팩트, 대형은 상한.

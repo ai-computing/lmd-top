@@ -10,37 +10,38 @@ use ratatui::style::Color;
 fn th() -> usize {
     crate::app::theme()
 }
+// 테마 3 "soft" = Catppuccin Mocha 팔레트(널리 검증된 저채도·눈편함 팔레트). truecolor 터미널용.
 #[allow(non_snake_case)]
 pub(crate) fn C_OK() -> Color {
-    match th() { 1 => Color::LightGreen, 2 => Color::Rgb(0, 114, 178), _ => Color::Green }
+    match th() { 1 => Color::LightGreen, 2 => Color::Rgb(0, 114, 178), 3 => Color::Rgb(166, 227, 161), _ => Color::Green }
 }
 #[allow(non_snake_case)]
 pub(crate) fn C_WARN() -> Color {
-    match th() { 1 => Color::LightYellow, 2 => Color::Rgb(230, 159, 0), _ => Color::Yellow }
+    match th() { 1 => Color::LightYellow, 2 => Color::Rgb(230, 159, 0), 3 => Color::Rgb(249, 226, 175), _ => Color::Yellow }
 }
 #[allow(non_snake_case)]
 pub(crate) fn C_BAD() -> Color {
-    match th() { 1 => Color::LightRed, 2 => Color::Rgb(213, 94, 0), _ => Color::Red }
+    match th() { 1 => Color::LightRed, 2 => Color::Rgb(213, 94, 0), 3 => Color::Rgb(243, 139, 168), _ => Color::Red }
 }
 #[allow(non_snake_case)]
 pub(crate) fn C_DIM() -> Color {
-    match th() { 1 => Color::Gray, _ => Color::DarkGray }
+    match th() { 1 => Color::Gray, 3 => Color::Rgb(127, 132, 156), _ => Color::DarkGray }
 }
 #[allow(non_snake_case)]
 pub(crate) fn C_TRACK() -> Color {
-    Color::Indexed(236)
+    match th() { 3 => Color::Rgb(69, 71, 90), _ => Color::Indexed(236) }
 }
 #[allow(non_snake_case)]
 pub(crate) fn C_HEAD() -> Color {
-    match th() { 1 => Color::White, _ => Color::Indexed(244) }
+    match th() { 1 => Color::White, 3 => Color::Rgb(166, 173, 200), _ => Color::Indexed(244) }
 }
 #[allow(non_snake_case)]
 pub(crate) fn C_ACC() -> Color {
-    match th() { 1 => Color::LightCyan, 2 => Color::Rgb(86, 180, 233), _ => Color::Cyan }
+    match th() { 1 => Color::LightCyan, 2 => Color::Rgb(86, 180, 233), 3 => Color::Rgb(137, 220, 235), _ => Color::Cyan }
 }
 #[allow(non_snake_case)]
 pub(crate) fn C_HL() -> Color {
-    Color::Indexed(238)
+    match th() { 3 => Color::Rgb(49, 50, 68), _ => Color::Indexed(238) }
 }
 
 pub(crate) const FRAC: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
@@ -99,6 +100,14 @@ pub(crate) fn temp_color(t: f64) -> Color {
     }
 }
 pub(crate) fn kind_color(k: AccelKind) -> Color {
+    if th() == 3 {
+        // Catppuccin: green / mauve / sky — 벤더 정체성색을 팔레트와 조화.
+        return match k {
+            AccelKind::Gpu => Color::Rgb(166, 227, 161),
+            AccelKind::Rbln => Color::Rgb(203, 166, 247),
+            AccelKind::Rngd => Color::Rgb(137, 220, 235),
+        };
+    }
     match k {
         AccelKind::Gpu => Color::Green,
         AccelKind::Rbln => Color::Magenta,
@@ -108,11 +117,11 @@ pub(crate) fn kind_color(k: AccelKind) -> Color {
 /// prefill/decode 구간색 — 테마·색맹 대응(Okabe-Ito 계열). Perf 테이블 phase 구분용.
 #[allow(non_snake_case)]
 pub(crate) fn C_PREFILL() -> Color {
-    match th() { 1 => Color::LightCyan, 2 => Color::Rgb(86, 180, 233), _ => Color::Cyan }
+    match th() { 1 => Color::LightCyan, 2 => Color::Rgb(86, 180, 233), 3 => Color::Rgb(137, 180, 250), _ => Color::Cyan }
 }
 #[allow(non_snake_case)]
 pub(crate) fn C_DECODE() -> Color {
-    match th() { 1 => Color::LightMagenta, 2 => Color::Rgb(204, 121, 167), _ => Color::Magenta }
+    match th() { 1 => Color::LightMagenta, 2 => Color::Rgb(204, 121, 167), 3 => Color::Rgb(203, 166, 247), _ => Color::Magenta }
 }
 
 pub(crate) const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
