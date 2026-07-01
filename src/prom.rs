@@ -26,6 +26,20 @@ pub async fn query(base: &str, promql: &str) -> Result<Vec<Series>> {
     parse(&body)
 }
 
+/// 라벨의 값 목록 조회(`/api/v1/label/<label>/values`). label="__name__" → 전체 메트릭 이름,
+/// label="job" → 스크레이프 잡(=exporter) 목록. doctor(전수조사)용.
+pub async fn label_values(base: &str, label: &str) -> Result<Vec<String>> {
+    let body = http_get(base, &format!("/api/v1/label/{}/values", label)).await?;
+    let v: serde_json::Value = serde_json::from_str(&body)?;
+    if v["status"] != "success" {
+        return Err(anyhow!("prometheus status != success"));
+    }
+    Ok(v["data"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default())
+}
+
 async fn http_get(base: &str, path: &str) -> Result<String> {
     let host = base.trim_start_matches("http://").trim_end_matches('/');
     let fut = async {

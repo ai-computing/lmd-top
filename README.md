@@ -125,6 +125,7 @@ lmd-top                       # launch the TUI (permission mode: observe)
 lmd-top --mode admin          # allow scale/rollout actions (see Permission modes)
 lmd-top --snapshot            # collect once, print text (headless / debug)   [alias: -s]
 lmd-top --json                # collect once, print machine-readable agent state (JSON)
+lmd-top --doctor              # survey Prometheus: exporters, metric coverage, gaps, new signals
 lmd-top --render              # render every view to text via TestBackend (CI / verification)
 
 # point at a different cluster / namespace
@@ -153,6 +154,16 @@ Admin+ mutating actions (e.g. `s` scale) ask for a `y`/`n` confirmation before a
 status, `diagnosis`, `alerts`, and the available `actions` (each with a `risk` level and
 `requires_confirmation` flag) without scraping the terminal. `NaN` metrics serialize as
 `null`. This is the machine-readable half of a human-in-the-loop console.
+
+### Diagnostics (`--doctor`)
+
+`lmd-top --doctor` surveys Prometheus and prints: the accelerator/host **exporters**
+detected (job labels), a **coverage table** of every metric lmd-top reads (present/absent,
+with the concrete impact of each missing one — e.g. "EPP metrics missing → EPP views
+empty", "FB_TOTAL missing → unified-mem falls back to host"), and a list of **unused
+accelerator metrics present in the cluster** — candidate new signals to wire. Use it to
+answer *"why is this view empty?"* and *"what new metrics does this hardware expose?"*
+without hand-writing PromQL.
 
 ### Keybindings
 

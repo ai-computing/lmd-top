@@ -6,6 +6,7 @@ mod agent;
 mod app;
 mod catalog;
 mod collect;
+mod doctor;
 mod kube;
 mod prom;
 mod ui;
@@ -31,6 +32,12 @@ use std::time::Duration;
 async fn main() -> Result<()> {
     let cfg = Config::default();
     let args: Vec<String> = std::env::args().collect();
+
+    // 메트릭 전수조사 + 갭 분석(왜 뷰가 비었나 진단).
+    if args.iter().any(|a| a == "--doctor") {
+        doctor::run(&cfg).await;
+        return Ok(());
+    }
 
     // 기계가독 상태(agent) — --json (또는 --snapshot --json). 1회 수집 후 JSON 출력.
     if args.iter().any(|a| a == "--json") {
