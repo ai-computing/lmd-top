@@ -670,9 +670,9 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
             // 정직한 문구: +/- 는 가중치를 조정하고 infl=상대 점유율(weight share)을 보여줄 뿐,
             // 실제 라우팅 결정 재시뮬이 아님(그건 per-endpoint score 필요 → 인프라 대기).
             let title = if simulating {
-                format!("EPP scorers · +/- weight (local, not applied) · infl=share{}", count_suffix(app.selected, order.len()))
+                format!("EPP scorers · +/- weight (sim) · infl=share{}", count_suffix(app.selected, order.len()))
             } else {
-                format!("EPP scorers · +/- adjust weight · infl=weight share{}", count_suffix(app.selected, order.len()))
+                format!("EPP scorers · +/- weight · infl=share{}", count_suffix(app.selected, order.len()))
             };
             let t = Table::new(srows, [Constraint::Min(14), Constraint::Length(3), Constraint::Length(9), Constraint::Length(4)])
                 .header(hrow(&["SCORER", "WT", "WEIGHT", "infl"]))
