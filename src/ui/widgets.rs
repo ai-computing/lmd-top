@@ -36,9 +36,12 @@ pub(crate) fn truncw(s: &str, max: usize) -> String {
 /// 점 게이지 — 채움=색 점(●), 여백=흑린 점(·). 각 점이 이산 눈금. 폰트-안전.
 pub(crate) fn dot_bar(pct: f64, cells: usize, color: Color) -> Line<'static> {
     let filled = ((pct.clamp(0.0, 100.0) / 100.0) * cells as f64).round() as usize;
+    let tick_step = ((cells as f64) * 0.10).round() as usize; // 10% 눈금(넓은 바에서만)
     let mut sp: Vec<Span> = Vec::with_capacity(cells);
     for i in 0..cells {
-        if i < filled {
+        if tick_step >= 2 && i > 0 && i % tick_step == 0 {
+            sp.push(Span::styled("│".to_string(), Style::default().fg(Color::Indexed(244))));
+        } else if i < filled {
             sp.push(Span::styled("●".to_string(), Style::default().fg(color)));
         } else {
             sp.push(Span::styled("·".to_string(), Style::default().fg(C_TRACK())));
@@ -75,7 +78,7 @@ pub(crate) fn stacked_bar(segments: &[(f64, Color)], total: f64, width: usize) -
         return Vec::new();
     }
     let used: f64 = segments.iter().map(|(v, _)| *v).sum();
-    let tick_step = ((width as f64) * 0.05).round() as usize;
+    let tick_step = ((width as f64) * 0.10).round() as usize; // 10% 눈금
     let mut spans: Vec<Span> = Vec::with_capacity(width);
     for i in 0..width {
         if tick_step >= 2 && i > 0 && i % tick_step == 0 {
