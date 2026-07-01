@@ -2,6 +2,11 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.18.2]
+### Changed — Nodes/device 행 컬럼 정렬
+- device 행(accel_brief) GB 필드 고정폭 + unified(∪) 슬롯 예약 → 온도/전력/모델이 열 정렬(Nodes 트리·Node 상세 공통).
+- 노드 부모 행 mem 필드 고정폭 → load 열 정렬.
+
 ## [0.18.1]
 ### Changed — Overview 가속기 행 정렬
 - 벤더/노드별 가속기 행의 VRAM(GB) 필드를 고정폭(우측정렬)으로 → 뒤따르는 인라인 트렌드 스파크라인이 열 정렬. `trend` 라벨 추가.
