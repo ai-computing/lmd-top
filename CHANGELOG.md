@@ -2,6 +2,12 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.18.0]
+### Changed — Overview 정보 위계 재배치
+- 판정(Diagnosis)을 **히어로 카드 바로 밑(Status)** 으로 이동 — 맨 아래에서 위로. "지금 문제 있나?"에 즉답.
+- 배치 순서를 위계대로: **Cluster(용량·부하) → Status(판정) → Accelerators → Inference(서빙경로) → Models(리스트)**.
+- Overview 의 Models 표에 `⏎ detail` 힌트.
+
 ## [0.17.0]
 ### Changed — 은은한 애니메이션 + 패널 시스템 기반
 - **애니메이션 톤다운·믹스**(눈 안 아프게, 테마-안전한 전경색 페이드): 뷰 전환=텍스트 dim→원색 잉크인(150ms), 상세 진입=짧은 coalesce(줌인 느낌, 180ms), 신규 알림=요약 바 전경 빨강→원색(450ms). 배경 전체 플래시/스캐터 제거.

@@ -978,11 +978,20 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     }
     let cluster_h = cluster_lines.len() as u16 + 2; // 내용 줄 + 테두리(2)
 
+    // 위계(눈이 가는 순서 = 중요도): 히어로(용량·부하) → 판정(문제?) → 가속기 → 서빙경로 → 모델 리스트.
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(cluster_h), Constraint::Length(6), Constraint::Length(5), Constraint::Min(4), Constraint::Length(3)])
+        .constraints([Constraint::Length(cluster_h), Constraint::Length(3), Constraint::Length(6), Constraint::Length(5), Constraint::Min(4)])
         .split(area);
     f.render_widget(Paragraph::new(cluster_lines).block(block("Cluster")), rows[0]);
+
+    // 판정(plain-language verdict) — 히어로 바로 밑으로 올려 "지금 문제 있나?"에 즉답.
+    let (txt, col) = diagnose(s);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(truncw(&txt, rows[1].width.saturating_sub(2) as usize), Style::default().fg(col).add_modifier(Modifier::BOLD))))
+            .block(block("Status")),
+        rows[1],
+    );
 
     // 가속기: (종류,노드)별 집계 — 한눈에 + 절대 메모리(GB) + health 아이콘
     let mut groups: Vec<(AccelKind, String, usize, f64, f64, f64, bool, bool, String)> = Vec::new();
@@ -1016,7 +1025,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     if al.is_empty() {
         al.push(Line::from(Span::styled("  (no accelerator metrics)", Style::default().fg(C_DIM()))));
     }
-    f.render_widget(Paragraph::new(al).block(block("Accelerators (by kind / node)")), rows[1]);
+    f.render_widget(Paragraph::new(al).block(block("Accelerators (by kind / node)")), rows[2]);
 
     // Inference: EPP 경로 + 풀 endpoints + scorers + autoscale
     let mut pl: Vec<Line> = Vec::new();
@@ -1038,18 +1047,11 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         let names: Vec<String> = cfg.scorers.iter().map(|(n, w)| format!("{}·{:.0}", n.replace("-scorer", ""), w)).collect();
         pl.push(Line::from(Span::styled(format!("scorers: {}", names.join("  ")), Style::default().fg(C_DIM()))));
     }
-    f.render_widget(Paragraph::new(pl).block(block("Inference (EPP / InferencePool)")), rows[2]);
+    f.render_widget(Paragraph::new(pl).block(block("Inference (EPP / InferencePool)")), rows[3]);
 
     let mut st = TableState::default();
     st.select(Some(app.selected));
-    f.render_stateful_widget(models_table(app, "Models"), rows[3], &mut st);
-
-    let (txt, col) = diagnose(s);
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(truncw(&txt, rows[4].width.saturating_sub(2) as usize), Style::default().fg(col))))
-            .block(block("Diagnosis")),
-        rows[4],
-    );
+    f.render_stateful_widget(models_table(app, "Models · ⏎ detail"), rows[4], &mut st);
 }
 
 // ── Detail (drill-down) ────────────────────────────────
