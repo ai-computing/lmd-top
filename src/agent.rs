@@ -70,6 +70,7 @@ struct Acc {
     util_pct: f64,
     mem_used_gb: f64,
     mem_total_gb: f64,
+    unified_mem: bool, // true → mem is the host-shared unified pool (GB10 등)
     temp_c: f64,
     power_w: f64,
     alive: bool,
@@ -165,6 +166,7 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             util_pct: a.util,
             mem_used_gb: a.mem_used_gb,
             mem_total_gb: a.mem_total_gb,
+            unified_mem: a.unified_mem,
             temp_c: a.temp,
             power_w: a.power,
             alive: a.alive,

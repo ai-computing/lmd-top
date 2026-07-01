@@ -204,6 +204,7 @@ fn help_overlay(f: &mut Frame) {
             Span::styled("low", Style::default().fg(C_OK())), Span::raw(" "),
             Span::styled("mid", Style::default().fg(C_WARN())), Span::raw(" "),
             Span::styled("high", Style::default().fg(C_BAD())),
+            Span::styled("   ∪ = unified mem (GB10 등, CPU·GPU 공유)", Style::default().fg(C_DIM())),
         ]),
         Line::from(vec![
             Span::styled("  vendor: ", Style::default().fg(C_DIM())),
@@ -741,7 +742,7 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
             util.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
             let mut mem = grad_bar(mempct, 7).spans;
             mem.push(Span::styled(
-                format!(" {:.0}/{:.0}GB", a.mem_used_gb, a.mem_total_gb),
+                format!(" {:.0}/{:.0}GB{}", a.mem_used_gb, a.mem_total_gb, if a.unified_mem { "∪" } else { "" }),
                 Style::default().fg(C_DIM()),
             ));
             let (hg, hc) = if !a.alive {
@@ -1333,7 +1334,17 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             ]),
             Line::from(""),
             gauge_row("compute", a.util, &format!("{:.0} %", a.util), util_color(a.util), barw),
-            gauge_row("VRAM", mempct, &format!("{:.1} / {:.1} GB  ({:.0}%)", a.mem_used_gb, a.mem_total_gb, mempct), mem_color(mempct), barw),
+            gauge_row(
+                if a.unified_mem { "mem∪" } else { "VRAM" },
+                mempct,
+                &format!(
+                    "{:.1} / {:.1} GB  ({:.0}%){}",
+                    a.mem_used_gb, a.mem_total_gb, mempct,
+                    if a.unified_mem { "  unified w/ host" } else { "" }
+                ),
+                mem_color(mempct),
+                barw,
+            ),
             gauge_row("temp", a.temp.min(100.0), &format!("{:.0} °C", a.temp), temp_color(a.temp), barw),
         ];
         f.render_widget(Paragraph::new(lines).block(block(&format!("Accelerator{}", nav))), rows[0]);

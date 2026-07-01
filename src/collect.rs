@@ -66,12 +66,19 @@ pub struct Accel {
     pub busy_model: String, // exported_pod 등
     pub alive: bool,        // furiosa_npu_alive / RBLN HEALTH
     pub throttle: f64,      // furiosa throttling events (>0 = 스로틀링)
+    pub unified_mem: bool,  // GB10/GH200 등 CPU·GPU 통합 메모리 → mem 은 호스트(노드) 풀
 }
 impl Accel {
     /// 표시용 계열/모델 라벨 — 감지된 모델이 있으면 그것, 없으면 벤더 라벨.
     pub fn disp(&self) -> &str {
         if self.model.is_empty() { self.kind.label() } else { self.model.as_str() }
     }
+}
+
+/// 통합 메모리(Grace 계열 superchip: GB10/GH200/GB200/GB300) 여부 — 별도 VRAM 없이 호스트와 공유.
+fn is_unified(model: &str) -> bool {
+    let m = model.to_uppercase();
+    m.starts_with("GB10") || m.starts_with("GH200") || m.starts_with("GB200") || m.starts_with("GB300")
 }
 
 #[derive(Clone, Default)]
@@ -393,6 +400,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
             busy_model: String::new(),
             alive: f_alive.get(uuid).map(|x| x.value > 0.0).unwrap_or(true),
             throttle: f_thr.get(uuid).map(|x| x.value).unwrap_or(0.0),
+            unified_mem: false,
         });
     }
     // RBLN
@@ -417,6 +425,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
             busy_model: s.l("exported_pod").to_string(),
             alive: r_health.get(uuid).map(|x| x.value == 0.0).unwrap_or(true),
             throttle: 0.0,
+            unified_mem: false,
         });
     }
     // NVIDIA DCGM — 모델명/총메모리는 하드코딩하지 않고 메트릭에서 자동 감지.
@@ -427,11 +436,14 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
     let g_pow = map_by(ok(g_pow), "gpu");
     for s in &g_util {
         let gpu = s.l("gpu");
-        // 총 VRAM: DCGM_FI_DEV_FB_TOTAL(MiB) → GB. 없으면 0(표시 시 – 처리).
+        let model = gpu_model(s.l("modelName")); // "NVIDIA GB10" → "GB10"
+        let unified = is_unified(&model);
+        // 총 VRAM: DCGM_FI_DEV_FB_TOTAL(MiB) → GB. 통합 메모리(GB10 등)는 FB 가 0/무의미 →
+        // 아래에서 노드(호스트) 메모리로 backfill.
         let mem_total_gb = g_mt.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0);
         accel.push(Accel {
             kind: AccelKind::Gpu,
-            model: gpu_model(s.l("modelName")), // "NVIDIA GB10" → "GB10"
+            model,
             id: format!("gpu{}", gpu),
             node: s.l("Hostname").to_string(),
             util: norm_pct(s.value),
@@ -442,6 +454,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
             busy_model: String::new(),
             alive: true,
             throttle: 0.0,
+            unified_mem: unified,
         });
     }
     accel.sort_by(|a, b| (a.kind as u8, &a.node, &a.id).cmp(&(b.kind as u8, &b.node, &b.id)));
@@ -486,6 +499,16 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
         });
     }
     nodes.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // 통합 메모리(GB10 등): 별도 VRAM 이 없으므로 노드(호스트) 메모리 풀을 mem 으로 채운다.
+    // DCGM FB_TOTAL 이 유효하면(>0) 그대로 두고, 0/무효일 때만 호스트 값으로 backfill.
+    for a in accel.iter_mut().filter(|a| a.unified_mem && a.mem_total_gb <= 0.0) {
+        if let Some(n) = nodes.iter().find(|n| n.name == a.node) {
+            a.mem_used_gb = n.mem_used_gb;
+            a.mem_total_gb = n.mem_total_gb;
+        }
+    }
+
     (accel, nodes)
 }
 
