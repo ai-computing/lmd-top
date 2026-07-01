@@ -52,12 +52,17 @@ pub struct Accel {
     pub throttle: f64,      // furiosa throttling events (>0 = 스로틀링)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct NodeInfo {
     pub name: String,
     pub load1: f64,
     pub mem_used_gb: f64,
     pub mem_total_gb: f64,
+    pub cpu_pct: f64,
+    pub ready: bool,
+    pub cordoned: bool,
+    pub pressure: bool, // Memory/Disk/PID pressure 중 하나라도
+    pub version: String,
 }
 
 #[derive(Clone, Default)]
@@ -362,24 +367,46 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     });
 
     // ---------- Nodes ----------
-    let node_ip = node_ip_map(cfg, &mut warn).await; // ip -> name
+    let (node_ip, node_meta) = node_kube(&mut warn).await; // ip->name, name->(ready,cordoned,pressure,ver)
     let n_load = q(cfg, "node_load1", &mut warn).await;
     let n_mt = map_by(q(cfg, "node_memory_MemTotal_bytes", &mut warn).await, "instance");
     let n_ma = map_by(q(cfg, "node_memory_MemAvailable_bytes", &mut warn).await, "instance");
-    for s in &n_load {
-        let inst = s.l("instance");
+    let n_cpu = map_by(
+        q(cfg, "100 - (avg by (instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)", &mut warn).await,
+        "instance",
+    );
+    // prom 지표를 노드 name 기준으로 매핑(instance→name)
+    let resolve = |inst: &str| -> String {
         let ip = inst.split(':').next().unwrap_or(inst);
-        let name = node_ip
-            .get(ip)
-            .cloned()
-            .unwrap_or_else(|| ip.to_string());
-        let mt = n_mt.get(inst).map(|x| x.value).unwrap_or(0.0);
-        let ma = n_ma.get(inst).map(|x| x.value).unwrap_or(0.0);
+        node_ip.get(ip).cloned().unwrap_or_else(|| ip.to_string())
+    };
+    let mut load_by: BTreeMap<String, f64> = BTreeMap::new();
+    let mut inst_by: BTreeMap<String, String> = BTreeMap::new();
+    for s in &n_load {
+        let name = resolve(s.l("instance"));
+        inst_by.insert(name.clone(), s.l("instance").to_string());
+        load_by.insert(name, s.value);
+    }
+    // 전체 노드는 kube(node_meta) 기준 — cordoned/exporter 없는 노드도 표시
+    let mut names: Vec<String> = node_meta.keys().cloned().collect();
+    if names.is_empty() {
+        names = load_by.keys().cloned().collect();
+    }
+    for name in names {
+        let inst = inst_by.get(&name).cloned().unwrap_or_default();
+        let mt = n_mt.get(inst.as_str()).map(|x| x.value).unwrap_or(0.0);
+        let ma = n_ma.get(inst.as_str()).map(|x| x.value).unwrap_or(0.0);
+        let meta = node_meta.get(&name).cloned().unwrap_or_default();
         snap.nodes.push(NodeInfo {
-            name,
-            load1: s.value,
+            load1: load_by.get(&name).copied().unwrap_or(f64::NAN),
             mem_used_gb: to_gb(mt - ma),
             mem_total_gb: to_gb(mt),
+            cpu_pct: n_cpu.get(inst.as_str()).map(|x| x.value).unwrap_or(f64::NAN),
+            ready: meta.0,
+            cordoned: meta.1,
+            pressure: meta.2,
+            version: meta.3,
+            name,
         });
     }
     snap.nodes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -562,8 +589,11 @@ fn norm_pct(v: f64) -> f64 {
     }
 }
 
-async fn node_ip_map(cfg: &Config, warn: &mut Vec<String>) -> BTreeMap<String, String> {
-    let mut m = BTreeMap::new();
+type NodeMeta = (bool, bool, bool, String); // (ready, cordoned, pressure, version)
+
+async fn node_kube(warn: &mut Vec<String>) -> (BTreeMap<String, String>, BTreeMap<String, NodeMeta>) {
+    let mut ip = BTreeMap::new();
+    let mut meta = BTreeMap::new();
     match kube::get_json(&["get", "nodes", "-o", "json"]).await {
         Ok(v) => {
             if let Some(items) = v["items"].as_array() {
@@ -572,19 +602,37 @@ async fn node_ip_map(cfg: &Config, warn: &mut Vec<String>) -> BTreeMap<String, S
                     if let Some(addrs) = it["status"]["addresses"].as_array() {
                         for a in addrs {
                             if a["type"] == "InternalIP" {
-                                if let Some(ip) = a["address"].as_str() {
-                                    m.insert(ip.to_string(), name.clone());
+                                if let Some(x) = a["address"].as_str() {
+                                    ip.insert(x.to_string(), name.clone());
                                 }
                             }
                         }
                     }
+                    let ver = it["status"]["nodeInfo"]["kubeletVersion"].as_str().unwrap_or("").to_string();
+                    let cordoned = it["spec"]["unschedulable"].as_bool().unwrap_or(false);
+                    let (mut ready, mut pressure) = (false, false);
+                    if let Some(cs) = it["status"]["conditions"].as_array() {
+                        for c in cs {
+                            let t = c["type"].as_str().unwrap_or("");
+                            let st = c["status"] == "True";
+                            match t {
+                                "Ready" => ready = st,
+                                "MemoryPressure" | "DiskPressure" | "PIDPressure" => {
+                                    if st {
+                                        pressure = true
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    meta.insert(name, (ready, cordoned, pressure, ver));
                 }
             }
         }
         Err(e) => warn.push(format!("kube nodes: {}", e)),
     }
-    let _ = cfg;
-    m
+    (ip, meta)
 }
 
 async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut Vec<String>) {

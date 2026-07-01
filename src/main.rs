@@ -175,7 +175,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                         KeyCode::Enter => app.toggle_detail(),
                         KeyCode::Char('o') => app.cycle_sort(),
                         KeyCode::Tab => app.next_tab(),
-                        KeyCode::Char(c @ '0'..='8') => {
+                        KeyCode::Char(c @ '0'..='9') => {
                             app.set_view_idx(c as usize - '0' as usize)
                         }
                         KeyCode::Up | KeyCode::Char('k') => app.move_sel(-1),
