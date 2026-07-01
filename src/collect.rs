@@ -623,16 +623,29 @@ pub async fn collect(cfg: &Config) -> Snapshot {
 
     // Perf: 구간별 지연 percentile·토큰분포·처리량 (EPP 정책용). 전부 graceful(NaN).
     let pp = &cfg.prom;
-    // 전부 vLLM 네이티브 메트릭(EPP 우회 여부와 무관하게 model-server 에서 export).
-    let (req_rate, err_rate, tps, prefix_hit, ttft_p95, e2e_p95) = tokio::join!(
+    // vLLM 네이티브 + Furiosa-LLM(K-EXAONE) 을 클러스터 전역으로 합산(엔진 무관 서빙 건강).
+    let (req_v, err_rate, tps_v, prefix_hit, ttft_v, e2e_p95, req_f, tps_f, ttft_f) = tokio::join!(
         qs1(pp, "sum(rate(vllm:request_success_total[1m]))"),
         qs1(pp, "sum(rate(vllm:request_success_total{finished_reason=\"abort\"}[1m]))"),
         qs1(pp, "sum(rate(vllm:generation_tokens_total[1m]))"),
         qs1(pp, "sum(rate(vllm:prefix_cache_hits_total[5m])) / sum(rate(vllm:prefix_cache_queries_total[5m]))"),
         qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(vllm:time_to_first_token_seconds_bucket[1m])))"),
         qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(vllm:e2e_request_latency_seconds_bucket[1m])))"),
+        qs1(pp, "sum(rate(furiosa_llm_request_success_total[1m]))"),
+        qs1(pp, "sum(rate(furiosa_llm_generation_tokens_total[1m]))"),
+        qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(furiosa_llm_time_to_first_token_seconds_bucket[1m])))"),
     );
-    snap.perf = Perf { req_rate, err_rate, tps, prefix_hit, ttft_p95, e2e_p95 };
+    // throughput 는 가산(NaN=0 취급, 둘 다 NaN 이면 NaN); TTFT 는 존재하는 값 우선(엔진 혼합 p95 는 근사).
+    let nadd = |a: f64, b: f64| if a.is_nan() && b.is_nan() { f64::NAN } else { (if a.is_nan() { 0.0 } else { a }) + (if b.is_nan() { 0.0 } else { b }) };
+    let nor = |a: f64, b: f64| if a.is_nan() { b } else { a };
+    snap.perf = Perf {
+        req_rate: nadd(req_v, req_f),
+        err_rate,
+        tps: nadd(tps_v, tps_f),
+        prefix_hit,
+        ttft_p95: nor(ttft_v, ttft_f),
+        e2e_p95,
+    };
 
     // per-model 성능 — service(=Deployment 이름) 기준 병합. Models 뷰와 동일 키.
     // 여기선 pm 만 채우고, 런칭된 모델 seed 는 collect_kube(모델 목록) 이후에 좌조인(아래).
@@ -659,6 +672,15 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_decode_time_seconds_bucket[1m])))", decode_p95);
     merge!("sum by (service)(rate(vllm:num_preemptions_total[1m]))", preempt);
 
+    // Furiosa-LLM (K-EXAONE 등): vllm:* 대신 furiosa_llm_* 로 노출, 같은 `service` 조인키.
+    // e2e/queue/prefill/decode/preempt 버킷은 미노출(NaN 유지). TPOT≈inter-token-latency.
+    merge!("sum by (service)(rate(furiosa_llm_request_success_total[1m]))", req);
+    merge!("sum by (service)(rate(furiosa_llm_generation_tokens_total[1m]))", tps);
+    merge!("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_time_to_first_token_seconds_bucket[1m])))", ttft_p95);
+    merge!("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_inter_token_latency_seconds_bucket[1m])))", tpot_p95);
+    merge!("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_request_prompt_tokens_bucket[1m])))", in_tok_p95);
+    merge!("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_request_generation_tokens_bucket[1m])))", out_tok_p95);
+
     for s in &p_ready {
         let name = s.l("name");
         snap.pools.push(Pool {
@@ -672,7 +694,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     }
 
     // vLLM model metrics (모델 서버에 vLLM ServiceMonitor + 트래픽 있을 때 채워짐)
-    let vllm = Vllm {
+    let mut vllm = Vllm {
         // service 라벨 = Deployment 이름(예: gemma4-rbln) → deploy 와 정확히 join.
         run: map_by(q(cfg, "sum by (service) (vllm:num_requests_running)", &mut warn).await, "service"),
         wait: map_by(q(cfg, "sum by (service) (vllm:num_requests_waiting)", &mut warn).await, "service"),
@@ -691,6 +713,12 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             "service",
         ),
     };
+    // Furiosa-LLM(K-EXAONE): furiosa_llm_* 를 같은 service 키로 병합(한 service 는 둘 중 하나만 노출 → 충돌 없음).
+    vllm.run.extend(map_by(q(cfg, "sum by (service) (furiosa_llm_num_requests_running)", &mut warn).await, "service"));
+    vllm.wait.extend(map_by(q(cfg, "sum by (service) (furiosa_llm_num_requests_waiting)", &mut warn).await, "service"));
+    vllm.tps.extend(map_by(q(cfg, "sum by (service) (rate(furiosa_llm_generation_tokens_total[1m]))", &mut warn).await, "service"));
+    vllm.kv.extend(map_by(q(cfg, "max by (service) (furiosa_llm_kv_cache_usage_percent)", &mut warn).await, "service"));
+    vllm.ttft.extend(map_by(q(cfg, "histogram_quantile(0.95, sum by (service,le) (rate(furiosa_llm_time_to_first_token_seconds_bucket[1m])))", &mut warn).await, "service"));
 
     // ---------- kube: deployments / pods / routes / gateway / epp ----------
     collect_kube(cfg, &mut snap, &vllm, &mut warn).await;
