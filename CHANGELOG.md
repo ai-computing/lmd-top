@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.5.1]
+### Fixed
+- **Perf 에 런칭된 모델이 다 안 보이던 문제**: per-model perf 표가 `by (model_name)` 트래픽 시계열로만 채워져, **최근 1분 트래픽이 없는(유휴) 배포는 표에서 누락**됐음(예: 갓 런칭한 ds4). 이제 (1) 병합 키를 `model_name`→**`service`(=Deployment 이름, Models 뷰와 동일)** 로 바꾸고, (2) collect_kube 이후 **런칭된 모든 모델(snap.models)을 seed** 로 깔아 vLLM 메트릭을 좌조인 → 트래픽이 없어도 `–` 로 항상 표시. 표시명도 배포명으로 통일.
+
 ## [0.5.0]
 ### Added — 능동 알림 + 반응형 + 메모리 구성
 - **능동 알림 시스템**: 스냅샷마다 임계/상태 이상(가속기 not-alive·throttle·고온 >80°C, 노드 cordon·NotReady·pressure, pod 재시작 증가·Failed)을 감지 → **신규 발생분만**(엣지 검출) 요약바 플래시(~3s 빨강 반전) + 만료형 토스트(심각=빨강). `A` 로 **알림 히스토리 오버레이**(최신순 50건, 상대시각). 요약바에 `⚠N alert (A)` 상시 카운터.

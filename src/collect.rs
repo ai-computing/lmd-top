@@ -515,30 +515,30 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     );
     snap.perf = Perf { req_rate, err_rate, tps, prefix_hit, ttft_p95, e2e_p95 };
 
-    // per-model 성능 (모델=하드웨어 배치별 구분) — model_name 기준 병합
+    // per-model 성능 — service(=Deployment 이름) 기준 병합. Models 뷰와 동일 키.
+    // 여기선 pm 만 채우고, 런칭된 모델 seed 는 collect_kube(모델 목록) 이후에 좌조인(아래).
     let mut pm: BTreeMap<String, PerfRow> = BTreeMap::new();
     macro_rules! merge {
         ($promql:expr, $field:ident) => {
             for s in &q(cfg, $promql, &mut warn).await {
-                let m = s.l("model_name").to_string();
+                let m = s.l("service").to_string();
                 if !m.is_empty() {
                     pm.entry(m.clone()).or_insert_with(|| PerfRow::new(&m)).$field = s.value;
                 }
             }
         };
     }
-    merge!("sum by (model_name)(rate(vllm:request_success_total[1m]))", req);
-    merge!("sum by (model_name)(rate(vllm:generation_tokens_total[1m]))", tps);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:time_to_first_token_seconds_bucket[1m])))", ttft_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_time_per_output_token_seconds_bucket[1m])))", tpot_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:e2e_request_latency_seconds_bucket[1m])))", e2e_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_prompt_tokens_bucket[1m])))", in_tok_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_generation_tokens_bucket[1m])))", out_tok_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_queue_time_seconds_bucket[1m])))", queue_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_prefill_time_seconds_bucket[1m])))", prefill_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_decode_time_seconds_bucket[1m])))", decode_p95);
-    merge!("sum by (model_name)(rate(vllm:num_preemptions_total[1m]))", preempt);
-    snap.perf_rows = pm.into_values().collect();
+    merge!("sum by (service)(rate(vllm:request_success_total[1m]))", req);
+    merge!("sum by (service)(rate(vllm:generation_tokens_total[1m]))", tps);
+    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:time_to_first_token_seconds_bucket[1m])))", ttft_p95);
+    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_time_per_output_token_seconds_bucket[1m])))", tpot_p95);
+    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:e2e_request_latency_seconds_bucket[1m])))", e2e_p95);
+    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_prompt_tokens_bucket[1m])))", in_tok_p95);
+    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_generation_tokens_bucket[1m])))", out_tok_p95);
+    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_queue_time_seconds_bucket[1m])))", queue_p95);
+    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_prefill_time_seconds_bucket[1m])))", prefill_p95);
+    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_decode_time_seconds_bucket[1m])))", decode_p95);
+    merge!("sum by (service)(rate(vllm:num_preemptions_total[1m]))", preempt);
 
     for s in &p_ready {
         let name = s.l("name");
@@ -575,6 +575,20 @@ pub async fn collect(cfg: &Config) -> Snapshot {
 
     // ---------- kube: deployments / pods / routes / gateway / epp ----------
     collect_kube(cfg, &mut snap, &vllm, &mut warn).await;
+
+    // per-model perf: 런칭된 모든 모델(snap.models)을 seed 로 → 트래픽 없어도 표(–)에 표시.
+    // 배포명↔service 는 Models 뷰와 동일한 match_model 로 해석, pm(메트릭)을 좌조인.
+    {
+        let mut rows: Vec<PerfRow> = Vec::new();
+        for m in &snap.models {
+            let key = match_model(&m.name, &vllm.run);
+            let mut row = key.and_then(|k| pm.remove(&k)).unwrap_or_else(|| PerfRow::new(&m.name));
+            row.model = m.name.clone(); // 표시명을 배포명으로 통일(Models 와 일관)
+            rows.push(row);
+        }
+        rows.extend(pm.into_values()); // 모델 목록엔 없지만 메트릭만 있는 잔여
+        snap.perf_rows = rows;
+    }
 
     // ---------- 가속기 재고(런처 솔버용) ----------
     collect_inventory(&mut snap.inventory, &mut warn).await;
