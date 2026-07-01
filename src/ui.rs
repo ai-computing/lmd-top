@@ -2,7 +2,7 @@
 //! 모든 문자열은 표시 폭(unicode-width) 기준으로 절단해 CJK/와이드 글자 깨짐을 방지.
 //! 선택 하이라이트는 REVERSED 대신 은은한 배경색(htop/all-smi 스타일).
 
-use crate::app::{App, Sev, View};
+use crate::app::{App, Mode, Sev, View};
 use crate::collect::{AccelKind, Snapshot};
 use ratatui::prelude::*;
 use ratatui::widgets::{
@@ -68,7 +68,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
             .split(f.area());
-        title_bar(f, c[0], &app.snap, app.tick, app.paused);
+        title_bar(f, c[0], app);
         (c[1], c[2])
     } else {
         let c = Layout::default()
@@ -81,7 +81,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Constraint::Length(1),
             ])
             .split(f.area());
-        title_bar(f, c[0], &app.snap, app.tick, app.paused);
+        title_bar(f, c[0], app);
         summary_bar(f, c[1], app);
         tabs(f, c[2], app);
         (c[3], c[4])
@@ -182,7 +182,7 @@ fn help_overlay(f: &mut Frame) {
         g("o", "cycle sort"),
         g("/", "filter (substring)"),
         g("l", "logs (selected pod/model, scroll+refresh)"),
-        g("s", "scale selected model up/down"),
+        g("s", "scale selected model (needs --mode admin+, confirms y/n)"),
         g("A", "alert history (threshold/health events)"),
         g("t", "cycle theme (default/high-contrast/colorblind)"),
         g("g", "open Grafana dashboard"),
@@ -270,7 +270,9 @@ fn logs_overlay(f: &mut Frame, app: &App) {
 }
 
 // ── 헤더 ───────────────────────────────────────────────
-fn title_bar(f: &mut Frame, area: Rect, s: &Snapshot, tick: u64, paused: bool) {
+fn title_bar(f: &mut Frame, area: Rect, app: &App) {
+    let s = &app.snap;
+    let (tick, paused) = (app.tick, app.paused);
     let spin = if paused { "⏸" } else { SPINNER[(tick as usize) % SPINNER.len()] };
     let gw = if s.gw_addr.is_empty() {
         Span::styled("⌂ gw —", Style::default().fg(C_DIM()))
@@ -287,9 +289,17 @@ fn title_bar(f: &mut Frame, area: Rect, s: &Snapshot, tick: u64, paused: bool) {
         let col = if age > 10 { C_WARN() } else { C_DIM() };
         Span::styled(format!("  · updated {}s ago", age), Style::default().fg(col))
     };
+    // 권한 모드 배지 — observe 는 은은하게, 상승 권한은 색+굵게(사고 방지 인지).
+    let (mcol, mmod) = match app.mode {
+        Mode::Observe => (C_DIM(), Modifier::empty()),
+        Mode::Debug => (C_ACC(), Modifier::BOLD),
+        Mode::Admin => (C_WARN(), Modifier::BOLD),
+        Mode::Danger => (C_BAD(), Modifier::BOLD),
+    };
     let line = Line::from(vec![
         Span::styled(format!("{} ", spin), Style::default().fg(if paused { C_WARN() } else { C_ACC() })),
         Span::styled("lmd-top", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" [{}]", app.mode.name()), Style::default().fg(mcol).add_modifier(mmod)),
         Span::styled(format!("  llm-d · {} nodes  ", s.nodes.len()), Style::default().fg(C_DIM())),
         gw,
         fresh,
@@ -377,6 +387,18 @@ fn tabs(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn footer(f: &mut Frame, area: Rect, app: &App) {
+    // 변경 작업 확인(y/n) 프롬프트
+    if let Some(pending) = &app.confirm {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" confirm ", Style::default().fg(Color::Black).bg(C_WARN()).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {} ", pending.prompt()), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled("  y confirm · n/esc cancel", Style::default().fg(C_DIM())),
+            ])),
+            area,
+        );
+        return;
+    }
     // 필터 입력 모드
     if app.filtering {
         f.render_widget(

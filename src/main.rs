@@ -10,7 +10,7 @@ mod prom;
 mod ui;
 
 use anyhow::Result;
-use app::App;
+use app::{App, Mode, Pending};
 use collect::{collect, Config};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
@@ -43,7 +43,15 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    run_tui(cfg).await
+    // 권한 모드(기동 시) — --mode observe|debug|admin|danger (기본 observe)
+    let mode = args
+        .iter()
+        .position(|a| a == "--mode")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| Mode::parse(s))
+        .unwrap_or(Mode::Observe);
+
+    run_tui(cfg, mode).await
 }
 
 /// 헤드리스 렌더 검증 — TestBackend 로 각 뷰를 한 프레임 그려 텍스트로 출력.
@@ -75,7 +83,7 @@ fn render_dump(snap: collect::Snapshot) {
     }
 }
 
-async fn run_tui(cfg: Config) -> Result<()> {
+async fn run_tui(cfg: Config, mode: Mode) -> Result<()> {
     let shared = Arc::new(Mutex::new(collect(&cfg).await)); // 첫 수집(즉시 표시)
 
     // full 수집 루프 (3초) — 모델/EPP/perf/events 등 무거운 것
@@ -119,11 +127,11 @@ async fn run_tui(cfg: Config) -> Result<()> {
 
     // UI 루프(블로킹)
     let ns = cfg.ns.clone();
-    let res = tokio::task::spawn_blocking(move || ui_loop(shared, ns)).await?;
+    let res = tokio::task::spawn_blocking(move || ui_loop(shared, ns, mode)).await?;
     res
 }
 
-fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
+fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String, mode: Mode) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -131,6 +139,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
+    app.mode = mode;
     let result = (|| -> Result<()> {
         loop {
             if !app.paused {
@@ -167,6 +176,25 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                     // 도움말 오버레이: 아무 키나 닫기
                     if app.help {
                         app.help = false;
+                        continue;
+                    }
+                    // 변경 작업 확인(y/n) — 다른 키 무시. 실행은 여기서(권한 검증은 트리거 시점).
+                    if let Some(pending) = app.confirm.clone() {
+                        match k.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                match pending {
+                                    Pending::Scale { name, target } => match kube::scale_deploy(&ns, &name, target) {
+                                        Ok(_) => app.notify(format!("scaled {} → {}", name, target)),
+                                        Err(e) => app.notify(format!("scale failed: {}", e)),
+                                    },
+                                }
+                                app.confirm = None;
+                            }
+                            _ => {
+                                app.confirm = None;
+                                app.notify("cancelled".to_string());
+                            }
+                        }
                         continue;
                     }
                     // 알림 히스토리 오버레이: esc/q/A 로 닫기(다른 키 무시)
@@ -247,6 +275,9 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                         }
                         KeyCode::Left => app.move_sel(-1), // 이전 항목
                         KeyCode::Right => app.move_sel(1),  // 다음 항목
+                        KeyCode::Char('l') if !app.can(Mode::Debug) => {
+                            app.notify(format!("logs needs --mode debug+ (current: {})", app.mode.name()));
+                        }
                         KeyCode::Char('l') => {
                             // 선택 pod/모델의 로그 오버레이
                             if let Some(pod) = app.logs_target_pod() {
@@ -263,14 +294,15 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                                 app.notify("logs: Pods/Models 뷰에서 pod/model 선택".to_string());
                             }
                         }
+                        KeyCode::Char('s') if !app.can(Mode::Admin) => {
+                            app.notify(format!("scale needs --mode admin+ (current: {})", app.mode.name()));
+                        }
                         KeyCode::Char('s') => {
+                            // Admin+ : 즉시 실행하지 않고 확인(y/n) 대기로 — dry-run→confirm.
                             if let Some(m) = app.selected_model() {
                                 let (name, target) =
                                     (m.name.clone(), if m.desired == 0 { 1 } else { 0 });
-                                match kube::scale_deploy(&ns, &name, target) {
-                                    Ok(_) => app.notify(format!("scaled {} → {}", name, target)),
-                                    Err(e) => app.notify(format!("scale failed: {}", e)),
-                                }
+                                app.confirm = Some(Pending::Scale { name, target });
                             } else {
                                 app.notify("scale: select a model in Models/Overview".to_string());
                             }

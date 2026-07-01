@@ -2,6 +2,12 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.6.0]
+### Added — permission modes (Control-plane M1)
+- **권한 모드**(운영 사고 방지): 기동 시 `--mode observe|debug|admin|danger`(기본 observe), 헤더에 상시 배지(observe=은은, 상승 권한=색+굵게). 변경 작업을 권한 레벨로 게이트:
+  - `l`(logs) → **debug+**, `s`(scale) → **admin+**. 부족하면 토스트로 안내.
+- **변경 작업 확인(y/n)**: `s`(scale)는 즉시 실행 대신 footer 확인 프롬프트(`scale X → N replica(s)? y/n`) → `y`에만 실행. 이후 drain/weight/rollout 도 동일 경로(Pending) 로 확장 예정.
+
 ## [0.5.1]
 ### Fixed
 - **Perf 에 런칭된 모델이 다 안 보이던 문제**: per-model perf 표가 `by (model_name)` 트래픽 시계열로만 채워져, **최근 1분 트래픽이 없는(유휴) 배포는 표에서 누락**됐음(예: 갓 런칭한 ds4). 이제 (1) 병합 키를 `model_name`→**`service`(=Deployment 이름, Models 뷰와 동일)** 로 바꾸고, (2) collect_kube 이후 **런칭된 모든 모델(snap.models)을 seed** 로 깔아 vLLM 메트릭을 좌조인 → 트래픽이 없어도 `–` 로 항상 표시. 표시명도 배포명으로 통일.
