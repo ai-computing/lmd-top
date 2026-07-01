@@ -211,6 +211,10 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String, prom: String, mode
                                         Ok(_) => app.notify(format!("scaled {} → {}", name, target)),
                                         Err(e) => app.notify(format!("scale failed: {}", e)),
                                     },
+                                    Pending::Restart { name } => match kube::rollout_restart(&ns, &name) {
+                                        Ok(_) => app.notify(format!("rollout restart {}", name)),
+                                        Err(e) => app.notify(format!("restart failed: {}", e)),
+                                    },
                                 }
                                 app.confirm = None;
                             }
@@ -349,6 +353,17 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String, prom: String, mode
                                 app.confirm = Some(Pending::Scale { name, target });
                             } else {
                                 app.notify("scale: select a model in Models/Overview".to_string());
+                            }
+                        }
+                        // 롤아웃 재시작(admin+, 확인)
+                        KeyCode::Char('S') if !app.can(Mode::Admin) => {
+                            app.notify(format!("restart needs --mode admin+ (current: {})", app.mode.name()));
+                        }
+                        KeyCode::Char('S') => {
+                            if let Some(m) = app.selected_model() {
+                                app.confirm = Some(Pending::Restart { name: m.name.clone() });
+                            } else {
+                                app.notify("restart: select a model in Models/Overview".to_string());
                             }
                         }
                         _ => {

@@ -52,12 +52,14 @@ pub struct NavState {
 #[derive(Clone)]
 pub enum Pending {
     Scale { name: String, target: i64 },
+    Restart { name: String },
 }
 impl Pending {
     /// 확인 프롬프트 문구.
     pub fn prompt(&self) -> String {
         match self {
             Pending::Scale { name, target } => format!("scale {} → {} replica(s)?", name, target),
+            Pending::Restart { name } => format!("rollout restart {} (rolling)?", name),
         }
     }
 }
