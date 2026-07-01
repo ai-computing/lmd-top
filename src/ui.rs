@@ -288,6 +288,46 @@ fn truncw(s: &str, max: usize) -> String {
     out
 }
 
+/// 셀 위치별 색(초록→노랑→빨강)
+fn grad_color(pct: f64) -> Color {
+    if pct > 80.0 {
+        C_BAD()
+    } else if pct > 55.0 {
+        C_WARN()
+    } else {
+        C_OK()
+    }
+}
+
+/// btop 식 그라디언트 바 — 채워진 길이만큼 초록→노랑→빨강. 사용률(util/mem/cpu)용.
+fn grad_bar(pct: f64, width: usize) -> Line<'static> {
+    let p = pct.clamp(0.0, 100.0) / 100.0;
+    let frac = p * width as f64;
+    let full = (frac.floor() as usize).min(width);
+    let mut spans: Vec<Span> = Vec::new();
+    let mut i = 0;
+    while i < full {
+        let c = grad_color((i as f64 / width as f64) * 100.0);
+        let mut run = 0;
+        while i + run < full && grad_color(((i + run) as f64 / width as f64) * 100.0) == c {
+            run += 1;
+        }
+        spans.push(Span::styled("█".repeat(run), Style::default().fg(c)));
+        i += run;
+    }
+    let mut used = full;
+    if used < width {
+        let rem = ((frac - full as f64) * 8.0).round() as usize;
+        if rem > 0 {
+            let c = grad_color((full as f64 / width as f64) * 100.0);
+            spans.push(Span::styled(FRAC[rem - 1].to_string(), Style::default().fg(c)));
+            used += 1;
+        }
+    }
+    spans.push(Span::styled("░".repeat(width.saturating_sub(used)), Style::default().fg(C_TRACK())));
+    Line::from(spans)
+}
+
 /// 프랙셔널 블록 바 (filled=colored, track=dim).
 fn bar_line(pct: f64, width: usize, color: Color) -> Line<'static> {
     let p = pct.clamp(0.0, 100.0) / 100.0;
@@ -426,9 +466,9 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
                 truncw(&a.busy_model, 22)
             };
             let mempct = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
-            let mut util = bar_line(a.util, 9, util_color(a.util)).spans;
+            let mut util = grad_bar(a.util, 9).spans;
             util.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
-            let mut mem = bar_line(mempct, 7, mem_color(mempct)).spans;
+            let mut mem = grad_bar(mempct, 7).spans;
             mem.push(Span::styled(
                 format!(" {:.0}/{:.0}G", a.mem_used_gb, a.mem_total_gb),
                 Style::default().fg(C_DIM()),
@@ -851,7 +891,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!("{:<4}×{} ", kind.label(), cnt), Style::default().fg(kind_color(*kind)).add_modifier(Modifier::BOLD)),
             Span::styled(format!("@{:<16} ", truncw(node, 16)), Style::default().fg(C_DIM())),
         ];
-        sp.extend(bar_line(util, 10, util_color(util)).spans);
+        sp.extend(grad_bar(util, 10).spans);
         sp.push(Span::styled(format!(" {:>3.0}%  ", util), Style::default().fg(util_color(util))));
         sp.push(Span::styled(format!("mem {:.0}/{:.0} GB", mu, mt), Style::default().fg(mem_color(mempct)))); // 절대값
         al.push(Line::from(sp));
@@ -1282,7 +1322,7 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
                 if rngd > 0 { v.push(format!("RNGD{}", rngd)); }
                 if v.is_empty() { "-".into() } else { v.join(" ") }
             };
-            let mut cpu = bar_line(n.cpu_pct, 8, util_color(n.cpu_pct)).spans;
+            let mut cpu = grad_bar(n.cpu_pct, 8).spans;
             cpu.push(Span::styled(
                 if n.cpu_pct.is_nan() { " -".into() } else { format!(" {:.0}%", n.cpu_pct) },
                 Style::default().fg(C_DIM()),
