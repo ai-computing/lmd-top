@@ -2,6 +2,25 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.3.0]
+### Fixed — serving metrics actually populate now
+- **핵심 버그**: Perf/Models 의 req/s·TTFT·TPOT·E2E·in/out tokens 가 존재하지 않는 `inference_objective_*`(EPP 전용, 이 클러스터는 EPP 우회) 를 쿼리해서 항상 비어 있었음. → 전부 네이티브 **`vllm:*`** 로 교체(request_success_total / e2e_request_latency / request_time_per_output_token / request_prompt·generation_tokens). KV=`kv_cache_usage_perc`, prefix-hit=hits/queries, err=abort finished_reason.
+- **조인 수정**: vLLM 메트릭을 fuzzy model_name 대신 **`service` 라벨(=Deployment 이름)** 로 정확 조인 → gemma4-rbln 등 run/wait/tps/kv 표시.
+- **반응성**: 지연 히스토그램 rate 윈도우 `[5m]→[1m]` (생성 중 ~5배 빠르게 반영). 하한선은 Prometheus 스크랩 간격(vLLM 15s / HW 30s).
+
+### Added
+- **Perf per-model 에 P/D 분리 지표**: QUEUE(스케줄 대기) → PFILL(prefill, P) → DECODE(decode, D) p95 + preempt rate. prefill=cyan / decode=magenta 로 PD-disaggregation 가시화.
+- **all-smi 식 현재-포션 게이지**: Accel/Node 상세를 게이지 행(util/VRAM/temp 현재값 바) + 넓은 반응형 타임라인 2개로 재구성(기존 좁은 3분할 개선).
+- **Overview 클러스터 요약 카드**: 종류별 수·평균 util·VRAM·전력·모델 ready·req/s·TTFT 한 줄 + 가속기 그룹별 인라인 util 스파크라인.
+- **Logs 뷰(l)**: 선택 pod/model 로그 오버레이(스크롤·r 새로고침·esc/q 닫기, error/warn 색상).
+
+### Changed
+- line_chart: 최신값을 **오른쪽(now)에 고정**(히스토리 짧을 때 왼쪽 뭉침 해소), 제목에 현재값 강조색.
+- detail prev/next 를 **화살표 전용**으로(문자 h/l 해제 → l 은 Logs).
+
+### Notes
+- **EPP 우회 수정 시도 → 보류**: `openai-route` backendRef 를 InferencePool 로 바꾸면 EPP 경유하나, **Envoy Gateway v1.3.0 이 InferencePool 백엔드 미지원**(`ResolvedRefs=False: Unsupported backend kind`, /gemma4 HTTP 500). 즉시 롤백(HTTP 200 복구). 활성화하려면 EG 1.4+ (Inference Extension) 업그레이드 필요 = 컨트롤플레인 변경. 단, 코어 서빙 지표는 vLLM 직접 수집이라 EPP 없이도 전부 동작.
+
 ## [Unreleased]
 ### Added
 - **Nodes 뷰(9)** · **Events 뷰(8)** · **Perf 종류별 동적 그리드**(존재하는 가속기만 이름+수) · **Topology 트리**(Gateway→HTTPRoute→route→pods) · **entity drill-down 멀티지표 타임라인**.

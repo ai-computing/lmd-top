@@ -188,11 +188,19 @@ pub struct PerfRow {
     pub e2e_p95: f64,
     pub in_tok_p95: f64,
     pub out_tok_p95: f64,
+    pub queue_p95: f64,   // request_queue_time — 스케줄링 대기
+    pub prefill_p95: f64, // request_prefill_time — prefill(P) 구간
+    pub decode_p95: f64,  // request_decode_time — decode(D) 구간
+    pub preempt: f64,     // num_preemptions rate — KV/메모리 스래싱
 }
 impl PerfRow {
     fn new(model: &str) -> Self {
         let n = f64::NAN;
-        PerfRow { model: model.to_string(), req: n, tps: n, ttft_p95: n, tpot_p95: n, e2e_p95: n, in_tok_p95: n, out_tok_p95: n }
+        PerfRow {
+            model: model.to_string(),
+            req: n, tps: n, ttft_p95: n, tpot_p95: n, e2e_p95: n, in_tok_p95: n, out_tok_p95: n,
+            queue_p95: n, prefill_p95: n, decode_p95: n, preempt: n,
+        }
     }
 }
 
@@ -526,6 +534,10 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:e2e_request_latency_seconds_bucket[1m])))", e2e_p95);
     merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_prompt_tokens_bucket[1m])))", in_tok_p95);
     merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_generation_tokens_bucket[1m])))", out_tok_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_queue_time_seconds_bucket[1m])))", queue_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_prefill_time_seconds_bucket[1m])))", prefill_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_decode_time_seconds_bucket[1m])))", decode_p95);
+    merge!("sum by (model_name)(rate(vllm:num_preemptions_total[1m]))", preempt);
     snap.perf_rows = pm.into_values().collect();
 
     for s in &p_ready {
