@@ -1017,7 +1017,9 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         sp.push(Span::styled(format!(" {:>3.0}% ", util), Style::default().fg(util_color(util))));
         sp.push(Span::styled("mem ", Style::default().fg(C_DIM())));
         sp.extend(dot_bar(mempct, 10, mem_color(mempct)).spans); // MEM 도 레인보우 바 — 유휴 때도 채움이 보임
-        sp.push(Span::styled(format!(" {:.0}/{:.0}GB  ", mu, mt), Style::default().fg(mem_color(mempct))));
+        // GB 필드 고정폭(우측정렬) → 뒤따르는 트렌드 스파크라인이 열 정렬됨.
+        sp.push(Span::styled(format!(" {:>3.0}/{:>3.0}GB  ", mu, mt), Style::default().fg(mem_color(mempct))));
+        sp.push(Span::styled("trend ", Style::default().fg(C_DIM())));
         let trend = sparkstr(&app.hist_for(&format!("sys:{}_util", kind.label())), 14, 100); // all-smi식 인라인 트렌드
         sp.push(Span::styled(trend, Style::default().fg(util_color(util))));
         al.push(Line::from(sp));
