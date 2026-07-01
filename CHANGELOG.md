@@ -2,6 +2,11 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.8.3]
+### Added — EPP scorer what-if + Perf pivot (인터랙티브)
+- **EPP scorer 가중치 what-if**: 선택 scorer를 `+`/`-`로 조정 → 정규화 WEIGHT 바 + **상대 영향도(infl%)**가 실시간 재계산(로컬 시뮬, 클러스터 무변경). "이 가중치를 올리면 밸런스가 어떻게 바뀌나"를 탐색 — EPP 정책 설계용. EPP 떠나면 리셋.
+- **Perf 크로스레이어 pivot**: 선택 모델 행에서 `p`(pods)/`i`(infra)/`e`(epp) 점프 — Models 와 일관.
+
 ## [0.8.2]
 ### Changed — 컨텍스트 푸터 (IA 리뷰 P2)
 - 푸터가 12개 힌트를 뷰 무관하게 항상 나열하던 것(예: Events 에 `s scale` no-op)을, **현재 뷰가 실제 할 수 있는 액션만** 표시하도록 재구성. detail/filter/sort/pivot/logs/scale 을 뷰별로 노출, 전역 키(A/t/z/g/?/q)만 상시. (←→ 패널 포커스는 현재 다중 선택 패널이 없어 보류.)

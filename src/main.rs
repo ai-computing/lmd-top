@@ -255,6 +255,9 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String, prom: String, mode
                         }
                         // 크로스레이어 드릴 pivot — 선택 엔티티에서 관련 레이어로 점프
                         KeyCode::Char(c @ ('p' | 'i' | 'r' | 'e' | 'm' | 'n')) => app.pivot(c),
+                        // EPP scorer 가중치 what-if(로컬 시뮬) — EPP 뷰에서만 반응
+                        KeyCode::Char('+') | KeyCode::Char('=') => app.epp_adjust(1.0),
+                        KeyCode::Char('-') | KeyCode::Char('_') => app.epp_adjust(-1.0),
                         KeyCode::Char('?') => app.toggle_help(),
                         KeyCode::Char('A') | KeyCode::Char('a') => app.toggle_alerts(),
                         KeyCode::Char('t') => app.cycle_theme(),
