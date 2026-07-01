@@ -62,3 +62,17 @@ pub fn scale_deploy(ns: &str, name: &str, replicas: i64) -> Result<()> {
     }
     Ok(())
 }
+
+/// 롤아웃 재시작(`kubectl rollout restart deploy/<name>`) — 롤링 재기동. admin 액션.
+pub fn rollout_restart(ns: &str, name: &str) -> Result<()> {
+    let out = std::process::Command::new("kubectl")
+        .args(["rollout", "restart", "deployment", name, "-n", ns])
+        .output()?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "rollout restart failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}

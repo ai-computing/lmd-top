@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.8.7]
+### Added — safe action: rollout restart (Control-plane M3)
+- **`S`**: 선택 모델 **rollout restart**(`kubectl rollout restart`, 롤링 재기동) — admin+ 게이트 + y/n 확인(Pending::Restart). scale 과 동일한 dry-run→confirm 경로. (endpoint drain / traffic·policy weight 는 endpoint/CR 조작이 필요해 후속.)
+
 ## [0.8.6]
 ### Fixed — 재평가 리뷰 반영(견고성/정직성)
 - **패닉 시 터미널 복원**(#1, 높음): `panic::set_hook` 으로 패닉해도 raw mode/alt-screen 해제 → 셸 안 망가짐.

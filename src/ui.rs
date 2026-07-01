@@ -165,7 +165,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 fn help_overlay(f: &mut Frame) {
-    let area = centered(f.area(), 66, 25);
+    let area = centered(f.area(), 68, 26);
     f.render_widget(Clear, area);
     let g = |k: &str, d: &str| {
         Line::from(vec![
@@ -184,6 +184,7 @@ fn help_overlay(f: &mut Frame) {
         g("/", "filter (substring)"),
         g("l", "logs (selected pod/model, scroll+refresh)"),
         g("s", "scale selected model (needs --mode admin+, confirms y/n)"),
+        g("S", "rollout restart selected model (admin+, confirms y/n)"),
         g("A", "alert history (threshold/health events)"),
         g("R", "reset energy session (per-accel Wh)"),
         g("t", "cycle theme (default/high-contrast/colorblind)"),
@@ -465,6 +466,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     }
     if matches!(v, Models | Overview) {
         parts.push("s scale".into());
+        parts.push("S restart".into());
     }
     // 전역
     parts.push("A alerts".into());
