@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.8.5]
+### Added — 세션 에너지 추적 (all-smi 식)
+- `DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION`(누적 mJ)로 **세션 에너지(Wh)** 를 디바이스별 기준선 대비 추적. Accel 상세에 `energy X.XX Wh (session · avg N W)`, Overview Σ 에 클러스터 총 `E N Wh`. **`R`** 로 세션 리셋.
+
 ## [0.8.4]
 ### Changed — 모든 바/타임라인에 track(░) 표시 (대략 % 가늠)
 - track 없이 `█████`만 그리던 바들(EPP WEIGHT, Perf 지연 히스토그램)을 **고정폭 + track(░)** 으로 → `████████░░░░░░░░` 형태로 상한 대비 대략 %가 보임(`bar_line` 재사용).

@@ -258,6 +258,8 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String, prom: String, mode
                         // EPP scorer 가중치 what-if(로컬 시뮬) — EPP 뷰에서만 반응
                         KeyCode::Char('+') | KeyCode::Char('=') => app.epp_adjust(1.0),
                         KeyCode::Char('-') | KeyCode::Char('_') => app.epp_adjust(-1.0),
+                        // 세션 에너지 리셋(all-smi 식)
+                        KeyCode::Char('R') => app.reset_energy(),
                         KeyCode::Char('?') => app.toggle_help(),
                         KeyCode::Char('A') | KeyCode::Char('a') => app.toggle_alerts(),
                         KeyCode::Char('t') => app.cycle_theme(),
