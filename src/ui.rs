@@ -310,42 +310,44 @@ fn title_bar(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
+    // 서빙/SLO 우선(왼쪽), 인프라는 뒤(오른쪽). "지금 서빙 건강한가?"가 항상 보이는 자리로.
     let s = &app.snap;
-    let (mut gpu, mut rbln, mut rngd, mut busy) = (0, 0, 0, 0);
-    let (mut mu, mut mt) = (0.0, 0.0);
+    let p = &s.perf;
+    let (mut busy, mut mu, mut mt, mut pw) = (0usize, 0.0f64, 0.0f64, 0.0f64);
     for a in &s.accel {
-        match a.kind {
-            AccelKind::Gpu => gpu += 1,
-            AccelKind::Rbln => rbln += 1,
-            AccelKind::Rngd => rngd += 1,
-        }
         if a.util > 5.0 {
             busy += 1;
         }
         mu += a.mem_used_gb;
         mt += a.mem_total_gb;
+        pw += a.power;
     }
+    let nacc = s.accel.len();
     let serving = s.models.iter().filter(|m| m.ready > 0).count();
-    let power: f64 = s.accel.iter().map(|a| a.power).sum();
+    let total = s.models.len();
     let mempct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
+    let err = p.err_rate;
+    // 서빙 건강 글리프: 0서빙=✗, 에러>0=⚠, 아니면 ●.
+    let (sg, sc) = if total == 0 {
+        ("○", C_DIM())
+    } else if serving == 0 {
+        ("✗", C_BAD())
+    } else if !err.is_nan() && err > 0.0 {
+        ("⚠", C_WARN())
+    } else {
+        ("●", C_OK())
+    };
     let mut spans = vec![
-        Span::styled(format!("GPU {} ", gpu), Style::default().fg(if gpu == 0 { C_DIM() } else { kind_color(AccelKind::Gpu) })),
-        Span::styled(format!("RBLN {} ", rbln), Style::default().fg(kind_color(AccelKind::Rbln))),
-        Span::styled(format!("RNGD {} ", rngd), Style::default().fg(kind_color(AccelKind::Rngd))),
-        Span::styled(format!("· {} busy ", busy), Style::default().fg(C_DIM())),
+        Span::styled(format!("{} SERVING {}/{}  ", sg, serving, total), Style::default().fg(sc).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("req/s {}  ", rate(p.req_rate)), Style::default().fg(C_DIM())),
+        Span::styled(format!("err {}  ", rate(err)), Style::default().fg(if !err.is_nan() && err > 0.0 { C_BAD() } else { C_DIM() })),
+        Span::styled(format!("TTFT {}  ", ms(p.ttft_p95)), Style::default().fg(C_DIM())),
+        Span::styled(format!("E2E {}  ", ms(p.e2e_p95)), Style::default().fg(C_DIM())),
         Span::raw("│ "),
-        Span::styled(format!("vram {:.0}/{:.0}GB ", mu, mt), Style::default().fg(mem_color(mempct))),
-        Span::raw("│ "),
-        Span::styled(
-            format!("models {}/{} ", serving, s.models.len()),
-            Style::default().fg(if serving == 0 { C_WARN() } else { C_OK() }),
-        ),
-        Span::styled(format!("│ ⚡{:.0}W ", power), Style::default().fg(C_DIM())),
+        Span::styled(format!("accel {}/{} busy  ", busy, nacc), Style::default().fg(C_DIM())),
+        Span::styled(format!("VRAM {:.0}%  ", mempct), Style::default().fg(mem_color(mempct))),
+        Span::styled(format!("⚡{:.0}W", pw), Style::default().fg(C_DIM())),
     ];
-    let warns = s.events.iter().filter(|e| e.typ == "Warning").count();
-    if warns > 0 {
-        spans.push(Span::styled(format!("│ ⚠{} warn", warns), Style::default().fg(C_WARN())));
-    }
     // 활성 알림 카운트(A 로 히스토리)
     let nalert = app.active_alerts.len();
     if nalert > 0 {

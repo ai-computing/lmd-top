@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.7.4]
+### Changed — 상단 요약바를 서빙/SLO 우선으로 (IA 리뷰 P0)
+- 항상 보이는 요약바가 하드웨어(GPU/RBLN/RNGD 개수·와트)로 시작하던 것을 **서빙 건강 우선**으로 재조합: `● SERVING n/N · req/s · err · TTFT · E2E │ accel busy · VRAM% · ⚡W · ⚠alert`. 운영자의 첫 질문("서빙 정상인가/지연 건강한가")이 0 키스트로크에 보이고, 인프라 재고는 뒤로.
+
 ## [0.7.3]
 ### Changed — Nodes 뷰를 all-smi 식 트리로
 - **Nodes 오버뷰가 트리**: 노드마다 헤더(status·cpu 바·mem·load) + **자식으로 그 노드의 모든 디바이스**를 인라인 메트릭(util 바·mem·temp·pwr·`∪`통합표식·busy_model)으로 한눈에. 선택 노드 하이라이트 + 자동 스크롤.
