@@ -1707,7 +1707,7 @@ fn accel_brief(a: &crate::collect::Accel, branch: &str, full: bool) -> Line<'sta
     sp.extend(dot_bar(a.util, 8, util_color(a.util)).spans);
     sp.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
     sp.push(Span::styled(
-        format!("  {:.0}/{:.0}GB{}", a.mem_used_gb, a.mem_total_gb, if a.unified_mem { "∪" } else { "" }),
+        format!("  {:>3.0}/{:>3.0}GB{} ", a.mem_used_gb, a.mem_total_gb, if a.unified_mem { "∪" } else { " " }),
         Style::default().fg(mem_color(mempct)),
     ));
     sp.push(Span::styled(format!("  {:.0}°C", a.temp), Style::default().fg(temp_color(a.temp))));
@@ -1748,7 +1748,7 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(C_DIM()),
         ));
         h.push(Span::styled(
-            if n.mem_total_gb <= 0.0 { "  mem –".into() } else { format!("  mem {:.0}/{:.0}GB", n.mem_used_gb, n.mem_total_gb) },
+            if n.mem_total_gb <= 0.0 { "  mem       –   ".into() } else { format!("  mem {:>4.0}/{:>4.0}GB", n.mem_used_gb, n.mem_total_gb) },
             Style::default().fg(mem_color(memp)),
         ));
         h.push(Span::styled(
