@@ -80,12 +80,13 @@ fn render_dump(snap: collect::Snapshot) {
     a.apply(snap);
     let rw: u16 = std::env::var("LMD_W").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
     let rh: u16 = std::env::var("LMD_H").ok().and_then(|s| s.parse().ok()).unwrap_or(26);
+    let mut fx = ui::FxState::disabled(); // 텍스트 덤프 — 이펙트 끔(부분 프레임 방지)
     for v in View::ALL {
         a.view = v;
         a.selected = 0;
         let backend = TestBackend::new(rw, rh);
         let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| ui::draw(f, &a)).unwrap();
+        term.draw(|f| ui::draw(f, &a, &mut fx)).unwrap();
         let buf = term.backend().buffer().clone();
         println!("\n========== VIEW: {} ==========", v.title());
         let area = buf.area;
@@ -167,6 +168,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
 
     let mut app = App::new();
     app.mode = mode;
+    let mut fx = ui::FxState::new();
     let result = (|| -> Result<()> {
         loop {
             if !app.paused {
@@ -174,9 +176,11 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                 app.apply(snap);
             }
             app.tick = app.tick.wrapping_add(1);
-            terminal.draw(|f| ui::draw(f, &app))?;
+            terminal.draw(|f| ui::draw(f, &app, &mut fx))?;
 
-            if event::poll(Duration::from_millis(100))? {
+            // 애니메이션 중엔 짧게 폴링(부드러운 프레임), 평시엔 100ms.
+            let poll_ms = if fx.animating() { 16 } else { 100 };
+            if event::poll(Duration::from_millis(poll_ms))? {
                 let ev = event::read()?;
                 if let Event::Mouse(m) = ev {
                     match m.kind {

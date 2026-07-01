@@ -1035,9 +1035,10 @@ mod tests {
         a.detail = false;
         assert!(a.nav_back());
         assert_eq!(a.view, View::Routing);
+        let mut fx = crate::ui::FxState::disabled();
         for (w, h) in [(80u16, 24u16), (120, 48), (40, 16)] {
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
-            t.draw(|f| crate::ui::draw(f, &a)).unwrap();
+            t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
         }
     }
 }
