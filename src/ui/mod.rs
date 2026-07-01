@@ -1151,7 +1151,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             ]),
         ];
         f.render_widget(Paragraph::new(lines).block(block(&format!("Node{}", nav))), rows[0]);
-        // 이 노드가 가진 모든 디바이스(full 라인: util/mem/temp/pwr/bw/clock/model)
+        // 이 노드가 가진 모든 디바이스(full 라인). ↑↓ 로 커서 이동(0=노드요약, i=개별 device 히스토리).
         let devs: Vec<&crate::collect::Accel> = app.snap.accel.iter().filter(|a| a.node == n.name).collect();
         let mut dl: Vec<Line> = Vec::new();
         if devs.is_empty() {
@@ -1159,21 +1159,39 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         } else {
             let last = devs.len();
             for (j, a) in devs.iter().enumerate() {
-                dl.push(accel_brief(a, if j + 1 == last { "└─" } else { "├─" }, true));
+                let sel = app.dev_sel == j + 1;
+                let branch = if sel { "▸ " } else if j + 1 == last { "└─" } else { "├─" };
+                let mut line = accel_brief(a, branch, true);
+                if sel {
+                    line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+                }
+                dl.push(line);
             }
         }
-        f.render_widget(Paragraph::new(dl).block(block(&format!("devices on {} ({})", truncw(&n.name, 20), devs.len()))), rows[1]);
-        let k = format!("nod:{}", n.name);
+        let dtitle = if app.dev_sel == 0 {
+            format!("devices on {} ({}) · ↑↓ pick device → history", truncw(&n.name, 16), devs.len())
+        } else {
+            format!("devices on {} ({}) · ↑↓ move · ▸#{} history below", truncw(&n.name, 16), devs.len(), app.dev_sel)
+        };
+        f.render_widget(Paragraph::new(dl).block(block(&dtitle)), rows[1]);
+        // 하단 타임라인: dev_sel==0 → 노드 host cpu/mem 요약, 아니면 선택 device 의 util/VRAM.
         let (l, r) = two_panes(rows[2], 50);
-        bar_timeline(f, l, app, &format!("{}:cpu", k), "host cpu", "%", Some(100.0));
-        bar_timeline(f, r, app, &format!("{}:mem", k), "host mem", "%", Some(100.0));
+        if app.dev_sel == 0 || devs.is_empty() {
+            let k = format!("nod:{}", n.name);
+            bar_timeline(f, l, app, &format!("{}:cpu", k), "host cpu", "%", Some(100.0));
+            bar_timeline(f, r, app, &format!("{}:mem", k), "host mem", "%", Some(100.0));
+        } else if let Some(a) = devs.get(app.dev_sel - 1) {
+            let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
+            let name = format!("{} {}", a.disp(), a.id);
+            bar_timeline(f, l, app, &format!("{}:util", k), &format!("{} util", name), "%", Some(100.0));
+            bar_timeline(f, r, app, &format!("{}:mem", k), &format!("{} VRAM", name), "%", Some(100.0));
+        }
         return;
     }
 
-    let mut lines: Vec<Line> = Vec::new();
-    let mut title = "Detail";
+    // Model 상세 — 정보 + per-model perf 지표 시계열(있으면 하단에 타임라인 그리드).
     if let Some(m) = app.selected_model() {
-        title = "Model";
+        let mut lines: Vec<Line> = Vec::new();
         lines.push(kv("model", &m.name, Color::White));
         lines.push(kv("status", &m.status, if m.ready > 0 { C_OK() } else { C_DIM() }));
         lines.push(kv("replicas", &format!("{}/{} (ready/desired)", m.ready, m.desired), Color::White));
@@ -1191,7 +1209,39 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(kv("pods", &if pods.is_empty() { "(none)".to_string() } else { pods.join(", ") }, C_DIM()));
         lines.push(pivot_line(&[("p", "pods"), ("i", "infra"), ("r", "route"), ("e", "epp")]));
         lines.push(Line::from(Span::styled("  s = scale up/down", Style::default().fg(C_DIM()))));
-    } else if let Some(p) = app.selected_pod() {
+        // 매칭되는 per-model perf 시계열(이름 정확/포함 일치) → 하단 타임라인.
+        let mkey = app
+            .snap
+            .perf_rows
+            .iter()
+            .find(|r| r.model == m.name || m.name.contains(&r.model) || r.model.contains(&m.name))
+            .map(|r| format!("mperf:{}", r.model));
+        let series: [(&str, &str, &str); 4] = [("tps", "tok/s", ""), ("ttft", "TTFT", "ms"), ("decode", "DECODE", "ms"), ("e2e", "E2E", "ms")];
+        let present: Vec<&(&str, &str, &str)> = match &mkey {
+            Some(k) => series.iter().filter(|(s, _, _)| !app.hist_for(&format!("{}:{}", k, s)).is_empty()).collect(),
+            None => Vec::new(),
+        };
+        let pblk = Paragraph::new(lines).scroll((app.detail_scroll, 0)).wrap(Wrap { trim: false }).block(block(&format!("Model{}", nav)));
+        if present.is_empty() {
+            f.render_widget(pblk, area);
+        } else {
+            let mk = mkey.unwrap();
+            let split = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(15), Constraint::Min(6)]).split(area);
+            f.render_widget(pblk, split[0]);
+            let cols = if split[1].width >= 60 { 2 } else { 1 };
+            let nrows = present.len().div_ceil(cols).max(1);
+            let grows = Layout::default().direction(Direction::Vertical).constraints(vec![Constraint::Ratio(1, nrows as u32); nrows]).split(split[1]);
+            for (i, (s, label, unit)) in present.iter().enumerate() {
+                let cells = Layout::default().direction(Direction::Horizontal).constraints(vec![Constraint::Ratio(1, cols as u32); cols]).split(grows[i / cols]);
+                bar_timeline(f, cells[i % cols], app, &format!("{}:{}", mk, s), label, unit, None);
+            }
+        }
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut title = "Detail";
+    if let Some(p) = app.selected_pod() {
         title = "Pod";
         lines.push(kv("pod", &p.name, Color::White));
         lines.push(kv("phase", &p.phase, if p.phase == "Running" { C_OK() } else { C_DIM() }));
@@ -1226,8 +1276,8 @@ fn kv(k: &str, v: &str, color: Color) -> Line<'static> {
     ])
 }
 
-/// Perf 드릴다운 — 선택 모델 구간별 p50/p95/p99 + E2E 지연 버킷 히스토그램(온디맨드).
-fn perf_detail_view(f: &mut Frame, area: Rect, d: &PerfDetail) {
+/// Perf 드릴다운 — 선택 모델 구간별 p50/p95/p99 + 지표별 시계열 타임라인 + E2E 버킷 히스토그램.
+fn perf_detail_view(f: &mut Frame, area: Rect, app: &App, d: &PerfDetail) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(7), Constraint::Min(4)])
@@ -1250,24 +1300,61 @@ fn perf_detail_view(f: &mut Frame, area: Rect, d: &PerfDetail) {
     .block(block(&format!("latency percentiles · {} · esc back", truncw(&d.model, 30))));
     f.render_widget(qt, rows[0]);
 
+    // 하단: 좌 = 지표별 시계열 타임라인 그리드, 우 = E2E 버킷 히스토그램.
+    let (grid_area, hist_area) = two_panes(rows[1], 58);
+
+    // per-model 지표 타임라인 — 컬럼 값들을 시간축으로. 데이터 있는 것만.
+    let mk = format!("mperf:{}", d.model);
+    let series: [(&str, &str, &str); 6] = [
+        ("tps", "tok/s", ""),
+        ("ttft", "TTFT", "ms"),
+        ("queue", "QUEUE", "ms"),
+        ("prefill", "PREFILL", "ms"),
+        ("decode", "DECODE", "ms"),
+        ("e2e", "E2E", "ms"),
+    ];
+    let present: Vec<&(&str, &str, &str)> = series.iter().filter(|(s, _, _)| !app.hist_for(&format!("{}:{}", mk, s)).is_empty()).collect();
+    if present.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled("no per-model time series yet — populates under traffic", Style::default().fg(C_DIM()))))
+                .block(block("metrics over time")),
+            grid_area,
+        );
+    } else {
+        let cols = if grid_area.width >= 60 { 2 } else { 1 };
+        let nrows = present.len().div_ceil(cols).max(1);
+        let grows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(vec![Constraint::Ratio(1, nrows as u32); nrows])
+            .split(grid_area);
+        for (i, (s, label, unit)) in present.iter().enumerate() {
+            let cells = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(vec![Constraint::Ratio(1, cols as u32); cols])
+                .split(grows[i / cols]);
+            bar_timeline(f, cells[i % cols], app, &format!("{}:{}", mk, s), label, unit, None);
+        }
+    }
+
     // E2E 지연 버킷 분포(히스토그램) — 누적차 rate, 바 길이 = 상대 빈도.
     let maxc = d.buckets.iter().map(|(_, c)| *c).fold(0.0f64, f64::max).max(1e-9);
     let mut hl: Vec<Line> = Vec::new();
     if d.buckets.iter().all(|(_, c)| *c <= 0.0) {
-        hl.push(Line::from(Span::styled("no request samples in the window (idle) — populates under traffic", Style::default().fg(C_DIM()))));
+        hl.push(Line::from(Span::styled("idle — E2E buckets populate under traffic", Style::default().fg(C_DIM()))));
     } else {
+        let bw = (hist_area.width as usize).saturating_sub(20).clamp(8, 34);
         for (le, c) in &d.buckets {
             if *c <= 0.0 {
                 continue;
             }
             let lbl = if le.is_infinite() { "  ∞".to_string() } else { format!("≤{}", ms(*le)) };
-            let mut sp = vec![Span::styled(format!("{:>9} ", lbl), Style::default().fg(C_DIM()))];
-            sp.extend(bar_line(c / maxc * 100.0, 34, C_ACC()).spans); // 고정폭 + track(░)
+            let mut sp = vec![Span::styled(format!("{:>8} ", lbl), Style::default().fg(C_DIM()))];
+            sp.extend(bar_line(c / maxc * 100.0, bw, C_ACC()).spans);
             sp.push(Span::styled(format!(" {:.2}/s", c), Style::default().fg(C_DIM())));
             hl.push(Line::from(sp));
         }
     }
-    f.render_widget(Paragraph::new(hl).block(block("E2E latency distribution · rate by bucket")), rows[1]);
+    f.render_widget(Paragraph::new(hl).block(block("E2E distribution · rate/bucket")), hist_area);
 }
 
 // ── Perf (EPP 정책용 성능/분배) ─────────────────────────
@@ -1362,7 +1449,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     // 드릴: 선택 모델 지연 분포(Enter). perf_detail 이 채워져 있으면 그것부터.
     if app.detail {
         if let Some(d) = &app.perf_detail {
-            perf_detail_view(f, area, d);
+            perf_detail_view(f, area, app, d);
             return;
         }
     }

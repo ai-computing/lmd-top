@@ -310,14 +310,18 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                             app.set_view_idx(c as usize - '0' as usize)
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            if app.detail {
+                            if app.detail && app.view == View::Nodes {
+                                app.dev_cursor(-1) // Node 상세: device 커서(0=요약)
+                            } else if app.detail {
                                 app.scroll_detail(-1)
                             } else {
                                 app.move_sel(-1)
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if app.detail {
+                            if app.detail && app.view == View::Nodes {
+                                app.dev_cursor(1)
+                            } else if app.detail {
                                 app.scroll_detail(1)
                             } else {
                                 app.move_sel(1)

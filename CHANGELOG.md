@@ -2,6 +2,13 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.14.0]
+### Added — 상세 뷰의 개체별 시계열 히스토리
+- **Node 상세**: device 목록에서 ↑↓ 로 device 선택 → 그 device 의 util/VRAM 타임라인. 미선택(0)일 땐 노드 host cpu/mem 요약(기존). 선택 행은 ▸ 로 강조. (←→ 는 이전/다음 노드.)
+- **Perf 드릴(⏎)**: percentile 표 + **모델별 지표 타임라인 그리드**(tok/s·TTFT·QUEUE·PREFILL·DECODE·E2E) + E2E 버킷 히스토그램. 컬럼 값들을 시간축으로.
+- **Model 상세**: 정보 + 매칭되는 per-model perf 시계열(tok/s·TTFT·DECODE·E2E) 타임라인.
+- per-model perf 시계열을 히스토리에 기록(`mperf:{model}:*`).
+
 ## [0.13.0]
 ### Changed — 타임라인을 htop 식 braille 영역 그래프로
 - 블록 채움 + 가로 눈금(클러터) → **braille 점 영역 그래프**(셀당 2×4 점 = 가로2·세로4 고해상도, htop graph 모드 식)로 교체. 훨씬 부드럽고 깔끔.
