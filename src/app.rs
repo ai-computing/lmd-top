@@ -39,6 +39,15 @@ impl Mode {
     }
 }
 
+/// 크로스레이어 드릴 브레드크럼 — pivot 시 현재 위치를 쌓고 esc 로 되짚음.
+#[derive(Clone)]
+pub struct NavState {
+    pub view: View,
+    pub selected: usize,
+    pub filter: String,
+    pub detail: bool,
+}
+
 /// 확인(y/n) 대기 중인 변경 작업. 실행은 이벤트 루프(main)에서.
 #[derive(Clone)]
 pub enum Pending {
@@ -159,6 +168,8 @@ pub struct App {
     // ── 권한 모드 ──
     pub mode: Mode,                 // observe(기본)/debug/admin/danger — 기동 시 --mode
     pub confirm: Option<Pending>,   // y/n 확인 대기 중인 변경 작업
+    // ── 크로스레이어 드릴 ──
+    pub nav_stack: Vec<NavState>,   // pivot 브레드크럼(esc 로 되짚음)
 }
 
 /// ~/.config/lmd-top/lmd-top.yaml 의 columns: {view: [col,...]} 로드. 없으면 빈 맵(=기본 전체).
@@ -218,6 +229,74 @@ impl App {
             prev_restarts: HashMap::new(),
             mode: Mode::Observe,
             confirm: None,
+            nav_stack: Vec::new(),
+        }
+    }
+
+    /// 파드명 → 소속 모델(배포)명. prefix 매칭, 없으면 파드명 그대로.
+    fn model_of_pod(&self, pod: &str) -> String {
+        self.snap
+            .models
+            .iter()
+            .find(|m| pod.starts_with(&m.name))
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| pod.to_string())
+    }
+
+    /// 크로스레이어 드릴: 선택 엔티티에서 관련 레이어로 점프(뷰 전환 + 상관 필터).
+    /// 현재 위치를 브레드크럼에 쌓아 esc 로 되짚을 수 있게 함. collector 는 이미 연결돼 있음.
+    pub fn pivot(&mut self, key: char) {
+        // 뮤터블 차용 충돌 회피 — 선택 엔티티 값을 먼저 뽑는다.
+        let model = self.selected_model().map(|m| m.name.clone());
+        let accel = self.selected_accel().map(|a| (a.busy_model.clone(), a.node.clone()));
+        let pod = self.selected_pod().map(|p| p.name.clone());
+        let node = self.selected_node().map(|n| n.name.clone());
+        let target: Option<(View, String)> = match self.view {
+            View::Models | View::Overview => model.and_then(|name| match key {
+                'p' => Some((View::Pods, name)),
+                'i' => Some((View::Accel, name)),
+                'e' => Some((View::Epp, String::new())),
+                'r' => Some((View::Routing, String::new())),
+                _ => None,
+            }),
+            View::Accel => accel.filter(|(b, _)| !b.is_empty()).and_then(|(bm, nd)| match key {
+                'p' => Some((View::Pods, bm)),
+                'm' => Some((View::Models, self.model_of_pod(&bm))),
+                'n' => Some((View::Nodes, nd)),
+                _ => None,
+            }),
+            View::Pods => pod.and_then(|pn| match key {
+                'i' => Some((View::Accel, pn.clone())),
+                'm' => Some((View::Models, self.model_of_pod(&pn))),
+                _ => None,
+            }),
+            View::Nodes => node.and_then(|nn| match key {
+                'i' => Some((View::Accel, nn)),
+                _ => None,
+            }),
+            _ => None,
+        };
+        if let Some((v, filter)) = target {
+            self.nav_stack.push(NavState { view: self.view, selected: self.selected, filter: self.filter.clone(), detail: self.detail });
+            self.view = v;
+            self.filter = filter;
+            self.selected = 0;
+            self.sort = 0;
+            self.detail = false;
+        }
+    }
+
+    /// 브레드크럼 되짚기(esc). 되짚었으면 true.
+    pub fn nav_back(&mut self) -> bool {
+        if let Some(st) = self.nav_stack.pop() {
+            self.view = st.view;
+            self.selected = st.selected;
+            self.filter = st.filter;
+            self.detail = st.detail;
+            self.sort = 0;
+            true
+        } else {
+            false
         }
     }
 
@@ -462,6 +541,7 @@ impl App {
             self.selected = 0;
             self.sort = 0;
             self.detail = false;
+            self.nav_stack.clear(); // 수동 뷰 전환 → 브레드크럼 초기화
         }
     }
 

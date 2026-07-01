@@ -2,6 +2,13 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.8.0]
+### Added — 크로스레이어 드릴 내비게이션 (IA 리뷰 P0, crown jewel)
+- 선택 엔티티에서 **관련 레이어로 점프**(collector 는 이미 상관 연결됨, UI 내비만 없었음): Models/Overview 에서 **`p`**(pods)·**`i`**(infra/accel)·**`r`**(route/topo)·**`e`**(epp), Accel 에서 `p`·`m`(model)·`n`(node), Pods 에서 `i`·`m`. 점프 = 뷰 전환 + 상관 필터.
+- **브레드크럼 스택**: pivot 시 현재 위치를 쌓고 **`esc` 로 되짚음**(상세→브레드크럼→필터→줌 순). 수동 뷰 전환 시 초기화.
+- 발견성: Model/Pod 상세에 `pivot [p] pods [i] infra …` 안내 줄 + 뷰별 footer 힌트 + help 항목.
+- "정적 카드 N장"을 **손으로 레이어를 넘나드는 도구**로 — k9s+all-smi 대비 이 도구의 존재이유.
+
 ## [0.7.4]
 ### Changed — 상단 요약바를 서빙/SLO 우선으로 (IA 리뷰 P0)
 - 항상 보이는 요약바가 하드웨어(GPU/RBLN/RNGD 개수·와트)로 시작하던 것을 **서빙 건강 우선**으로 재조합: `● SERVING n/N · req/s · err · TTFT · E2E │ accel busy · VRAM% · ⚡W · ⚠alert`. 운영자의 첫 질문("서빙 정상인가/지연 건강한가")이 0 키스트로크에 보이고, 인프라 재고는 뒤로.

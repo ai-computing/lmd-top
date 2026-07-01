@@ -240,15 +240,19 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String, mode: Mode) -> Res
                     match k.code {
                         KeyCode::Char('q') => break, // 종료는 q 만
                         KeyCode::Esc => {
-                            // 뒤로가기만: 상세→필터→줌 순으로 닫기 (종료 안 함)
+                            // 뒤로가기만: 상세→브레드크럼→필터→줌 순 (종료 안 함)
                             if app.detail {
                                 app.detail = false;
+                            } else if app.nav_back() {
+                                // 크로스레이어 드릴 되짚기
                             } else if !app.filter.is_empty() {
                                 app.clear_filter();
                             } else if app.zoom {
                                 app.zoom = false;
                             }
                         }
+                        // 크로스레이어 드릴 pivot — 선택 엔티티에서 관련 레이어로 점프
+                        KeyCode::Char(c @ ('p' | 'i' | 'r' | 'e' | 'm' | 'n')) => app.pivot(c),
                         KeyCode::Char('?') => app.toggle_help(),
                         KeyCode::Char('A') | KeyCode::Char('a') => app.toggle_alerts(),
                         KeyCode::Char('t') => app.cycle_theme(),
