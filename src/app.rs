@@ -494,10 +494,27 @@ impl App {
         }
     }
 
+    /// 상세 패널을 가진 뷰인지(detail=true 가 실제로 렌더에 반영되는 뷰).
+    /// 없는 뷰(Routing/Epp/Launch/Events)에서 detail=true 로 두면 ↑↓ 가 스크롤로 빠져 네비가 잠김.
+    pub fn view_has_detail(&self) -> bool {
+        matches!(self.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes)
+    }
+
     pub fn toggle_detail(&mut self) {
-        if self.list_len() > 0 {
+        if self.view_has_detail() && self.list_len() > 0 {
             self.detail = !self.detail;
             self.dev_sel = 0; // 상세 진입 시 노드 요약부터
+        }
+    }
+
+    /// Flow(route) 에서 Enter → 백엔드 모델 상세로 드릴(브레드크럼 쌓음, esc 로 복귀).
+    pub fn drill_route(&mut self) {
+        if self.view != View::Routing {
+            return;
+        }
+        self.pivot('m'); // → Models, filter=backend (매칭 0건이면 pivot 이 되짚음)
+        if self.view == View::Models && self.list_len() > 0 {
+            self.detail = true;
         }
     }
 
@@ -960,5 +977,37 @@ mod tests {
         a.pivot('x'); // pivot 키 아님
         assert_eq!(a.view, View::Models);
         assert!(a.nav_stack.is_empty());
+    }
+
+    #[test]
+    fn flow_route_enter_does_not_panic() {
+        use crate::collect::Route;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut a = App::new();
+        a.snap = Snapshot {
+            models: vec![model("m1")],
+            pods: vec![pod("m1-abc")],
+            routes: vec![Route { path: "/v1".into(), backend: "m1".into(), kind: "InferencePool".into() }],
+            ..Default::default()
+        };
+        a.view = View::Routing;
+        a.selected = 0;
+        // toggle_detail 은 상세 없는 Routing 에선 detail 을 켜지 않음(↑↓ 네비 잠김 방지).
+        a.toggle_detail();
+        assert!(!a.detail, "Routing has no detail panel; detail must stay off so nav is not trapped");
+        // Enter 의 실제 동작: 백엔드 모델 상세로 드릴.
+        a.drill_route();
+        assert_eq!(a.view, View::Models);
+        assert_eq!(a.filter, "m1");
+        assert!(a.detail);
+        // esc: 상세 닫기 → nav_back 으로 Flow 복귀.
+        a.detail = false;
+        assert!(a.nav_back());
+        assert_eq!(a.view, View::Routing);
+        for (w, h) in [(80u16, 24u16), (120, 48), (40, 16)] {
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| crate::ui::draw(f, &a)).unwrap();
+        }
     }
 }

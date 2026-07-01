@@ -300,6 +300,8 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                                     app.perf_detail = Some(d);
                                     app.detail = true;
                                 }
+                            } else if app.view == View::Routing {
+                                app.drill_route(); // Flow: route → backend 모델 상세
                             } else {
                                 app.toggle_detail();
                             }
