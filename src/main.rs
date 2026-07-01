@@ -76,18 +76,40 @@ fn render_dump(snap: collect::Snapshot) {
 async fn run_tui(cfg: Config) -> Result<()> {
     let shared = Arc::new(Mutex::new(collect(&cfg).await)); // 첫 수집(즉시 표시)
 
-    // 백그라운드 수집 루프 (2초)
+    // full 수집 루프 (3초) — 모델/EPP/perf/events 등 무거운 것
     {
         let shared = shared.clone();
         let cfg = cfg.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            let mut tick = tokio::time::interval(Duration::from_secs(3));
             tick.tick().await;
             loop {
                 tick.tick().await;
                 let snap = collect(&cfg).await;
                 if let Ok(mut g) = shared.lock() {
                     *g = snap;
+                }
+            }
+        });
+    }
+    // fast tier (1초) — 가속기 util/mem/temp + 노드만 빠르게 갱신(반응성)
+    {
+        let shared = shared.clone();
+        let cfg = cfg.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let (accel, nodes) = collect::collect_fast(&cfg).await;
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if let Ok(mut g) = shared.lock() {
+                    g.accel = accel;
+                    g.nodes = nodes;
+                    g.ts = ts;
                 }
             }
         });

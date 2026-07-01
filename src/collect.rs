@@ -284,13 +284,12 @@ fn map_by(series: Vec<Series>, key: &str) -> BTreeMap<String, Series> {
     m
 }
 
-pub async fn collect(cfg: &Config) -> Snapshot {
-    let mut snap = Snapshot::default();
+/// fast tier: 가속기(util/mem/temp/power/health) + 노드. 자주(1s) 갱신 — 프롬 ~12 + kube nodes.
+/// util/mem 반응성을 위해 collect()에서 분리. 무거운 나머지는 full collect(느린 주기).
+pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
     let mut warn = Vec::new();
-    snap.ts = now_secs();
-
-    // ---------- Accelerators ----------
-    // Furiosa (key=uuid, util=core 평균)
+    let mut accel: Vec<Accel> = Vec::new();
+    // Furiosa
     let f_util = q(cfg, "avg by (uuid,device,hostname) (furiosa_npu_core_utilization)", &mut warn).await;
     let f_temp = map_by(q(cfg, "max by (uuid) (furiosa_npu_hw_temperature)", &mut warn).await, "uuid");
     let f_pow = map_by(q(cfg, "max by (uuid) (furiosa_npu_hw_power)", &mut warn).await, "uuid");
@@ -300,7 +299,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     let f_thr = map_by(q(cfg, "max by (uuid) (furiosa_npu_throttling_events_count)", &mut warn).await, "uuid");
     for s in &f_util {
         let uuid = s.l("uuid");
-        snap.accel.push(Accel {
+        accel.push(Accel {
             kind: AccelKind::Rngd,
             id: s.l("device").to_string(),
             node: s.l("hostname").to_string(),
@@ -314,8 +313,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             throttle: f_thr.get(uuid).map(|x| x.value).unwrap_or(0.0),
         });
     }
-
-    // RBLN (per-device series, key=uuid)
+    // RBLN
     let r_util = q(cfg, "RBLN_DEVICE_STATUS:UTILIZATION", &mut warn).await;
     let r_temp = map_by(q(cfg, "RBLN_DEVICE_STATUS:TEMPERATURE", &mut warn).await, "uuid");
     let r_pow = map_by(q(cfg, "RBLN_DEVICE_STATUS:CARD_POWER", &mut warn).await, "uuid");
@@ -324,8 +322,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     let r_health = map_by(q(cfg, "RBLN_DEVICE_STATUS:HEALTH", &mut warn).await, "uuid");
     for s in &r_util {
         let uuid = s.l("uuid");
-        let pod = s.l("exported_pod");
-        snap.accel.push(Accel {
+        accel.push(Accel {
             kind: AccelKind::Rbln,
             id: s.l("name").to_string(),
             node: s.l("node").to_string(),
@@ -334,25 +331,24 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             mem_total_gb: r_dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
             temp: r_temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
             power: r_pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
-            busy_model: pod.to_string(),
-            alive: r_health.get(uuid).map(|x| x.value == 0.0).unwrap_or(true), // RBLN HEALTH: 0=정상
+            busy_model: s.l("exported_pod").to_string(),
+            alive: r_health.get(uuid).map(|x| x.value == 0.0).unwrap_or(true),
             throttle: 0.0,
         });
     }
-
-    // NVIDIA DCGM (현재 보통 부재 — nvidia.com/gpu:0)
+    // NVIDIA DCGM
     let g_util = q(cfg, "DCGM_FI_DEV_GPU_UTIL", &mut warn).await;
     let g_mu = map_by(q(cfg, "DCGM_FI_DEV_FB_USED", &mut warn).await, "gpu");
     let g_temp = map_by(q(cfg, "DCGM_FI_DEV_GPU_TEMP", &mut warn).await, "gpu");
     let g_pow = map_by(q(cfg, "DCGM_FI_DEV_POWER_USAGE", &mut warn).await, "gpu");
     for s in &g_util {
         let gpu = s.l("gpu");
-        snap.accel.push(Accel {
+        accel.push(Accel {
             kind: AccelKind::Gpu,
             id: format!("gpu{}", gpu),
             node: s.l("Hostname").to_string(),
             util: norm_pct(s.value),
-            mem_used_gb: g_mu.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0), // MiB→GB 근사
+            mem_used_gb: g_mu.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
             mem_total_gb: 80.0,
             temp: g_temp.get(gpu).map(|x| x.value).unwrap_or(0.0),
             power: g_pow.get(gpu).map(|x| x.value).unwrap_or(0.0),
@@ -361,13 +357,10 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             throttle: 0.0,
         });
     }
-    // 정렬: kind, node, id
-    snap.accel.sort_by(|a, b| {
-        (a.kind as u8, &a.node, &a.id).cmp(&(b.kind as u8, &b.node, &b.id))
-    });
+    accel.sort_by(|a, b| (a.kind as u8, &a.node, &a.id).cmp(&(b.kind as u8, &b.node, &b.id)));
 
-    // ---------- Nodes ----------
-    let (node_ip, node_meta) = node_kube(&mut warn).await; // ip->name, name->(ready,cordoned,pressure,ver)
+    // Nodes
+    let (node_ip, node_meta) = node_kube(&mut warn).await;
     let n_load = q(cfg, "node_load1", &mut warn).await;
     let n_mt = map_by(q(cfg, "node_memory_MemTotal_bytes", &mut warn).await, "instance");
     let n_ma = map_by(q(cfg, "node_memory_MemAvailable_bytes", &mut warn).await, "instance");
@@ -375,7 +368,6 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         q(cfg, "100 - (avg by (instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)", &mut warn).await,
         "instance",
     );
-    // prom 지표를 노드 name 기준으로 매핑(instance→name)
     let resolve = |inst: &str| -> String {
         let ip = inst.split(':').next().unwrap_or(inst);
         node_ip.get(ip).cloned().unwrap_or_else(|| ip.to_string())
@@ -387,17 +379,17 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         inst_by.insert(name.clone(), s.l("instance").to_string());
         load_by.insert(name, s.value);
     }
-    // 전체 노드는 kube(node_meta) 기준 — cordoned/exporter 없는 노드도 표시
     let mut names: Vec<String> = node_meta.keys().cloned().collect();
     if names.is_empty() {
         names = load_by.keys().cloned().collect();
     }
+    let mut nodes: Vec<NodeInfo> = Vec::new();
     for name in names {
         let inst = inst_by.get(&name).cloned().unwrap_or_default();
         let mt = n_mt.get(inst.as_str()).map(|x| x.value).unwrap_or(0.0);
         let ma = n_ma.get(inst.as_str()).map(|x| x.value).unwrap_or(0.0);
         let meta = node_meta.get(&name).cloned().unwrap_or_default();
-        snap.nodes.push(NodeInfo {
+        nodes.push(NodeInfo {
             load1: load_by.get(&name).copied().unwrap_or(f64::NAN),
             mem_used_gb: to_gb(mt - ma),
             mem_total_gb: to_gb(mt),
@@ -409,7 +401,19 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             name,
         });
     }
-    snap.nodes.sort_by(|a, b| a.name.cmp(&b.name));
+    nodes.sort_by(|a, b| a.name.cmp(&b.name));
+    (accel, nodes)
+}
+
+pub async fn collect(cfg: &Config) -> Snapshot {
+    let mut snap = Snapshot::default();
+    let mut warn = Vec::new();
+    snap.ts = now_secs();
+
+    // 가속기 + 노드는 fast tier(collect_fast) 재사용 — 중복 제거
+    let (accel, nodes) = collect_fast(cfg).await;
+    snap.accel = accel;
+    snap.nodes = nodes;
 
     // ---------- EPP pools ----------
     let p_ready = q(cfg, "inference_pool_ready_pods", &mut warn).await;
