@@ -153,6 +153,7 @@ pub struct App {
     pub zoom: bool,       // 포커스(줌) — 헤더/탭 숨기고 본문 최대화
     pub paused: bool,     // 화면 갱신 일시정지(데이터 고정, 읽기용)
     pub detail_scroll: u16, // detail 내부 세로 스크롤
+    pub dev_sel: usize,     // Node 상세 내 device 커서: 0=노드요약, 1..=n=해당 device 히스토리
     pub logs_mode: bool,      // 로그 오버레이
     pub logs_target: String,  // 로그 대상 pod
     pub logs: Vec<String>,    // 로그 줄
@@ -218,6 +219,7 @@ impl App {
             zoom: false,
             paused: false,
             detail_scroll: 0,
+            dev_sel: 0,
             logs_mode: false,
             logs_target: String::new(),
             logs: Vec::new(),
@@ -495,6 +497,7 @@ impl App {
     pub fn toggle_detail(&mut self) {
         if self.list_len() > 0 {
             self.detail = !self.detail;
+            self.dev_sel = 0; // 상세 진입 시 노드 요약부터
         }
     }
 
@@ -581,6 +584,28 @@ impl App {
             let tps = snap.perf.tps;
             if !tps.is_nan() {
                 self.push_hist("sys:tps", tps.round().max(0.0) as u64);
+            }
+            // per-model perf 시계열 — Perf/Model 상세의 지표별 타임라인용.
+            // 지연은 ms(정수), 처리량은 rate(반올림)로 저장. 값 없으면(NaN) 스킵.
+            for r in &snap.perf_rows {
+                let k = format!("mperf:{}", r.model);
+                let push_ms = |s: &mut Self, sub: &str, v: f64| {
+                    if !v.is_nan() {
+                        s.push_hist(&format!("{}:{}", k, sub), (v * 1000.0).round().max(0.0) as u64);
+                    }
+                };
+                push_ms(self, "ttft", r.ttft_p95);
+                push_ms(self, "tpot", r.tpot_p95);
+                push_ms(self, "e2e", r.e2e_p95);
+                push_ms(self, "queue", r.queue_p95);
+                push_ms(self, "prefill", r.prefill_p95);
+                push_ms(self, "decode", r.decode_p95);
+                if !r.tps.is_nan() {
+                    self.push_hist(&format!("{}:tps", k), r.tps.round().max(0.0) as u64);
+                }
+                if !r.req.is_nan() {
+                    self.push_hist(&format!("{}:req", k), r.req.round().max(0.0) as u64);
+                }
             }
             self.detect_alerts(&snap);
             // 세션 에너지 기준선(디바이스 최초 관측 시 캡처).
@@ -682,9 +707,26 @@ impl App {
         let cur = self.selected as i64 + delta;
         self.selected = cur.rem_euclid(n as i64) as usize;
         self.detail_scroll = 0; // 항목 바뀌면 스크롤 리셋
+        self.dev_sel = 0;       // 다른 노드로 이동 → device 커서 요약으로
     }
     pub fn scroll_detail(&mut self, delta: i64) {
         self.detail_scroll = (self.detail_scroll as i64 + delta).max(0) as u16;
+    }
+    /// 현재 선택 노드가 가진 가속기 수(Node 상세 device 커서 범위).
+    pub fn node_dev_count(&self) -> usize {
+        match self.selected_node() {
+            Some(n) => self.snap.accel.iter().filter(|a| a.node == n.name).count(),
+            None => 0,
+        }
+    }
+    /// Node 상세 device 커서 이동: 0(요약) ↔ 1..=n(개별 device) 순환.
+    pub fn dev_cursor(&mut self, delta: i64) {
+        let n = self.node_dev_count();
+        if n == 0 {
+            return;
+        }
+        let cur = self.dev_sel as i64 + delta;
+        self.dev_sel = cur.rem_euclid((n + 1) as i64) as usize; // 0..=n
     }
     /// detail 위치(현재/전체) — "◂ prev  i/n  next ▸" 표시용.
     pub fn detail_pos(&self) -> (usize, usize) {
