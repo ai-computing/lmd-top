@@ -453,6 +453,8 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         Accel => parts.push("p/m/n pivot".into()),
         Pods => parts.push("i/m pivot".into()),
         Nodes => parts.push("i pivot".into()),
+        Perf => parts.push("p/i/e pivot".into()),
+        Epp => parts.push("+/- what-if".into()),
         _ => {}
     }
     if matches!(v, Pods | Models | Overview | Accel) {
@@ -968,25 +970,41 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
     match &app.snap.epp {
         Some(cfg) => {
             let order = app.order();
-            let maxw = cfg.scorers.iter().map(|(_, w)| *w).fold(1.0, f64::max);
+            // 유효 가중치(what-if 오버라이드 반영) + 상대 영향도(%).
+            let eff: Vec<f64> = cfg.scorers.iter().map(|(n, w)| app.epp_weight(n, *w)).collect();
+            let maxw = eff.iter().cloned().fold(1.0, f64::max);
+            let total: f64 = eff.iter().sum::<f64>().max(1e-9);
+            let simulating = !app.epp_weights.is_empty();
             let srows: Vec<Row> = order
                 .iter()
                 .map(|&i| {
-                    let (name, w) = &cfg.scorers[i];
-                    let bw = ((w / maxw) * 10.0).round() as usize;
+                    let (name, base) = &cfg.scorers[i];
+                    let w = app.epp_weight(name, *base);
+                    let ov = app.epp_weights.contains_key(name);
+                    let bw = ((w / maxw) * 8.0).round() as usize;
+                    let infl = w / total * 100.0;
                     Row::new(vec![
-                        cellw(name.clone(), 28),
-                        Cell::from(Span::styled(format!("{:.0}", w), Style::default().fg(C_WARN()))),
+                        cellw(name.clone(), 26),
+                        Cell::from(Span::styled(
+                            format!("{:.0}", w),
+                            Style::default().fg(if ov { C_ACC() } else { C_WARN() }).add_modifier(if ov { Modifier::BOLD } else { Modifier::empty() }),
+                        )),
                         Cell::from(Span::styled("█".repeat(bw), Style::default().fg(C_ACC()))),
+                        Cell::from(Span::styled(format!("{:>3.0}%", infl), Style::default().fg(C_DIM()))),
                     ])
                 })
                 .collect();
-            let t = Table::new(srows, [Constraint::Min(16), Constraint::Length(3), Constraint::Length(11)])
-                .header(hrow(&["SCORER", "WT", "WEIGHT"]))
+            let title = if simulating {
+                format!("EPP scorers · +/- what-if (sim, not applied){}", count_suffix(app.selected, order.len()))
+            } else {
+                format!("EPP scorers · +/- what-if · select for desc{}", count_suffix(app.selected, order.len()))
+            };
+            let t = Table::new(srows, [Constraint::Min(14), Constraint::Length(3), Constraint::Length(9), Constraint::Length(4)])
+                .header(hrow(&["SCORER", "WT", "WEIGHT", "infl"]))
                 .column_spacing(1)
                 .row_highlight_style(hl_style())
                 .highlight_symbol("▎")
-                .block(block_active(&format!("EPP scorers · select for description{}", count_suffix(app.selected, order.len()))));
+                .block(block_active(&title));
             let mut st = TableState::default();
             st.select(Some(app.selected));
             f.render_stateful_widget(t, top_l, &mut st);

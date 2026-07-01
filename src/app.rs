@@ -172,6 +172,8 @@ pub struct App {
     pub nav_stack: Vec<NavState>,   // pivot 브레드크럼(esc 로 되짚음)
     // ── Perf 드릴 ──
     pub perf_detail: Option<crate::collect::PerfDetail>, // 선택 모델 지연 분포(Enter 시 온디맨드)
+    // ── EPP scorer 가중치 what-if(로컬 시뮬, 클러스터 무변경) ──
+    pub epp_weights: HashMap<String, f64>, // scorer 이름 → 조정 가중치 오버라이드
 }
 
 /// ~/.config/lmd-top/lmd-top.yaml 의 columns: {view: [col,...]} 로드. 없으면 빈 맵(=기본 전체).
@@ -233,7 +235,26 @@ impl App {
             confirm: None,
             nav_stack: Vec::new(),
             perf_detail: None,
+            epp_weights: HashMap::new(),
         }
+    }
+
+    /// EPP what-if: 선택 scorer 가중치를 delta 만큼 조정(로컬 오버라이드, ≥0).
+    pub fn epp_adjust(&mut self, delta: f64) {
+        if self.view != View::Epp {
+            return;
+        }
+        let ord = self.order();
+        if let (Some(cfg), Some(&i)) = (&self.snap.epp, ord.get(self.selected)) {
+            if let Some((name, base)) = cfg.scorers.get(i) {
+                let cur = *self.epp_weights.get(name).unwrap_or(base);
+                self.epp_weights.insert(name.clone(), (cur + delta).max(0.0));
+            }
+        }
+    }
+    /// scorer 유효 가중치(오버라이드 있으면 그것, 없으면 base).
+    pub fn epp_weight(&self, name: &str, base: f64) -> f64 {
+        *self.epp_weights.get(name).unwrap_or(&base)
     }
 
     /// 선택된 per-model perf 행의 모델(서비스)명 — Perf 드릴용.
@@ -263,7 +284,14 @@ impl App {
         let accel = self.selected_accel().map(|a| (a.busy_model.clone(), a.node.clone()));
         let pod = self.selected_pod().map(|p| p.name.clone());
         let node = self.selected_node().map(|n| n.name.clone());
+        let perf_model = self.selected_perf_model();
         let target: Option<(View, String)> = match self.view {
+            View::Perf => perf_model.and_then(|name| match key {
+                'p' => Some((View::Pods, name)),
+                'i' => Some((View::Accel, name)),
+                'e' => Some((View::Epp, String::new())),
+                _ => None,
+            }),
             View::Models | View::Overview => model.and_then(|name| match key {
                 'p' => Some((View::Pods, name)),
                 'i' => Some((View::Accel, name)),
@@ -554,6 +582,7 @@ impl App {
             self.sort = 0;
             self.detail = false;
             self.nav_stack.clear(); // 수동 뷰 전환 → 브레드크럼 초기화
+            self.epp_weights.clear(); // what-if 오버라이드는 EPP 떠나면 리셋
         }
     }
 
