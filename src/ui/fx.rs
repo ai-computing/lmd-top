@@ -37,17 +37,21 @@ impl FxState {
         if !self.enabled {
             return dt;
         }
-        // 뷰 전환 또는 상세 진입 → 본문 coalesce(흩어진 셀이 모여 완성되는 트랜지션).
+        // 은은하게, 상황별로 다른 느낌을 섞음(테마-안전: 전경색만 건드림 → 밝은/어두운 터미널 무관).
+        // · 뷰 전환 = 텍스트가 dim 에서 원색으로 부드럽게 "잉크인"(방향/스캐터 없음 → 눈 안 아픔).
+        // · 상세 진입 = 살짝 coalesce(줌인 느낌) 짧게 — 전환과 구분되는 결.
         let view_changed = self.prev_view.map(|v| v != app.view).unwrap_or(true);
         let detail_entered = app.detail && !self.prev_detail;
-        if view_changed || detail_entered {
-            self.body = Some(fx::coalesce((240u32, Interpolation::QuadOut)));
+        if detail_entered {
+            self.body = Some(fx::coalesce((180u32, Interpolation::QuadOut)));
+        } else if view_changed {
+            self.body = Some(fx::fade_from_fg(C_DIM(), (150u32, Interpolation::QuadOut)));
         }
         self.prev_view = Some(app.view);
         self.prev_detail = app.detail;
-        // 신규 알림(flash_until 증가) → 요약 바가 빨강에서 원색으로 페이드(펄스).
+        // 신규 알림 → 요약 바 전경색이 잠깐 빨개졌다 원색으로(배경 전체 빨강 아님 → 덜 자극적).
         if app.flash_until > self.prev_flash {
-            self.flash = Some(fx::fade_from(C_BAD(), C_BAD(), (600u32, Interpolation::QuadOut)));
+            self.flash = Some(fx::fade_from_fg(C_BAD(), (450u32, Interpolation::QuadOut)));
         }
         self.prev_flash = app.flash_until;
         dt
