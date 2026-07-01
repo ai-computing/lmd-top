@@ -287,16 +287,45 @@ fn map_by(series: Vec<Series>, key: &str) -> BTreeMap<String, Series> {
 /// fast tier: 가속기(util/mem/temp/power/health) + 노드. 자주(1s) 갱신 — 프롬 ~12 + kube nodes.
 /// util/mem 반응성을 위해 collect()에서 분리. 무거운 나머지는 full collect(느린 주기).
 pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
-    let mut warn = Vec::new();
+    let p = &cfg.prom;
+    // 모든 프롬 쿼리 + kube nodes 를 동시 실행(순차 대비 대폭 단축)
+    let (
+        f_util, f_temp, f_pow, f_du, f_dt, f_alive, f_thr, r_util, r_temp, r_pow, r_du, r_dt, r_health, g_util,
+        g_mu, g_temp, g_pow, n_load, n_mt, n_ma, n_cpu, node_res,
+    ) = tokio::join!(
+        prom::query(p, "avg by (uuid,device,hostname) (furiosa_npu_core_utilization)"),
+        prom::query(p, "max by (uuid) (furiosa_npu_hw_temperature)"),
+        prom::query(p, "max by (uuid) (furiosa_npu_hw_power)"),
+        prom::query(p, "max by (uuid) (furiosa_npu_dram_usage)"),
+        prom::query(p, "max by (uuid) (furiosa_npu_dram_total)"),
+        prom::query(p, "max by (uuid) (furiosa_npu_alive)"),
+        prom::query(p, "max by (uuid) (furiosa_npu_throttling_events_count)"),
+        prom::query(p, "RBLN_DEVICE_STATUS:UTILIZATION"),
+        prom::query(p, "RBLN_DEVICE_STATUS:TEMPERATURE"),
+        prom::query(p, "RBLN_DEVICE_STATUS:CARD_POWER"),
+        prom::query(p, "RBLN_DEVICE_STATUS:DRAM_USED"),
+        prom::query(p, "RBLN_DEVICE_STATUS:DRAM_TOTAL"),
+        prom::query(p, "RBLN_DEVICE_STATUS:HEALTH"),
+        prom::query(p, "DCGM_FI_DEV_GPU_UTIL"),
+        prom::query(p, "DCGM_FI_DEV_FB_USED"),
+        prom::query(p, "DCGM_FI_DEV_GPU_TEMP"),
+        prom::query(p, "DCGM_FI_DEV_POWER_USAGE"),
+        prom::query(p, "node_load1"),
+        prom::query(p, "node_memory_MemTotal_bytes"),
+        prom::query(p, "node_memory_MemAvailable_bytes"),
+        prom::query(p, "100 - (avg by (instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)"),
+        node_kube(),
+    );
+    let ok = |r: anyhow::Result<Vec<Series>>| r.unwrap_or_default();
     let mut accel: Vec<Accel> = Vec::new();
     // Furiosa
-    let f_util = q(cfg, "avg by (uuid,device,hostname) (furiosa_npu_core_utilization)", &mut warn).await;
-    let f_temp = map_by(q(cfg, "max by (uuid) (furiosa_npu_hw_temperature)", &mut warn).await, "uuid");
-    let f_pow = map_by(q(cfg, "max by (uuid) (furiosa_npu_hw_power)", &mut warn).await, "uuid");
-    let f_du = map_by(q(cfg, "max by (uuid) (furiosa_npu_dram_usage)", &mut warn).await, "uuid");
-    let f_dt = map_by(q(cfg, "max by (uuid) (furiosa_npu_dram_total)", &mut warn).await, "uuid");
-    let f_alive = map_by(q(cfg, "max by (uuid) (furiosa_npu_alive)", &mut warn).await, "uuid");
-    let f_thr = map_by(q(cfg, "max by (uuid) (furiosa_npu_throttling_events_count)", &mut warn).await, "uuid");
+    let f_util = ok(f_util);
+    let f_temp = map_by(ok(f_temp), "uuid");
+    let f_pow = map_by(ok(f_pow), "uuid");
+    let f_du = map_by(ok(f_du), "uuid");
+    let f_dt = map_by(ok(f_dt), "uuid");
+    let f_alive = map_by(ok(f_alive), "uuid");
+    let f_thr = map_by(ok(f_thr), "uuid");
     for s in &f_util {
         let uuid = s.l("uuid");
         accel.push(Accel {
@@ -314,12 +343,12 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
         });
     }
     // RBLN
-    let r_util = q(cfg, "RBLN_DEVICE_STATUS:UTILIZATION", &mut warn).await;
-    let r_temp = map_by(q(cfg, "RBLN_DEVICE_STATUS:TEMPERATURE", &mut warn).await, "uuid");
-    let r_pow = map_by(q(cfg, "RBLN_DEVICE_STATUS:CARD_POWER", &mut warn).await, "uuid");
-    let r_du = map_by(q(cfg, "RBLN_DEVICE_STATUS:DRAM_USED", &mut warn).await, "uuid");
-    let r_dt = map_by(q(cfg, "RBLN_DEVICE_STATUS:DRAM_TOTAL", &mut warn).await, "uuid");
-    let r_health = map_by(q(cfg, "RBLN_DEVICE_STATUS:HEALTH", &mut warn).await, "uuid");
+    let r_util = ok(r_util);
+    let r_temp = map_by(ok(r_temp), "uuid");
+    let r_pow = map_by(ok(r_pow), "uuid");
+    let r_du = map_by(ok(r_du), "uuid");
+    let r_dt = map_by(ok(r_dt), "uuid");
+    let r_health = map_by(ok(r_health), "uuid");
     for s in &r_util {
         let uuid = s.l("uuid");
         accel.push(Accel {
@@ -337,10 +366,10 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
         });
     }
     // NVIDIA DCGM
-    let g_util = q(cfg, "DCGM_FI_DEV_GPU_UTIL", &mut warn).await;
-    let g_mu = map_by(q(cfg, "DCGM_FI_DEV_FB_USED", &mut warn).await, "gpu");
-    let g_temp = map_by(q(cfg, "DCGM_FI_DEV_GPU_TEMP", &mut warn).await, "gpu");
-    let g_pow = map_by(q(cfg, "DCGM_FI_DEV_POWER_USAGE", &mut warn).await, "gpu");
+    let g_util = ok(g_util);
+    let g_mu = map_by(ok(g_mu), "gpu");
+    let g_temp = map_by(ok(g_temp), "gpu");
+    let g_pow = map_by(ok(g_pow), "gpu");
     for s in &g_util {
         let gpu = s.l("gpu");
         accel.push(Accel {
@@ -360,14 +389,11 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
     accel.sort_by(|a, b| (a.kind as u8, &a.node, &a.id).cmp(&(b.kind as u8, &b.node, &b.id)));
 
     // Nodes
-    let (node_ip, node_meta) = node_kube(&mut warn).await;
-    let n_load = q(cfg, "node_load1", &mut warn).await;
-    let n_mt = map_by(q(cfg, "node_memory_MemTotal_bytes", &mut warn).await, "instance");
-    let n_ma = map_by(q(cfg, "node_memory_MemAvailable_bytes", &mut warn).await, "instance");
-    let n_cpu = map_by(
-        q(cfg, "100 - (avg by (instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)", &mut warn).await,
-        "instance",
-    );
+    let (node_ip, node_meta) = node_res;
+    let n_load = ok(n_load);
+    let n_mt = map_by(ok(n_mt), "instance");
+    let n_ma = map_by(ok(n_ma), "instance");
+    let n_cpu = map_by(ok(n_cpu), "instance");
     let resolve = |inst: &str| -> String {
         let ip = inst.split(':').next().unwrap_or(inst);
         node_ip.get(ip).cloned().unwrap_or_else(|| ip.to_string())
@@ -595,7 +621,7 @@ fn norm_pct(v: f64) -> f64 {
 
 type NodeMeta = (bool, bool, bool, String); // (ready, cordoned, pressure, version)
 
-async fn node_kube(warn: &mut Vec<String>) -> (BTreeMap<String, String>, BTreeMap<String, NodeMeta>) {
+async fn node_kube() -> (BTreeMap<String, String>, BTreeMap<String, NodeMeta>) {
     let mut ip = BTreeMap::new();
     let mut meta = BTreeMap::new();
     match kube::get_json(&["get", "nodes", "-o", "json"]).await {
@@ -634,7 +660,7 @@ async fn node_kube(warn: &mut Vec<String>) -> (BTreeMap<String, String>, BTreeMa
                 }
             }
         }
-        Err(e) => warn.push(format!("kube nodes: {}", e)),
+        Err(_) => {}
     }
     (ip, meta)
 }
