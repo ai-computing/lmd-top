@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.9.2]
+### Changed — 리팩토링 R4: 반복 테이블 렌더 헬퍼
+- Accel/Pods/Events 의 Table+헤더+선택 하이라이트+스크롤바+위치카운터 보일러플레이트(3회 중복)를 **`render_list_table` 헬퍼 1곳**으로 통합. 뷰는 rows/widths/headers/title 만 넘김.
+
 ## [0.9.1]
 ### Changed — 리팩토링 R5: 튜닝값 config 외부화
 - 흩어져 하드코딩되던 튜닝값을 **`config.rs` 단일 모듈**로: prom/ns/grafana/수집주기(full·fast). 우선순위 **env > `~/.config/lmd-top/lmd-top.yaml` > 기본값**. main.rs 의 하드코딩 인터벌·Grafana URL 제거, `ui_loop` 는 `Config` 를 받음. `Config` 를 collect→config 로 이관, columns 로더도 `config::load_yaml` 재사용.
