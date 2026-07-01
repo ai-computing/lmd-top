@@ -135,7 +135,9 @@ fn help_overlay(f: &mut Frame) {
         g("s", "scale selected model up/down"),
         g("t", "cycle theme (default/high-contrast/colorblind)"),
         g("g", "open Grafana dashboard"),
-        g("? / Esc", "help / close-back   q quit"),
+        g("z", "zoom/focus (hide header+tabs)"),
+        g("Esc", "back: close detail/filter/zoom (does NOT quit)"),
+        g("? / q", "help / quit"),
         Line::from(""),
         sec("color / glyph"),
         Line::from(vec![
@@ -276,7 +278,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     if sortable {
         hint.push_str(&format!("o sort:{}  ", app.sort_label()));
     }
-    hint.push_str("s scale  t theme  g grafana↗  ? help  q quit");
+    hint.push_str("s scale  t theme  z zoom  g grafana↗  ? help  q quit");
     spans.push(Span::styled(hint, Style::default().fg(C_DIM())));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

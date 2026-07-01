@@ -52,10 +52,12 @@ fn render_dump(snap: collect::Snapshot) {
     use ratatui::backend::TestBackend;
     let mut a = App::new();
     a.apply(snap);
+    let rw: u16 = std::env::var("LMD_W").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
+    let rh: u16 = std::env::var("LMD_H").ok().and_then(|s| s.parse().ok()).unwrap_or(26);
     for v in View::ALL {
         a.view = v;
         a.selected = 0;
-        let backend = TestBackend::new(100, 26);
+        let backend = TestBackend::new(rw, rh);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| ui::draw(f, &a)).unwrap();
         let buf = term.backend().buffer().clone();
