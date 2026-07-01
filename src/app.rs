@@ -88,7 +88,7 @@ pub fn theme_name(i: usize) -> &'static str {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum View {
     Overview,
     Accel,
@@ -286,10 +286,10 @@ impl App {
         *self.epp_weights.get(name).unwrap_or(&base)
     }
 
-    /// 선택된 per-model perf 행의 모델(서비스)명 — Perf 드릴용.
+    /// 선택된 per-model perf 행의 모델(서비스)명 — Perf 드릴용. sel_orig 경유(정렬/필터 안전).
     pub fn selected_perf_model(&self) -> Option<String> {
         if self.view == View::Perf {
-            self.snap.perf_rows.get(self.selected).map(|r| r.model.clone())
+            self.sel_orig().and_then(|i| self.snap.perf_rows.get(i)).map(|r| r.model.clone())
         } else {
             None
         }
@@ -345,13 +345,37 @@ impl App {
             }),
             _ => None,
         };
-        if let Some((v, filter)) = target {
-            self.nav_stack.push(NavState { view: self.view, selected: self.selected, filter: self.filter.clone(), detail: self.detail });
-            self.view = v;
-            self.filter = filter;
-            self.selected = 0;
-            self.sort = 0;
-            self.detail = false;
+        match target {
+            Some((v, filter)) => {
+                self.nav_stack.push(NavState { view: self.view, selected: self.selected, filter: self.filter.clone(), detail: self.detail });
+                self.view = v;
+                self.filter = filter;
+                self.selected = 0;
+                self.sort = 0;
+                self.detail = false;
+                self.epp_weights.clear();
+                // 빈 화면 착지 방지: 매칭 0건이면 되짚고 안내(막다른 화면 회피).
+                if self.list_len() == 0 {
+                    self.nav_back();
+                    self.notify(format!("no related items to pivot to ('{}')", key));
+                }
+            }
+            None => {
+                // pivot-source 뷰에서 미지원 pivot 키 → 죽은 입력 대신 힌트.
+                if "piremn".contains(key) {
+                    let hint = match self.view {
+                        View::Models | View::Overview => Some("p/i/r/e"),
+                        View::Accel => Some("p/m/n"),
+                        View::Pods => Some("i/m"),
+                        View::Nodes => Some("i"),
+                        View::Perf => Some("p/i/e"),
+                        _ => None,
+                    };
+                    if let Some(h) = hint {
+                        self.notify(format!("pivot here: {}", h));
+                    }
+                }
+            }
         }
     }
 
@@ -363,6 +387,7 @@ impl App {
             self.filter = st.filter;
             self.detail = st.detail;
             self.sort = 0;
+            self.epp_weights.clear();
             true
         } else {
             false
@@ -825,4 +850,57 @@ pub fn diagnose(s: &Snapshot) -> (String, Option<Sev>) {
         return (format!("{} model(s) serving, {} accelerator(s) hot (>80%)", serving, busy), None);
     }
     (format!("{} model(s) serving, accelerators have headroom", serving), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collect::{ModelRow, PodRow, Snapshot};
+
+    fn model(name: &str) -> ModelRow {
+        ModelRow {
+            name: name.into(), ready: 1, desired: 1, status: "● Running".into(), route: "/x".into(),
+            engine: "vllm".into(), accel: "-".into(), running: None, waiting: None, tps: None, kv: None, ttft: None,
+        }
+    }
+    fn pod(name: &str) -> PodRow {
+        PodRow { name: name.into(), phase: "Running".into(), ready: "1/1".into(), node: "n1".into(), restarts: 0 }
+    }
+    fn app_with(models: Vec<ModelRow>, pods: Vec<PodRow>) -> App {
+        let mut a = App::new();
+        a.snap = Snapshot { models, pods, ..Default::default() };
+        a.view = View::Models;
+        a
+    }
+
+    #[test]
+    fn pivot_roundtrip_restores_state() {
+        let mut a = app_with(vec![model("m1")], vec![pod("m1-abc")]);
+        a.pivot('p'); // Models → Pods filtered by m1
+        assert_eq!(a.view, View::Pods);
+        assert_eq!(a.filter, "m1");
+        assert!(a.nav_back());
+        assert_eq!(a.view, View::Models);
+        assert_eq!(a.filter, "");
+        assert_eq!(a.selected, 0);
+        assert!(a.nav_stack.is_empty());
+    }
+
+    #[test]
+    fn pivot_empty_landing_reverts() {
+        // 매칭되는 pod 없음 → 막다른 빈 화면 대신 되짚어야 함
+        let mut a = app_with(vec![model("lonely")], vec![]);
+        a.pivot('p');
+        assert_eq!(a.view, View::Models);
+        assert_eq!(a.filter, "");
+        assert!(a.nav_stack.is_empty());
+    }
+
+    #[test]
+    fn unsupported_pivot_key_is_noop() {
+        let mut a = app_with(vec![model("m1")], vec![pod("m1-abc")]);
+        a.pivot('x'); // pivot 키 아님
+        assert_eq!(a.view, View::Models);
+        assert!(a.nav_stack.is_empty());
+    }
 }

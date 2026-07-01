@@ -2,6 +2,18 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.8.6]
+### Fixed — 재평가 리뷰 반영(견고성/정직성)
+- **패닉 시 터미널 복원**(#1, 높음): `panic::set_hook` 으로 패닉해도 raw mode/alt-screen 해제 → 셸 안 망가짐.
+- **EPP 과대약속 수정**(#2, 높음): "+/- what-if (sim)" 문구가 라우팅 예측처럼 오해 → **"+/- weight · infl=weight share (not applied)"** 로 정직하게 낮춤(실제 재시뮬은 per-endpoint score 필요 → 인프라 대기).
+- **serving 에러 글리프 과민**(#4): `err>0` 이면 무조건 노랑이던 것을 **비율(err/req>1%)** 기준으로 → 4xx 하나에 상단이 상시 노랑 안 됨.
+- **pivot 빈-착지 방지**(#3): 매칭 0건이면 막다른 화면 대신 되짚고 안내.
+- **미지원 pivot 키 힌트**(#8): 죽은 입력 대신 해당 뷰의 가능한 pivot 안내.
+- **"busy" 정의 통일**(#5): 요약바 busy 기준을 `util>5` → `IDLE_UTIL` 로(LED/util_color 와 일치).
+- **상태 리셋 일관화**(#6): `epp_weights` 를 pivot/nav_back 에서도 클리어.
+- **selected_perf_model sel_orig 경유**(#7): Perf 정렬/필터 대비.
+- **단위테스트 추가**(#C): pivot 왕복·빈-착지·미지원키 불변식.
+
 ## [0.8.5]
 ### Added — 세션 에너지 추적 (all-smi 식)
 - `DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION`(누적 mJ)로 **세션 에너지(Wh)** 를 디바이스별 기준선 대비 추적. Accel 상세에 `energy X.XX Wh (session · avg N W)`, Overview Σ 에 클러스터 총 `E N Wh`. **`R`** 로 세션 리셋.
