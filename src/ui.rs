@@ -228,7 +228,7 @@ fn logs_overlay(f: &mut Frame, app: &App) {
         ),
         area,
     );
-    list_scrollbar(f, area, total, (app.logs_scroll as usize).min(total.saturating_sub(1)));
+    list_scrollbar(f, area, total, (app.logs_scroll as usize).min(total.saturating_sub(1)), 0);
 }
 
 // ── 헤더 ───────────────────────────────────────────────
@@ -241,11 +241,20 @@ fn title_bar(f: &mut Frame, area: Rect, s: &Snapshot, tick: u64, paused: bool) {
     } else {
         Span::styled(format!("⌂ gw {} ○", s.gw_addr), Style::default().fg(C_WARN()))
     };
+    // 데이터 신선도: 마지막 스냅샷이 몇 초 전인지(수집 주기 3s). stale 판단용.
+    let fresh = if s.ts == 0 {
+        Span::styled("  · connecting…", Style::default().fg(C_DIM()))
+    } else {
+        let age = crate::collect::now_secs().saturating_sub(s.ts);
+        let col = if age > 10 { C_WARN() } else { C_DIM() };
+        Span::styled(format!("  · updated {}s ago", age), Style::default().fg(col))
+    };
     let line = Line::from(vec![
         Span::styled(format!("{} ", spin), Style::default().fg(if paused { C_WARN() } else { C_ACC() })),
         Span::styled("lmd-top", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
         Span::styled(format!("  llm-d · {} nodes  ", s.nodes.len()), Style::default().fg(C_DIM())),
         gw,
+        fresh,
         Span::styled(if paused { "  ⏸ PAUSED (space)" } else { "" }, Style::default().fg(C_WARN())),
     ]);
     f.render_widget(Paragraph::new(line), area);
@@ -494,6 +503,15 @@ fn kind_color(k: AccelKind) -> Color {
         AccelKind::Rngd => Color::Cyan,
     }
 }
+/// prefill/decode 구간색 — 테마·색맹 대응(Okabe-Ito 계열). Perf 테이블 phase 구분용.
+#[allow(non_snake_case)]
+fn C_PREFILL() -> Color {
+    match th() { 1 => Color::LightCyan, 2 => Color::Rgb(86, 180, 233), _ => Color::Cyan }
+}
+#[allow(non_snake_case)]
+fn C_DECODE() -> Color {
+    match th() { 1 => Color::LightMagenta, 2 => Color::Rgb(204, 121, 167), _ => Color::Magenta }
+}
 
 fn fmt_opt(v: Option<f64>) -> String {
     match v {
@@ -563,9 +581,10 @@ fn hl_style() -> Style {
 }
 
 /// 리스트/테이블 오른쪽에 스크롤바(오버플로 표시). 블록 테두리 안쪽 세로로 렌더.
-/// total=전체 항목 수, pos=현재 선택 인덱스. 화면보다 짧으면 그리지 않음.
-fn list_scrollbar(f: &mut Frame, area: Rect, total: usize, pos: usize) {
-    let viewport = area.height.saturating_sub(2) as usize; // 테두리 제외 대략치
+/// total=전체 항목 수, pos=현재 선택 인덱스, header=본문 위 고정 행(테이블 헤더=1, 없으면 0).
+/// 화면보다 짧으면 그리지 않음.
+fn list_scrollbar(f: &mut Frame, area: Rect, total: usize, pos: usize, header: usize) {
+    let viewport = (area.height as usize).saturating_sub(2 + header); // 테두리(2) + 헤더 행 제외
     if total == 0 || total <= viewport {
         return;
     }
@@ -661,7 +680,7 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
     let mut st = TableState::default();
     st.select(Some(app.selected));
     f.render_stateful_widget(table, area, &mut st);
-    list_scrollbar(f, area, total, app.selected);
+    list_scrollbar(f, area, total, app.selected, 1);
 }
 
 // ── Models ─────────────────────────────────────────────
@@ -670,7 +689,7 @@ fn view_models(f: &mut Frame, area: Rect, app: &App) {
     st.select(Some(app.selected));
     let total = app.order().len();
     f.render_stateful_widget(models_table(app, "Models · ⏎ detail"), area, &mut st);
-    list_scrollbar(f, area, total, app.selected);
+    list_scrollbar(f, area, total, app.selected, 1);
 }
 
 const MODEL_COLS: [&str; 10] = ["name", "engine", "accel", "ready", "run", "wait", "kv", "tps", "path", "status"];
@@ -777,7 +796,7 @@ fn view_pods(f: &mut Frame, area: Rect, app: &App) {
     let mut st = TableState::default();
     st.select(Some(app.selected));
     f.render_stateful_widget(table, area, &mut st);
-    list_scrollbar(f, area, order.len(), app.selected);
+    list_scrollbar(f, area, order.len(), app.selected, 1);
 }
 
 // ── EPP ────────────────────────────────────────────────
@@ -827,7 +846,7 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
             let mut st = TableState::default();
             st.select(Some(app.selected));
             f.render_stateful_widget(t, top_l, &mut st);
-            list_scrollbar(f, top_l, order.len(), app.selected);
+            list_scrollbar(f, top_l, order.len(), app.selected, 1);
 
             let sel = order.get(app.selected).and_then(|&i| cfg.scorers.get(i));
             let mut dl: Vec<Line> = vec![
@@ -1013,12 +1032,10 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
 // ── Overview ───────────────────────────────────────────
 fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     let s = &app.snap;
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Length(6), Constraint::Length(5), Constraint::Min(4), Constraint::Length(3)])
-        .split(area);
 
     // ── 클러스터 요약 카드(all-smi 식 aggregate) ──────────
+    // Σ 요약 1줄 + LED 그리드(폭에 맞춰 줄바꿈). 카드 높이는 LED 줄 수에 맞춰 가변.
+    let mut cluster_lines: Vec<Line> = Vec::new();
     {
         let mut kinds: std::collections::BTreeMap<&str, (usize, Color)> = std::collections::BTreeMap::new();
         let (mut usum, mut mu, mut mt, mut pw) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
@@ -1041,16 +1058,33 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         sp.push(Span::styled(format!("· models {}/{} ", ready, s.models.len()), Style::default().fg(if ready > 0 { C_OK() } else { C_DIM() })));
         sp.push(Span::styled(format!("· req/s {} ", rate(s.perf.req_rate)), Style::default().fg(C_DIM())));
         sp.push(Span::styled(format!("· TTFT {}", ms(s.perf.ttft_p95)), Style::default().fg(C_DIM())));
+        cluster_lines.push(Line::from(sp));
+
         // all-smi 식 LED 그리드: 디바이스 1개=글리프 1개. vendor=색, util=●채움/○유휴, dead=✗, throttle=⚠.
+        // 폭 초과 시 다음 줄로 감싸고(라벨 폭만큼 들여쓰기), 큰 fleet 대비 최대 줄 수 제한.
+        const MAX_LED_LINES: usize = 8;
+        const LABEL_W: usize = 5; // "{:<4} "
+        let iw = (area.width as usize).saturating_sub(2); // 카드 내부 폭(테두리 제외)
+        let per_line = iw.saturating_sub(LABEL_W) / 2; // 글리프 "● " = 2칸씩
+        let per_line = per_line.max(1);
         let mut bykind: std::collections::BTreeMap<&str, Vec<&crate::collect::Accel>> = std::collections::BTreeMap::new();
         for a in &s.accel {
             bykind.entry(a.kind.label()).or_default().push(a);
         }
-        let mut led: Vec<Span> = Vec::new();
-        for (k, list) in &bykind {
+        let mut led_lines: Vec<Line> = Vec::new();
+        'kinds: for (k, list) in &bykind {
             let kc = kind_color(list[0].kind);
-            led.push(Span::styled(format!("{} ", k), Style::default().fg(kc).add_modifier(Modifier::BOLD)));
+            let mut cur: Vec<Span> = vec![Span::styled(format!("{:<4} ", k), Style::default().fg(kc).add_modifier(Modifier::BOLD))];
+            let mut n = 0usize;
             for a in list {
+                if n == per_line {
+                    led_lines.push(Line::from(std::mem::take(&mut cur)));
+                    if led_lines.len() >= MAX_LED_LINES {
+                        break 'kinds;
+                    }
+                    cur.push(Span::raw(" ".repeat(LABEL_W))); // 연속줄: 라벨 폭 들여쓰기
+                    n = 0;
+                }
                 let (g, c) = if !a.alive {
                     ("✗", C_BAD())
                 } else if a.throttle > 0.0 {
@@ -1060,15 +1094,28 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     ("○", C_DIM())
                 };
-                led.push(Span::styled(format!("{} ", g), Style::default().fg(c)));
+                cur.push(Span::styled(format!("{} ", g), Style::default().fg(c)));
+                n += 1;
             }
-            led.push(Span::raw(" "));
+            if cur.len() > 1 {
+                led_lines.push(Line::from(cur));
+            }
+            if led_lines.len() >= MAX_LED_LINES {
+                break;
+            }
         }
-        if led.is_empty() {
-            led.push(Span::styled("(no accelerators)", Style::default().fg(C_DIM())));
+        if led_lines.is_empty() {
+            led_lines.push(Line::from(Span::styled("(no accelerators)", Style::default().fg(C_DIM()))));
         }
-        f.render_widget(Paragraph::new(vec![Line::from(sp), Line::from(led)]).block(block("Cluster")), rows[0]);
+        cluster_lines.extend(led_lines);
     }
+    let cluster_h = cluster_lines.len() as u16 + 2; // 내용 줄 + 테두리(2)
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(cluster_h), Constraint::Length(6), Constraint::Length(5), Constraint::Min(4), Constraint::Length(3)])
+        .split(area);
+    f.render_widget(Paragraph::new(cluster_lines).block(block("Cluster")), rows[0]);
 
     // 가속기: (종류,노드)별 집계 — 한눈에 + 절대 메모리(GB) + health 아이콘
     let mut groups: Vec<(AccelKind, String, usize, f64, f64, f64, bool, bool)> = Vec::new();
@@ -1409,8 +1456,8 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(Span::styled(rate(r.tps), Style::default().fg(C_OK()))),
                     cellw(ms(r.ttft_p95), 7),
                     Cell::from(Span::styled(ms(r.queue_p95), Style::default().fg(C_WARN()))), // 대기
-                    Cell::from(Span::styled(ms(r.prefill_p95), Style::default().fg(Color::Cyan))), // P
-                    Cell::from(Span::styled(ms(r.decode_p95), Style::default().fg(Color::Magenta))), // D
+                    Cell::from(Span::styled(ms(r.prefill_p95), Style::default().fg(C_PREFILL()))), // P
+                    Cell::from(Span::styled(ms(r.decode_p95), Style::default().fg(C_DECODE()))), // D
                     cellw(ms(r.tpot_p95), 7),
                     Cell::from(Span::styled(ms(r.e2e_p95), Style::default().fg(C_WARN()))),
                     preempt_cell,
@@ -1495,7 +1542,7 @@ fn view_launch(f: &mut Frame, area: Rect, app: &App) {
     let mut st = TableState::default();
     st.select(Some(app.selected));
     f.render_stateful_widget(lt, body_l, &mut st);
-    list_scrollbar(f, body_l, app.catalog.len(), app.selected);
+    list_scrollbar(f, body_l, app.catalog.len(), app.selected, 1);
 
     // 선택 모델의 배치 후보 × 라이브 재고
     let mut pl: Vec<Line> = Vec::new();
@@ -1598,7 +1645,7 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
     let mut st = TableState::default();
     st.select(Some(app.selected));
     f.render_stateful_widget(t, area, &mut st);
-    list_scrollbar(f, area, order.len(), app.selected);
+    list_scrollbar(f, area, order.len(), app.selected, 1);
 }
 
 // ── Events (k8s + llm-d 이벤트) ─────────────────────────
@@ -1634,7 +1681,7 @@ fn view_events(f: &mut Frame, area: Rect, app: &App) {
     let mut st = TableState::default();
     st.select(Some(app.selected));
     f.render_stateful_widget(t, area, &mut st);
-    list_scrollbar(f, area, order.len(), app.selected);
+    list_scrollbar(f, area, order.len(), app.selected, 1);
 }
 
 // ── 진단 ───────────────────────────────────────────────

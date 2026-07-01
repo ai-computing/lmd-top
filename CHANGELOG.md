@@ -2,6 +2,15 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.4.1]
+### Fixed
+- **스크롤바 off-by-one**: 뷰포트 계산이 테이블 헤더 행을 빼먹어 경계값(항목 수 == 화면 높이-2)에서 마지막 행이 가려져도 스크롤바를 안 그리던 문제. `list_scrollbar` 에 `header` 인자 추가(테이블=1, 로그=0).
+
+### Changed
+- **LED 그리드 줄바꿈**: Overview Cluster 카드의 LED 그리드가 단일 줄이라 디바이스가 많으면(대형 fleet) 가로로 잘리던 것을, 폭에 맞춰 줄바꿈(라벨 폭만큼 들여쓰기, 최대 8줄) + 카드 높이를 LED 줄 수에 맞춰 가변화.
+- **헤더 데이터 신선도**: 타이틀 바에 `updated Ns ago`(수집 주기 3s) 표시 — 10s 초과 시 노랑으로 stale 경고, 스냅샷 전엔 `connecting…`.
+- **PFILL/DECODE 테마 대응**: Perf 테이블의 prefill(cyan)·decode(magenta) 하드코딩 색을 테마·색맹(Okabe-Ito) 대응 헬퍼(C_PREFILL/C_DECODE)로 교체.
+
 ## [0.4.0]
 ### Added — polish pass (btop/all-smi/bottom 벤치마크)
 - **채움(area-fill) 타임라인**: 타임라인을 세로 블록(▁▂▃▄▅▆▇█) 채움 + 값 높이별 green→yellow→red 심각도색으로(btop/bottom식). 외부 크레이트 없이 프레임 버퍼 직접 렌더(tui-bar-graph는 ratatui 0.29 비호환이라 자체 구현).
