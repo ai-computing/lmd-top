@@ -5,7 +5,11 @@
 use crate::app::{App, View};
 use crate::collect::{AccelKind, Snapshot};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap};
+use ratatui::symbols::Marker;
+use ratatui::widgets::{
+    Axis, Block, BorderType, Borders, Cell, Chart, Clear, Dataset, GraphType, Paragraph, Row,
+    Sparkline, Table, TableState, Wrap,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 // ── 팔레트 ─────────────────────────────────────────────
@@ -880,9 +884,6 @@ fn tok(v: f64) -> String {
 fn rate(v: f64) -> String {
     if v.is_nan() { "–".into() } else { format!("{:.2}", v) }
 }
-fn hist_last(app: &App, key: &str) -> f64 {
-    app.hist_for(key).last().copied().unwrap_or(0) as f64
-}
 fn spark(f: &mut Frame, area: Rect, app: &App, key: &str, title: &str, max: u64, color: Color) {
     let data = app.hist_for(key);
     let cur = data.last().copied().unwrap_or(0);
@@ -905,15 +906,30 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Length(6), Constraint::Length(3), Constraint::Min(5)])
         .split(area);
 
-    // timeline 스파크라인 (부하/자원/처리량/지연 추이)
-    let sp = Layout::default()
+    // timeline: 라인 차트(util%/vram%) + tok/s·지연 스파크라인
+    let top = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Ratio(1, 4); 4])
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
         .split(rows[0]);
-    spark(f, sp[0], app, "sys:util", "util% 추이", 100, util_color(hist_last(app, "sys:util")));
-    spark(f, sp[1], app, "sys:vram", "vram% 추이", 100, C_ACC);
-    spark(f, sp[2], app, "sys:tps", "tok/s 추이", 0, C_OK);
-    spark(f, sp[3], app, "sys:lat", "e2e p95(ms) 추이", 0, C_WARN);
+    let util_d: Vec<(f64, f64)> = app.hist_for("sys:util").iter().enumerate().map(|(i, v)| (i as f64, *v as f64)).collect();
+    let vram_d: Vec<(f64, f64)> = app.hist_for("sys:vram").iter().enumerate().map(|(i, v)| (i as f64, *v as f64)).collect();
+    let ds = vec![
+        Dataset::default().name("util%").marker(Marker::Braille).graph_type(GraphType::Line).style(Style::default().fg(C_OK)).data(&util_d),
+        Dataset::default().name("vram%").marker(Marker::Braille).graph_type(GraphType::Line).style(Style::default().fg(C_ACC)).data(&vram_d),
+    ];
+    let chart = Chart::new(ds)
+        .block(block("Timeline · util% / vram%"))
+        .x_axis(Axis::default().bounds([0.0, crate::app::HIST as f64]))
+        .y_axis(
+            Axis::default()
+                .bounds([0.0, 100.0])
+                .labels(["0", "50", "100"])
+                .style(Style::default().fg(C_DIM)),
+        );
+    f.render_widget(chart, top[0]);
+    let rt = Layout::default().direction(Direction::Vertical).constraints([Constraint::Ratio(1, 2); 2]).split(top[1]);
+    spark(f, rt[0], app, "sys:tps", "tok/s", 0, C_OK);
+    spark(f, rt[1], app, "sys:lat", "e2e ms", 0, C_WARN);
 
     // throughput 숫자 + 데이터 없음 안내
     let tl = Line::from(vec![
