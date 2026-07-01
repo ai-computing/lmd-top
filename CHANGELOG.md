@@ -2,6 +2,13 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.9.4]
+### Changed — 리팩토링 R1: ui.rs 모듈 분해
+- 단일 2052줄 `ui.rs` 를 **`ui/` 모듈**로 분해: `ui/theme.rs`(팔레트·심각도 임계치·색 로직 117줄) + `ui/widgets.rs`(재사용 렌더 헬퍼: 바/게이지/테이블/블록/문자열 절단 246줄) + `ui/mod.rs`(뷰·크롬·타임라인 1703줄). 뷰 추가 시 헬퍼가 discoverable 한 곳에. (렌더 구조 골든 대비 IDENTICAL — 동작 완전 보존. per-view 세분화는 후속 여지.)
+
+### Refactor 요약 (R1~R5)
+- R1 ui.rs 분해 · R2 metrics 단일출처 · R3 collect 소스별 수집기 · R4 테이블 헬퍼 · R5 config 외부화. 전 단계 동작 보존(테스트·렌더 골든 동일).
+
 ## [0.9.3]
 ### Changed — 리팩토링 R3: collect_fast 소스별 수집기로 해체
 - `collect_fast` 의 **25-요소 `tokio::join!` 위치 튜플**(메트릭 추가 때마다 튜플/구조분해 동기화 필요 → 반복적으로 삐끗)을 제거. **소스별 수집기 4개**(`collect_furiosa`/`collect_rbln`/`collect_gpu`/`collect_nodes`)로 분리 — 각자 자기 메트릭만 작은 join! 로 처리하고 Vec 반환. `collect_fast` 는 4개를 병렬 실행 후 합치고 통합-메모리 backfill 만. 메트릭 추가 시 해당 함수 1곳만 수정.
