@@ -406,37 +406,13 @@ impl App {
     /// key 안정성으로 엣지(비활성→활성)만 알림 — 지속 조건은 반복 토스트하지 않음.
     fn detect_alerts(&mut self, snap: &Snapshot) {
         let now = snap.ts;
-        let mut current: Vec<Alert> = Vec::new();
-        // 가속기: not-alive / throttle / 고온
-        for a in &snap.accel {
-            let base = format!("{}/{}/{}", a.kind.label(), a.node, a.id);
-            if !a.alive {
-                current.push(Alert { ts: now, sev: Sev::Bad, key: format!("dead:{}", base), msg: format!("{} {} not alive @{}", a.kind.label(), a.id, a.node) });
-            } else if a.throttle > 0.0 {
-                current.push(Alert { ts: now, sev: Sev::Warn, key: format!("thr:{}", base), msg: format!("{} {} throttling @{}", a.kind.label(), a.id, a.node) });
-            }
-            if a.temp > ALERT_TEMP_BAD {
-                current.push(Alert { ts: now, sev: Sev::Warn, key: format!("temp:{}", base), msg: format!("{} {} hot {:.0}°C @{}", a.kind.label(), a.id, a.temp, a.node) });
-            }
-        }
-        // 노드: cordon / notready / pressure
-        for n in &snap.nodes {
-            if n.cordoned {
-                current.push(Alert { ts: now, sev: Sev::Warn, key: format!("cordon:{}", n.name), msg: format!("node {} cordoned", n.name) });
-            } else if !n.ready {
-                current.push(Alert { ts: now, sev: Sev::Bad, key: format!("notready:{}", n.name), msg: format!("node {} NotReady", n.name) });
-            } else if n.pressure {
-                current.push(Alert { ts: now, sev: Sev::Warn, key: format!("pressure:{}", n.name), msg: format!("node {} under pressure", n.name) });
-            }
-        }
-        // pod: 재시작 증가(델타) / Failed
+        // 상태 없는 조건(가속기/노드/pod-Failed) — JSON 출력과 공유.
+        let mut current = snapshot_alerts(snap);
+        // pod 재시작 증가(델타) — 이전 스냅샷 필요(stateful).
         for p in &snap.pods {
             let prev = self.prev_restarts.get(&p.name).copied().unwrap_or(p.restarts);
             if p.restarts > prev {
                 current.push(Alert { ts: now, sev: Sev::Warn, key: format!("restart:{}:{}", p.name, p.restarts), msg: format!("pod {} restarted (x{})", p.name, p.restarts) });
-            }
-            if p.phase == "Failed" {
-                current.push(Alert { ts: now, sev: Sev::Bad, key: format!("failed:{}", p.name), msg: format!("pod {} Failed", p.name) });
             }
         }
         self.prev_restarts = snap.pods.iter().map(|p| (p.name.clone(), p.restarts)).collect();
@@ -636,4 +612,57 @@ impl App {
             _ => None,
         }
     }
+}
+
+/// 상태 없는 임계/헬스 조건 → 알림 목록(엣지 검출·재시작 델타 제외). UI 알림과 agent JSON 공유.
+pub fn snapshot_alerts(snap: &Snapshot) -> Vec<Alert> {
+    let now = snap.ts;
+    let mut out: Vec<Alert> = Vec::new();
+    for a in &snap.accel {
+        let base = format!("{}/{}/{}", a.disp(), a.node, a.id);
+        if !a.alive {
+            out.push(Alert { ts: now, sev: Sev::Bad, key: format!("dead:{}", base), msg: format!("{} {} not alive @{}", a.disp(), a.id, a.node) });
+        } else if a.throttle > 0.0 {
+            out.push(Alert { ts: now, sev: Sev::Warn, key: format!("thr:{}", base), msg: format!("{} {} throttling @{}", a.disp(), a.id, a.node) });
+        }
+        if a.temp > ALERT_TEMP_BAD {
+            out.push(Alert { ts: now, sev: Sev::Warn, key: format!("temp:{}", base), msg: format!("{} {} hot {:.0}°C @{}", a.disp(), a.id, a.temp, a.node) });
+        }
+    }
+    for n in &snap.nodes {
+        if n.cordoned {
+            out.push(Alert { ts: now, sev: Sev::Warn, key: format!("cordon:{}", n.name), msg: format!("node {} cordoned", n.name) });
+        } else if !n.ready {
+            out.push(Alert { ts: now, sev: Sev::Bad, key: format!("notready:{}", n.name), msg: format!("node {} NotReady", n.name) });
+        } else if n.pressure {
+            out.push(Alert { ts: now, sev: Sev::Warn, key: format!("pressure:{}", n.name), msg: format!("node {} under pressure", n.name) });
+        }
+    }
+    for p in &snap.pods {
+        if p.phase == "Failed" {
+            out.push(Alert { ts: now, sev: Sev::Bad, key: format!("failed:{}", p.name), msg: format!("pod {} Failed", p.name) });
+        }
+    }
+    out
+}
+
+/// 크로스레이어 1줄 진단 → (문구, 심각도). None = 정상(healthy). UI diagnosis 와 agent JSON 공유.
+pub fn diagnose(s: &Snapshot) -> (String, Option<Sev>) {
+    let serving = s.models.iter().filter(|m| m.ready > 0).count();
+    if s.accel.is_empty() && serving == 0 {
+        return ("no accelerator metrics + no serving models — check Prometheus / model state".into(), Some(Sev::Bad));
+    }
+    if serving == 0 {
+        return ("0 models serving — press 's' in Models to start one (no backend)".into(), Some(Sev::Warn));
+    }
+    let warns = s.events.iter().filter(|e| e.typ == "Warning").count();
+    if warns > 0 {
+        let top = s.events.iter().find(|e| e.typ == "Warning").map(|e| e.reason.clone()).unwrap_or_default();
+        return (format!("{} model(s) serving · {} warning event(s) (top: {}) — see Events", serving, warns, top), Some(Sev::Warn));
+    }
+    let busy = s.accel.iter().filter(|a| a.util > 80.0).count();
+    if busy > 0 {
+        return (format!("{} model(s) serving, {} accelerator(s) hot (>80%)", serving, busy), None);
+    }
+    (format!("{} model(s) serving, accelerators have headroom", serving), None)
 }

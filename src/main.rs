@@ -2,6 +2,7 @@
 //! 실행: `lmd-top`            → TUI
 //!       `lmd-top --snapshot` → 1회 수집 후 텍스트 출력(헤드리스 검증용)
 
+mod agent;
 mod app;
 mod catalog;
 mod collect;
@@ -30,6 +31,13 @@ use std::time::Duration;
 async fn main() -> Result<()> {
     let cfg = Config::default();
     let args: Vec<String> = std::env::args().collect();
+
+    // 기계가독 상태(agent) — --json (또는 --snapshot --json). 1회 수집 후 JSON 출력.
+    if args.iter().any(|a| a == "--json") {
+        let snap = collect(&cfg).await;
+        agent::emit_json(&snap, &cfg);
+        return Ok(());
+    }
 
     if args.iter().any(|a| a == "--snapshot" || a == "-s") {
         let snap = collect(&cfg).await;
