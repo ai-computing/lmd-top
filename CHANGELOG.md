@@ -2,6 +2,11 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.14.1]
+### Fixed — Flow 에서 route Enter 시 네비게이션 잠김
+- Flow(Routing)엔 상세 패널이 없는데 Enter 가 detail=true 로 만들어 ↑↓ 가 스크롤로 빠지며 route 이동이 잠기던(멈춘 것처럼 보이던) 버그 수정.
+- toggle_detail 은 이제 상세 패널이 있는 뷰에서만 동작. Flow 의 Enter 는 backend 모델 상세로 드릴(esc 로 복귀).
+
 ## [0.14.0]
 ### Added — 상세 뷰의 개체별 시계열 히스토리
 - **Node 상세**: device 목록에서 ↑↓ 로 device 선택 → 그 device 의 util/VRAM 타임라인. 미선택(0)일 땐 노드 host cpu/mem 요약(기존). 선택 행은 ▸ 로 강조. (←→ 는 이전/다음 노드.)
