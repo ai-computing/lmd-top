@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.18.1]
+### Changed — Overview 가속기 행 정렬
+- 벤더/노드별 가속기 행의 VRAM(GB) 필드를 고정폭(우측정렬)으로 → 뒤따르는 인라인 트렌드 스파크라인이 열 정렬. `trend` 라벨 추가.
+
 ## [0.18.0]
 ### Changed — Overview 정보 위계 재배치
 - 판정(Diagnosis)을 **히어로 카드 바로 밑(Status)** 으로 이동 — 맨 아래에서 위로. "지금 문제 있나?"에 즉답.
