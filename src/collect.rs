@@ -320,7 +320,7 @@ fn accel_for(accels: &[Accel], deploy: &str) -> String {
     let mut n = 0;
     for a in accels {
         if !a.busy_model.is_empty() && a.busy_model.starts_with(deploy) {
-            kind = a.kind.label();
+            kind = a.disp(); // 감지된 모델(GB10 등), 없으면 벤더 라벨
             node = &a.node;
             n += 1;
         }
@@ -451,7 +451,8 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
             mem_total_gb,
             temp: g_temp.get(gpu).map(|x| x.value).unwrap_or(0.0),
             power: g_pow.get(gpu).map(|x| x.value).unwrap_or(0.0),
-            busy_model: String::new(),
+            // dcgm-exporter 가 붙이는 exported_pod(=이 GPU 를 점유한 모델서버 파드). GB10 exporter 는 항상 제공.
+            busy_model: s.l("exported_pod").to_string(),
             alive: true,
             throttle: 0.0,
             unified_mem: unified,

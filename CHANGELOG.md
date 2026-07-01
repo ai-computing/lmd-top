@@ -2,6 +2,11 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.6.4]
+### Added — GB10 exporter labels (accel↔model correlation)
+- GB10 전용 `dcgm-exporter-gb10` 가 붙이는 **`exported_pod` 라벨**을 GPU `busy_model` 로 반영(기존 GPU 는 항상 빈 값이었음). → GPU 카드가 점유 모델서버 파드를 표시하고, **모델↔가속기 매칭(Models ACCEL 열)** · Accel 뷰 로그(`l`) 가 GB10 에서도 동작.
+- `accel_for` 가 벤더 라벨 대신 **감지 모델**을 사용 → Models ACCEL 열이 `GPU×2` 대신 `GB10×2 <node>` 로 표시.
+
 ## [0.6.3]
 ### Fixed — unified-memory accelerators (GB10 등)
 - GB10 같은 **통합 메모리**(Grace 계열 superchip: GB10/GH200/GB200) 는 별도 VRAM 이 없어 DCGM `FB_TOTAL` 이 0 → mem 이 `0/0` 로 표시되던 문제. 이제 통합 메모리 장치는 **호스트(노드) 메모리 풀**로 backfill 하고 **`∪` 표식 + 상세에 "unified w/ host"** 로 명시. agent JSON 에 `unified_mem: bool` 추가.
