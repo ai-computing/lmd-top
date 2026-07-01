@@ -1375,7 +1375,10 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     }
     // Node: info + cpu/mem/load timeline
     if let Some(n) = app.selected_node() {
-        let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(9), Constraint::Min(6)]).split(area);
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(9), Constraint::Min(4), Constraint::Length(8)])
+            .split(area);
         let (hg, hc) = if n.cordoned {
             ("⊘ cordoned", C_WARN())
         } else if !n.ready {
@@ -1402,8 +1405,20 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             ]),
         ];
         f.render_widget(Paragraph::new(lines).block(block(&format!("Node{}", nav))), rows[0]);
+        // 이 노드가 가진 모든 디바이스(full 라인: util/mem/temp/pwr/bw/clock/model)
+        let devs: Vec<&crate::collect::Accel> = app.snap.accel.iter().filter(|a| a.node == n.name).collect();
+        let mut dl: Vec<Line> = Vec::new();
+        if devs.is_empty() {
+            dl.push(Line::from(Span::styled("(no accelerators on this node)", Style::default().fg(C_DIM()))));
+        } else {
+            let last = devs.len();
+            for (j, a) in devs.iter().enumerate() {
+                dl.push(accel_brief(a, if j + 1 == last { "└─" } else { "├─" }, true));
+            }
+        }
+        f.render_widget(Paragraph::new(dl).block(block(&format!("devices on {} ({})", truncw(&n.name, 20), devs.len()))), rows[1]);
         let k = format!("nod:{}", n.name);
-        let (l, r) = two_panes(rows[1], 50);
+        let (l, r) = two_panes(rows[2], 50);
         bar_timeline(f, l, app, &format!("{}:cpu", k), "host cpu", "%", Some(100.0));
         bar_timeline(f, r, app, &format!("{}:mem", k), "host mem", "%", Some(100.0));
         return;
@@ -1728,75 +1743,108 @@ fn view_launch(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(pl).block(block("placements × live inventory")), body_r);
 }
 
-// ── Nodes (node health / placement) ────────────────────
+// ── Nodes (health / placement) — all-smi 식 트리: node → devices ──────
+fn node_status(n: &crate::collect::NodeInfo) -> (&'static str, Color) {
+    if n.cordoned {
+        ("⊘", C_WARN())
+    } else if !n.ready {
+        ("✗", C_BAD())
+    } else if n.pressure {
+        ("⚠", C_WARN())
+    } else {
+        ("●", C_OK())
+    }
+}
+
+/// 트리/상세용 디바이스 1줄. full=true 면 mem-bw/clock 도 붙임(상세).
+fn accel_brief(a: &crate::collect::Accel, branch: &str, full: bool) -> Line<'static> {
+    let mempct = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
+    let (hg, hc) = if !a.alive { ("✗", C_BAD()) } else if a.throttle > 0.0 { ("⚠", C_WARN()) } else { ("●", C_OK()) };
+    let mut sp = vec![
+        Span::styled(format!("   {} ", branch), Style::default().fg(C_TRACK())),
+        Span::styled(format!("{} ", hg), Style::default().fg(hc)),
+        Span::styled(format!("{:<5}", a.disp()), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<6} ", a.id), Style::default().fg(C_DIM())),
+    ];
+    sp.extend(grad_bar(a.util, 8).spans);
+    sp.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
+    sp.push(Span::styled(
+        format!("  {:.0}/{:.0}GB{}", a.mem_used_gb, a.mem_total_gb, if a.unified_mem { "∪" } else { "" }),
+        Style::default().fg(mem_color(mempct)),
+    ));
+    sp.push(Span::styled(format!("  {:.0}°C", a.temp), Style::default().fg(temp_color(a.temp))));
+    sp.push(Span::styled(format!("  {:>3.0}W", a.power), Style::default().fg(C_DIM())));
+    if full && !a.mem_bw.is_nan() {
+        sp.push(Span::styled(format!("  bw {:>3.0}%", a.mem_bw), Style::default().fg(grad_color(a.mem_bw))));
+        if !a.clock_mhz.is_nan() {
+            sp.push(Span::styled(format!("  {:.0}MHz", a.clock_mhz), Style::default().fg(C_DIM())));
+        }
+    }
+    if !a.busy_model.is_empty() {
+        sp.push(Span::styled(format!("  {}", truncw(&a.busy_model, if full { 40 } else { 26 })), Style::default().fg(C_ACC())));
+    }
+    Line::from(sp)
+}
+
 fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
     let order = app.order();
-    let rows: Vec<Row> = order
-        .iter()
-        .map(|&i| {
-            let n = &app.snap.nodes[i];
-            let (g, gc) = if n.cordoned {
-                ("⊘ cordon", C_WARN())
-            } else if !n.ready {
-                ("✗ notready", C_BAD())
-            } else if n.pressure {
-                ("⚠ pressure", C_WARN())
-            } else {
-                ("● ready", C_OK())
-            };
-            // accelerators on this node
-            let (mut gpu, mut rbln, mut rngd) = (0, 0, 0);
-            for a in &app.snap.accel {
-                if a.node == n.name {
-                    match a.kind {
-                        AccelKind::Gpu => gpu += 1,
-                        AccelKind::Rbln => rbln += 1,
-                        AccelKind::Rngd => rngd += 1,
-                    }
-                }
+    let sel = app.selected;
+    let mut lines: Vec<Line> = Vec::new();
+    let mut sel_line = 0usize;
+    for (pos, &i) in order.iter().enumerate() {
+        let n = &app.snap.nodes[i];
+        let selected = pos == sel;
+        if selected {
+            sel_line = lines.len();
+        }
+        let (glyph, gc) = node_status(n);
+        let memp = if n.mem_total_gb > 0.0 { n.mem_used_gb / n.mem_total_gb * 100.0 } else { 0.0 };
+        let mut h = vec![
+            Span::styled(if selected { "▎" } else { " " }, Style::default().fg(C_ACC())),
+            Span::styled(format!("{} ", glyph), Style::default().fg(gc)),
+            Span::styled(format!("{:<20} ", truncw(&n.name, 20)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        ];
+        h.extend(grad_bar(if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct }, 8).spans);
+        h.push(Span::styled(
+            if n.cpu_pct.is_nan() { " cpu   –".into() } else { format!(" cpu{:>3.0}%", n.cpu_pct) },
+            Style::default().fg(C_DIM()),
+        ));
+        h.push(Span::styled(
+            if n.mem_total_gb <= 0.0 { "  mem –".into() } else { format!("  mem {:.0}/{:.0}GB", n.mem_used_gb, n.mem_total_gb) },
+            Style::default().fg(mem_color(memp)),
+        ));
+        h.push(Span::styled(
+            if n.load1.is_nan() { "  load –".into() } else { format!("  load {:.1}", n.load1) },
+            Style::default().fg(C_DIM()),
+        ));
+        let mut hline = Line::from(h);
+        if selected {
+            hline = hline.style(Style::default().bg(C_HL()).add_modifier(Modifier::BOLD));
+        }
+        lines.push(hline);
+        // 이 노드의 디바이스들(트리 자식)
+        let devs: Vec<&crate::collect::Accel> = app.snap.accel.iter().filter(|a| a.node == n.name).collect();
+        if devs.is_empty() {
+            lines.push(Line::from(Span::styled("   └─ (no accelerators)", Style::default().fg(C_TRACK()))));
+        } else {
+            let last = devs.len();
+            for (j, a) in devs.iter().enumerate() {
+                lines.push(accel_brief(a, if j + 1 == last { "└─" } else { "├─" }, false));
             }
-            let accel = {
-                let mut v = Vec::new();
-                if gpu > 0 { v.push(format!("GPU{}", gpu)); }
-                if rbln > 0 { v.push(format!("RBLN{}", rbln)); }
-                if rngd > 0 { v.push(format!("RNGD{}", rngd)); }
-                if v.is_empty() { "-".into() } else { v.join(" ") }
-            };
-            let mut cpu = grad_bar(n.cpu_pct, 8).spans;
-            cpu.push(Span::styled(
-                if n.cpu_pct.is_nan() { " -".into() } else { format!(" {:.0}%", n.cpu_pct) },
-                Style::default().fg(C_DIM()),
-            ));
-            Row::new(vec![
-                cellw(n.name.clone(), 22),
-                Cell::from(Span::styled(g, Style::default().fg(gc))),
-                cellw(n.version.clone(), 11),
-                Cell::from(Line::from(cpu)),
-                cellw(if n.load1.is_nan() { "-".into() } else { format!("{:.1}", n.load1) }, 5),
-                cellw(if n.mem_total_gb <= 0.0 { "-".into() } else { format!("{:.0}/{:.0}GB", n.mem_used_gb, n.mem_total_gb) }, 11),
-                Cell::from(Span::styled(accel, Style::default().fg(C_ACC()))),
-            ])
-        })
-        .collect();
-    let widths = [
-        Constraint::Min(16),
-        Constraint::Length(11),
-        Constraint::Length(11),
-        Constraint::Length(13),
-        Constraint::Length(5),
-        Constraint::Length(11),
-        Constraint::Min(12),
-    ];
-    let t = Table::new(rows, widths)
-        .header(hrow(&["NODE", "STATUS", "VERSION", "CPU", "LOAD", "MEM", "ACCEL"]))
-        .column_spacing(1)
-        .row_highlight_style(hl_style())
-        .highlight_symbol("▎")
-        .block(block(&format!("Nodes (health / placement){}", count_suffix(app.selected, order.len()))));
-    let mut st = TableState::default();
-    st.select(Some(app.selected));
-    f.render_stateful_widget(t, area, &mut st);
-    list_scrollbar(f, area, order.len(), app.selected, 1);
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("(no nodes)", Style::default().fg(C_DIM()))));
+    }
+    // 선택 노드가 화면에 보이도록 세로 스크롤.
+    let vis = (area.height as usize).saturating_sub(2);
+    let scroll = if sel_line + 2 > vis { (sel_line + 3).saturating_sub(vis) as u16 } else { 0 };
+    f.render_widget(
+        Paragraph::new(lines)
+            .scroll((scroll, 0))
+            .block(block(&format!("Nodes · node → devices · ⏎ detail{}", count_suffix(sel, order.len())))),
+        area,
+    );
 }
 
 // ── Events (k8s + llm-d 이벤트) ─────────────────────────
