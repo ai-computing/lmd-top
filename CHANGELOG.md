@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.7.1]
+### Fixed — ds4 perf 미표시 (커스텀 엔진 메트릭)
+- ds4(deepseek-v4-flash)는 vLLM 이 아니라 **`ds4_proxy_*` 커스텀 프록시 메트릭**으로 노출해 `vllm:*` 쿼리에 안 잡혔음. `--doctor`/live 조사로 규명 → `ds4_proxy_requests_total`·`_ttft_seconds`·`_request_duration_seconds`(E2E)·`_output_tokens_total` 을 수집해 Perf 에 **집계 행 `ds4-proxy`** 로 반영(프록시가 백엔드 라벨 없이 집계 → 집계 1행). 트래픽 발생 시 TTFT/E2E/req·tok/s 채워짐.
+
 ## [0.7.0]
 ### Added — `--doctor` metric survey (자동 전수조사)
 - **`lmd-top --doctor`**: Prometheus 메트릭을 전수조사해 (1) 감지된 exporter(job), (2) lmd-top 이 읽는 40개 메트릭의 **존재/부재 + 부재 시 영향**(예: `FB_TOTAL` 없음 → unified-mem 은 host 로 fallback / EPP 메트릭 없음 → EPP 뷰 빔), (3) **미사용 가속기 메트릭(=새 신호 후보)** 을 자동 리포트. "왜 이 뷰가 비었나"·"이 클러스터에 새 메트릭이 있나"를 한 번에 진단(수동 PromQL 조사 불필요).

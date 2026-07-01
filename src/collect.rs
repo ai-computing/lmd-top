@@ -643,6 +643,27 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         snap.perf_rows = rows;
     }
 
+    // 커스텀 엔진 어댑터: ds4-inject-proxy 는 vLLM 이 아니라 `ds4_proxy_*` 로 노출 →
+    // vllm:* 쿼리로는 안 잡힘. 프록시가 백엔드 라벨 없이 집계하므로 집계 perf 행 1개로 반영.
+    // (저트래픽이라 5m 윈도로 안정화. 일반화는 로드맵의 선언적 collector.)
+    {
+        let pp = &cfg.prom;
+        let (req, tok, ttft, e2e) = tokio::join!(
+            qs1(pp, "sum(rate(ds4_proxy_requests_total[5m]))"),
+            qs1(pp, "sum(rate(ds4_proxy_output_tokens_total[5m]))"),
+            qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(ds4_proxy_ttft_seconds_bucket[5m])))"),
+            qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(ds4_proxy_request_duration_seconds_bucket[5m])))"),
+        );
+        if !req.is_nan() || !ttft.is_nan() || !e2e.is_nan() {
+            let mut r = PerfRow::new("ds4-proxy");
+            r.req = req;
+            r.tps = tok;
+            r.ttft_p95 = ttft;
+            r.e2e_p95 = e2e;
+            snap.perf_rows.push(r);
+        }
+    }
+
     // ---------- 가속기 재고(런처 솔버용) ----------
     collect_inventory(&mut snap.inventory, &mut warn).await;
 
