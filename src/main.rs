@@ -138,7 +138,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
             app.tick = app.tick.wrapping_add(1);
             terminal.draw(|f| ui::draw(f, &app))?;
 
-            if event::poll(Duration::from_millis(250))? {
+            if event::poll(Duration::from_millis(100))? {
                 let ev = event::read()?;
                 if let Event::Mouse(m) = ev {
                     match m.kind {
@@ -168,18 +168,20 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                         continue;
                     }
                     match k.code {
-                        KeyCode::Char('q') => break,
+                        KeyCode::Char('q') => break, // 종료는 q 만
                         KeyCode::Esc => {
+                            // 뒤로가기만: 상세→필터→줌 순으로 닫기 (종료 안 함)
                             if app.detail {
                                 app.detail = false;
                             } else if !app.filter.is_empty() {
                                 app.clear_filter();
-                            } else {
-                                break;
+                            } else if app.zoom {
+                                app.zoom = false;
                             }
                         }
                         KeyCode::Char('?') => app.toggle_help(),
                         KeyCode::Char('t') => app.cycle_theme(),
+                        KeyCode::Char('z') => app.zoom = !app.zoom,
                         KeyCode::Char('g') => {
                             let base = std::env::var("LMD_GRAFANA")
                                 .unwrap_or_else(|_| "http://192.0.2.5:30300".to_string());

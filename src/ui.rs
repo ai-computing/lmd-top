@@ -53,22 +53,30 @@ fn C_HL() -> Color {
 const FRAC: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 
 pub fn draw(f: &mut Frame, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
-        .split(f.area());
-
-    title_bar(f, chunks[0], &app.snap, app.tick);
-    summary_bar(f, chunks[1], &app.snap);
-    tabs(f, chunks[2], app);
-
-    let body = chunks[3];
+    let (body, footer_area) = if app.zoom {
+        // 포커스 모드: 헤더/탭 숨기고 본문 최대화
+        let c = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
+            .split(f.area());
+        title_bar(f, c[0], &app.snap, app.tick);
+        (c[1], c[2])
+    } else {
+        let c = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(f.area());
+        title_bar(f, c[0], &app.snap, app.tick);
+        summary_bar(f, c[1], &app.snap);
+        tabs(f, c[2], app);
+        (c[3], c[4])
+    };
     if app.detail && matches!(app.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes) {
         detail_panel(f, body, app);
     } else {
@@ -85,10 +93,20 @@ pub fn draw(f: &mut Frame, app: &App) {
             View::Nodes => view_nodes(f, body, app),
         }
     }
-    footer(f, chunks[4], app);
+    footer(f, footer_area, app);
     if app.help {
         help_overlay(f);
     }
+}
+
+/// 2-패널: 넓으면 좌우, 좁으면(<100) 위아래로 — 반응형.
+fn two_panes(area: Rect, left_pct: u16) -> (Rect, Rect) {
+    let dir = if area.width >= 100 { Direction::Horizontal } else { Direction::Vertical };
+    let c = Layout::default()
+        .direction(dir)
+        .constraints([Constraint::Percentage(left_pct), Constraint::Percentage(100 - left_pct)])
+        .split(area);
+    (c[0], c[1])
 }
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
@@ -154,7 +172,7 @@ fn help_overlay(f: &mut Frame) {
 
 // ── 헤더 ───────────────────────────────────────────────
 fn title_bar(f: &mut Frame, area: Rect, s: &Snapshot, tick: u64) {
-    let spin = SPINNER[(tick as usize / 2) % SPINNER.len()];
+    let spin = SPINNER[(tick as usize) % SPINNER.len()];
     let gw = if s.gw_addr.is_empty() {
         Span::styled("⌂ gw —", Style::default().fg(C_DIM()))
     } else if s.gw_ok {
@@ -666,10 +684,7 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(6), Constraint::Length(6)])
         .split(area);
-    let top = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
-        .split(split[0]);
+    let (top_l, top_r) = two_panes(split[0], 52);
 
     match &app.snap.epp {
         Some(cfg) => {
@@ -695,7 +710,7 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                 .block(block("EPP scorers · select for description"));
             let mut st = TableState::default();
             st.select(Some(app.selected));
-            f.render_stateful_widget(t, top[0], &mut st);
+            f.render_stateful_widget(t, top_l, &mut st);
 
             let sel = order.get(app.selected).and_then(|&i| cfg.scorers.get(i));
             let mut dl: Vec<Line> = vec![
@@ -715,18 +730,15 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                 dl.push(Line::from(""));
                 dl.push(Line::from(Span::styled(scorer_desc(name), Style::default().fg(Color::White))));
             }
-            f.render_widget(Paragraph::new(dl).wrap(Wrap { trim: true }).block(block("what this scorer does")), top[1]);
+            f.render_widget(Paragraph::new(dl).wrap(Wrap { trim: true }).block(block("what this scorer does")), top_r);
         }
         None => f.render_widget(
             Paragraph::new(Line::from(Span::styled("EPP ConfigMap not found (llmd-router-epp)", Style::default().fg(C_DIM())))).block(block("EPP scorers")),
-            top[0],
+            top_l,
         ),
     }
 
-    let bottom = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
-        .split(split[1]);
+    let (bottom_l, bottom_r) = two_panes(split[1], 52);
 
     let rows: Vec<Row> = app
         .snap
@@ -747,7 +759,7 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
     let t = Table::new(rows, [Constraint::Min(12), Constraint::Length(7), Constraint::Length(8), Constraint::Length(6)])
         .header(hrow(&["POOL", "EP r/t", "QUEUE", "SAT"]))
         .block(block("InferencePool"));
-    f.render_widget(t, bottom[0]);
+    f.render_widget(t, bottom_l);
 
     // request distribution
     let mut dl: Vec<Line> = vec![Line::from(vec![
@@ -776,7 +788,7 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
             dl.push(Line::from(sp));
         }
     }
-    f.render_widget(Paragraph::new(dl).block(block("request distribution (routing decisions)")), bottom[1]);
+    f.render_widget(Paragraph::new(dl).block(block("request distribution (routing decisions)")), bottom_r);
 }
 
 // ── Topology (구성/라우팅/분배 한눈에) ──────────────────
@@ -1053,7 +1065,7 @@ fn line_chart(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, unit
     let cur = raw.last().copied().unwrap_or(0);
     let dmax = raw.iter().copied().max().unwrap_or(0);
     let data: Vec<(f64, f64)> = raw.iter().enumerate().map(|(i, v)| (i as f64, *v as f64)).collect();
-    let ymax = ymax_opt.unwrap_or(((dmax as f64) * 1.25).max(1.0));
+    let ymax = ymax_opt.unwrap_or_else(|| nice_ceil((dmax as f64) * 1.1));
     let n = crate::app::HIST as f64;
     // 제목: 현재값 크게 + 최대
     let title = format!("{} ▏ now {}{} ▏ max {}{}", label, cur, unit, dmax, unit);
@@ -1073,10 +1085,21 @@ fn line_chart(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, unit
         .y_axis(
             Axis::default()
                 .bounds([0.0, ymax])
-                .labels([format!("0{}", unit), format!("{:.0}{}", ymax, unit)])
+                .labels([format!("0{}", unit), format!("{:.0}", ymax / 2.0), format!("{:.0}{}", ymax, unit)])
                 .style(Style::default().fg(C_TRACK())),
         );
     f.render_widget(chart, area);
+}
+
+/// 1/2/5 ×10^n 로 올림(축 상한을 깔끔하게).
+fn nice_ceil(v: f64) -> f64 {
+    if v <= 1.0 {
+        return 1.0;
+    }
+    let mag = 10f64.powf(v.log10().floor());
+    let n = v / mag;
+    let step = if n <= 1.0 { 1.0 } else if n <= 2.0 { 2.0 } else if n <= 5.0 { 5.0 } else { 10.0 };
+    step * mag
 }
 
 
@@ -1090,10 +1113,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     // timeline: 라인 차트(util%/vram%) + tok/s 라인차트
-    let top = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-        .split(rows[0]);
+    let (top_l, top_r) = two_panes(rows[0], 62);
     let util_d: Vec<(f64, f64)> = app.hist_for("sys:util").iter().enumerate().map(|(i, v)| (i as f64, *v as f64)).collect();
     let vram_d: Vec<(f64, f64)> = app.hist_for("sys:vram").iter().enumerate().map(|(i, v)| (i as f64, *v as f64)).collect();
     let ds = vec![
@@ -1116,8 +1136,8 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
                 .labels(["0%", "50%", "100%"])
                 .style(Style::default().fg(C_TRACK())),
         );
-    f.render_widget(chart, top[0]);
-    line_chart(f, top[1], app, "sys:tps", "tokens/s", "", None, C_OK());
+    f.render_widget(chart, top_l);
+    line_chart(f, top_r, app, "sys:tps", "tokens/s", "", None, C_OK());
 
     // throughput 숫자 + 데이터 없음 안내
     let tl = Line::from(vec![
@@ -1140,10 +1160,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(tl).block(block("Throughput")), rows[1]);
 
     // per-model 성능(모델=하드웨어 배치별) + per-pod 큐
-    let bodyc = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
-        .split(rows[2]);
+    let (bodyc_l, bodyc_r) = two_panes(rows[2], 64);
 
     if app.snap.perf_rows.is_empty() {
         f.render_widget(
@@ -1155,7 +1172,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
                 )),
             ])
             .block(block("Per-model perf (p95) · latency / tokens / throughput")),
-            bodyc[0],
+            bodyc_l,
         );
     } else {
         let mrows: Vec<Row> = app
@@ -1191,7 +1208,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         .header(hrow(&["MODEL", "req/s", "tok/s", "TTFT", "TPOT", "E2E", "inTk", "outTk"]))
         .column_spacing(1)
         .block(block("Per-model perf (p95) · latency in ms/s"));
-        f.render_widget(mt, bodyc[0]);
+        f.render_widget(mt, bodyc_l);
     }
 
     // per-pod queue (요청 분배 — 절대 큐 깊이)
@@ -1207,7 +1224,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             ql.push(Line::from(sp));
         }
     }
-    f.render_widget(Paragraph::new(ql).block(block("request distribution (per-pod queue, absolute)")), bodyc[1]);
+    f.render_widget(Paragraph::new(ql).block(block("request distribution (per-pod queue, absolute)")), bodyc_r);
 }
 
 // ── Launch (모델 카탈로그 + 배치 솔버, 읽기전용) ────────
@@ -1229,10 +1246,7 @@ fn view_launch(f: &mut Frame, area: Rect, app: &App) {
     }
     f.render_widget(Paragraph::new(Line::from(inv)).block(block("Launch · deployable models (read-only)")), rows[0]);
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(rows[1]);
+    let (body_l, body_r) = two_panes(rows[1], 40);
 
     // 카탈로그 목록
     let order = app.order();
@@ -1253,7 +1267,7 @@ fn view_launch(f: &mut Frame, area: Rect, app: &App) {
         .block(block("Catalog · up/dn to select"));
     let mut st = TableState::default();
     st.select(Some(app.selected));
-    f.render_stateful_widget(lt, body[0], &mut st);
+    f.render_stateful_widget(lt, body_l, &mut st);
 
     // 선택 모델의 배치 후보 × 라이브 재고
     let mut pl: Vec<Line> = Vec::new();
@@ -1285,7 +1299,7 @@ fn view_launch(f: &mut Frame, area: Rect, app: &App) {
     } else {
         pl.push(Line::from(Span::styled("← select a model", Style::default().fg(C_DIM()))));
     }
-    f.render_widget(Paragraph::new(pl).block(block("placements × live inventory")), body[1]);
+    f.render_widget(Paragraph::new(pl).block(block("placements × live inventory")), body_r);
 }
 
 // ── Nodes (node health / placement) ────────────────────

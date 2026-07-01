@@ -78,6 +78,7 @@ pub struct App {
     pub filter: String,   // 행 필터(부분일치)
     pub filtering: bool,  // 필터 입력 모드
     pub help: bool,       // 도움말/범례 오버레이
+    pub zoom: bool,       // 포커스(줌) — 헤더/탭 숨기고 본문 최대화
     pub cols: HashMap<String, Vec<String>>, // 뷰별 표시 컬럼(순서) — 설정파일
     pub catalog: Vec<crate::catalog::CatModel>, // 모델 카탈로그(런처)
 }
@@ -121,6 +122,7 @@ impl App {
             filter: String::new(),
             filtering: false,
             help: false,
+            zoom: false,
             cols: load_columns(),
             catalog: crate::catalog::load(),
         }
