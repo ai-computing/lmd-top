@@ -133,7 +133,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
     let mut app = App::new();
     let result = (|| -> Result<()> {
         loop {
-            {
+            if !app.paused {
                 let snap = shared.lock().map(|g| g.clone()).unwrap_or_default();
                 app.apply(snap);
             }
@@ -184,6 +184,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                         KeyCode::Char('?') => app.toggle_help(),
                         KeyCode::Char('t') => app.cycle_theme(),
                         KeyCode::Char('z') => app.zoom = !app.zoom,
+                        KeyCode::Char(' ') => app.paused = !app.paused,
                         KeyCode::Char('g') => {
                             let base = std::env::var("LMD_GRAFANA")
                                 .unwrap_or_else(|_| "http://192.0.2.5:30300".to_string());
