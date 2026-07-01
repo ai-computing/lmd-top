@@ -281,6 +281,10 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                         KeyCode::Char('?') => app.toggle_help(),
                         KeyCode::Char('A') | KeyCode::Char('a') => app.toggle_alerts(),
                         KeyCode::Char('t') => app.cycle_theme(),
+                        KeyCode::Char('f') => {
+                            let on = fx.toggle();
+                            app.notify(format!("animations {}", if on { "on" } else { "off" }));
+                        }
                         KeyCode::Char('z') => app.zoom = !app.zoom,
                         KeyCode::Char(' ') => app.paused = !app.paused,
                         KeyCode::Char('g') => {
