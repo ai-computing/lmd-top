@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.18.3]
+### Changed — EPP 패널 제목 길이
+- 좌측 scorers 패널 제목이 좁은 폭에서 잘려 카운트가 안 보이던 것 → 제목 축약(`+/- weight · infl=share`)해 `· n/m` 카운트까지 노출.
+
 ## [0.18.2]
 ### Changed — Nodes/device 행 컬럼 정렬
 - device 행(accel_brief) GB 필드 고정폭 + unified(∪) 슬롯 예약 → 온도/전력/모델이 열 정렬(Nodes 트리·Node 상세 공통).
