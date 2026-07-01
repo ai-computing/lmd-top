@@ -61,6 +61,29 @@ pub(crate) fn grad_bar(pct: f64, width: usize) -> Line<'static> {
 }
 
 /// 프랙셔널 블록 바 (filled=colored, track=dim).
+/// 레인보우 그라디언트 바(hedzr/progressbar·tui-bar-graph 식) — 채워진 길이만큼 파랑→빨강 스펙트럼.
+/// 값(길이)은 채움 폭으로, 의미(심각도)는 옆 수치 색으로 — 바 자체는 장식적 overview 표현.
+pub(crate) fn rainbow_bar(pct: f64, width: usize) -> Line<'static> {
+    let p = pct.clamp(0.0, 100.0) / 100.0;
+    let frac = p * width as f64;
+    let full = (frac.floor() as usize).min(width);
+    let denom = (width as f64 - 1.0).max(1.0);
+    let mut spans: Vec<Span> = Vec::new();
+    for i in 0..full {
+        spans.push(Span::styled("█".to_string(), Style::default().fg(rainbow(i as f64 / denom))));
+    }
+    let mut used = full;
+    if used < width {
+        let rem = ((frac - full as f64) * 8.0).round() as usize;
+        if rem > 0 {
+            spans.push(Span::styled(FRAC[rem - 1].to_string(), Style::default().fg(rainbow(full as f64 / denom))));
+            used += 1;
+        }
+    }
+    spans.push(Span::styled("░".repeat(width.saturating_sub(used)), Style::default().fg(C_TRACK())));
+    Line::from(spans)
+}
+
 pub(crate) fn bar_line(pct: f64, width: usize, color: Color) -> Line<'static> {
     let p = pct.clamp(0.0, 100.0) / 100.0;
     let frac = p * width as f64;

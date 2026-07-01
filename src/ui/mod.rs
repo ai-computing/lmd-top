@@ -990,7 +990,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!("{:<4}×{} ", model, cnt), Style::default().fg(kind_color(*kind)).add_modifier(Modifier::BOLD)),
             Span::styled(format!("@{:<16} ", truncw(node, 16)), Style::default().fg(C_DIM())),
         ];
-        sp.extend(grad_bar(util, 10).spans);
+        sp.extend(rainbow_bar(util, 10).spans); // overview 는 레인보우 바(장식) — 수치는 severity 색으로 의미 유지
         sp.push(Span::styled(format!(" {:>3.0}%  ", util), Style::default().fg(util_color(util))));
         sp.push(Span::styled(format!("mem {:.0}/{:.0} GB  ", mu, mt), Style::default().fg(mem_color(mempct)))); // 절대값
         let trend = sparkstr(&app.hist_for(&format!("sys:{}_util", kind.label())), 14, 100); // all-smi식 인라인 트렌드
@@ -1285,7 +1285,7 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
     let cur_pct = (cur as f64 / ymax * 100.0).clamp(0.0, 100.0);
     let ttl = Line::from(vec![
         Span::styled(format!(" {} ", label), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("▏ now {}{} ", cur, unit), Style::default().fg(grad_color(cur_pct)).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("▏ now {}{} ", cur, unit), Style::default().fg(rainbow(cur_pct / 100.0)).add_modifier(Modifier::BOLD)),
         Span::styled(format!("▏ max {}{} ", dmax, unit), Style::default().fg(C_DIM())),
     ]);
     let blk = Block::default()
@@ -1304,20 +1304,21 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
     let data: Vec<u64> = raw.iter().rev().take(w).rev().copied().collect();
     let start_x = inner.x + inner.width - data.len() as u16; // 오른쪽 정렬(now)
     let buf = f.buffer_mut();
+    let denom = (rows_h as f64 - 1.0).max(1.0);
     for (ci, &v) in data.iter().enumerate() {
         let frac = (v as f64 / ymax).clamp(0.0, 1.0);
         let eighths_total = (frac * (rows_h as f64) * 8.0).round() as usize; // 전체 채움(1/8칸 단위)
-        let color = grad_color(frac * 100.0);
         let x = start_x + ci as u16;
         for r in 0..rows_h {
-            // r=0 = 맨 아래 행
+            // r=0 = 맨 아래 행. 셀 색은 세로 위치(축 레벨)별 레인보우 그라디언트(tui-bar-graph 식):
+            // 아래=파랑(저부하) → 위=빨강(고부하). 높은 컬럼일수록 빨강까지 닿음.
             let filled = eighths_total.saturating_sub(r * 8).min(8);
             let y = inner.y + inner.height - 1 - r as u16;
             if filled == 0 {
                 // 채워지지 않은 칸 = 은은한 track(░) → 상한(ymax) 대비 대략 %가 보임
                 buf[(x, y)].set_char('░').set_fg(C_TRACK());
             } else {
-                buf[(x, y)].set_char(LV[filled]).set_fg(color);
+                buf[(x, y)].set_char(LV[filled]).set_fg(rainbow(r as f64 / denom));
             }
         }
     }

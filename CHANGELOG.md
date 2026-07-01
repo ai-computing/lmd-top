@@ -2,6 +2,12 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.10.0]
+### Added — 레인보우 바/타임라인 (tui-bar-graph·hedzr/progressbar 참고, 자체 구현)
+- **레인보우 타임라인**: area-fill 타임라인 셀을 **세로 위치별 레인보우 그라디언트**(아래 파랑=저부하 → 위 빨강=고부하)로 채색(tui-bar-graph VerticalGradient 식). 높은 컬럼일수록 빨강까지 닿아 부하가 직관적.
+- **레인보우 오버뷰 바**: Overview 가속기(by-kind/node) 바를 `rainbow_bar`(파랑→빨강 스펙트럼 채움)로 — progressbar 식 장식. 옆 수치는 severity 색 유지 → 의미 보존.
+- HSL→RGB `rainbow(t)` 자체 구현(외부 크레이트 없음, 순수 Rust 원칙). 타임라인 now 값도 레인보우.
+
 ## [0.9.4]
 ### Changed — 리팩토링 R1: ui.rs 모듈 분해
 - 단일 2052줄 `ui.rs` 를 **`ui/` 모듈**로 분해: `ui/theme.rs`(팔레트·심각도 임계치·색 로직 117줄) + `ui/widgets.rs`(재사용 렌더 헬퍼: 바/게이지/테이블/블록/문자열 절단 246줄) + `ui/mod.rs`(뷰·크롬·타임라인 1703줄). 뷰 추가 시 헬퍼가 discoverable 한 곳에. (렌더 구조 골든 대비 IDENTICAL — 동작 완전 보존. per-view 세분화는 후속 여지.)
