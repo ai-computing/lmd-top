@@ -500,11 +500,11 @@ fn view_models(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(models_table(app, "Models · ⏎ detail"), area, &mut st);
 }
 
-const MODEL_COLS: [&str; 9] = ["name", "accel", "ready", "run", "wait", "kv", "tps", "path", "status"];
+const MODEL_COLS: [&str; 10] = ["name", "engine", "accel", "ready", "run", "wait", "kv", "tps", "path", "status"];
 
 fn model_col_header(k: &str) -> &'static str {
     match k {
-        "name" => "MODEL", "accel" => "ACCEL", "ready" => "READY", "run" => "RUN",
+        "name" => "MODEL", "engine" => "ENGINE", "accel" => "ACCEL", "ready" => "READY", "run" => "RUN",
         "wait" => "WAIT", "kv" => "KV", "tps" => "t/s", "path" => "PATH", "status" => "STATUS", _ => "?",
     }
 }
@@ -512,6 +512,7 @@ fn model_col_width(k: &str) -> Constraint {
     match k {
         "name" => Constraint::Min(14),
         "accel" => Constraint::Length(13),
+        "engine" => Constraint::Length(12),
         "path" => Constraint::Length(11),
         "status" => Constraint::Length(11),
         "ready" => Constraint::Length(6),
@@ -522,6 +523,7 @@ fn model_col_width(k: &str) -> Constraint {
 fn model_cell(k: &str, m: &crate::collect::ModelRow, selected: bool, tick: u64) -> Cell<'static> {
     match k {
         "name" => Cell::from(if selected { marquee(&m.name, 20, tick) } else { truncw(&m.name, 20) }),
+        "engine" => Cell::from(Span::styled(truncw(&m.engine, 12), Style::default().fg(C_ACC()))),
         "accel" => Cell::from(Span::styled(truncw(&m.accel, 13), Style::default().fg(C_DIM()))),
         "ready" => cellw(format!("{}/{}", m.ready, m.desired), 6),
         "run" => cellw(fmt_opt(m.running), 4),
@@ -919,9 +921,9 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(Paragraph::new(lines).block(block("Accelerator detail · esc to close")), rows[0]);
         let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
         let sp = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 3); 3]).split(rows[1]);
-        spark(f, sp[0], app, &format!("{}:util", k), "compute util %", 100, util_color(a.util));
-        spark(f, sp[1], app, &format!("{}:mem", k), "memory %", 100, C_ACC());
-        spark(f, sp[2], app, &format!("{}:temp", k), "temp C", 0, temp_color(a.temp));
+        line_chart(f, sp[0], app, &format!("{}:util", k), "compute util", "%", Some(100.0), util_color(a.util));
+        line_chart(f, sp[1], app, &format!("{}:mem", k), "memory", "%", Some(100.0), C_ACC());
+        line_chart(f, sp[2], app, &format!("{}:temp", k), "temp", "C", None, temp_color(a.temp));
         return;
     }
     // Node: info + cpu/mem/load timeline
@@ -947,9 +949,9 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(Paragraph::new(lines).block(block("Node detail · esc to close")), rows[0]);
         let k = format!("nod:{}", n.name);
         let sp = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 3); 3]).split(rows[1]);
-        spark(f, sp[0], app, &format!("{}:cpu", k), "host cpu %", 100, C_OK());
-        spark(f, sp[1], app, &format!("{}:mem", k), "host mem %", 100, C_ACC());
-        spark(f, sp[2], app, &format!("{}:load", k), "load1 x10", 0, C_WARN());
+        line_chart(f, sp[0], app, &format!("{}:cpu", k), "host cpu", "%", Some(100.0), C_OK());
+        line_chart(f, sp[1], app, &format!("{}:mem", k), "host mem", "%", Some(100.0), C_ACC());
+        line_chart(f, sp[2], app, &format!("{}:load", k), "load1x10", "", None, C_WARN());
         return;
     }
 
@@ -960,6 +962,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(kv("model", &m.name, Color::White));
         lines.push(kv("status", &m.status, if m.ready > 0 { C_OK() } else { C_DIM() }));
         lines.push(kv("replicas", &format!("{}/{} (ready/desired)", m.ready, m.desired), Color::White));
+        lines.push(kv("engine", &m.engine, C_ACC()));
         lines.push(kv("accelerator", &m.accel, C_ACC()));
         lines.push(kv("route", if m.route.is_empty() { "–" } else { m.route.as_str() }, Color::White));
         lines.push(Line::from(""));
@@ -1003,18 +1006,39 @@ fn tok(v: f64) -> String {
 fn rate(v: f64) -> String {
     if v.is_nan() { "–".into() } else { format!("{:.2}", v) }
 }
-fn spark(f: &mut Frame, area: Rect, app: &App, key: &str, title: &str, max: u64, color: Color) {
-    let data = app.hist_for(key);
-    let cur = data.last().copied().unwrap_or(0);
-    let mut s = Sparkline::default()
-        .block(block(&format!("{} · {}", title, cur)))
-        .data(&data)
-        .style(Style::default().fg(color));
-    if max > 0 {
-        s = s.max(max);
-    }
-    f.render_widget(s, area);
+/// all-smi 식 라인 차트: X축=시간(최근 N초), Y축=값+단위, 제목에 현재/최대값.
+/// ymax_opt=Some(100) 이면 0~100 고정(%), None 이면 데이터 최대×1.25 자동.
+fn line_chart(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, unit: &str, ymax_opt: Option<f64>, color: Color) {
+    let raw = app.hist_for(key);
+    let cur = raw.last().copied().unwrap_or(0);
+    let dmax = raw.iter().copied().max().unwrap_or(0);
+    let data: Vec<(f64, f64)> = raw.iter().enumerate().map(|(i, v)| (i as f64, *v as f64)).collect();
+    let ymax = ymax_opt.unwrap_or(((dmax as f64) * 1.25).max(1.0));
+    let n = crate::app::HIST as f64;
+    // 제목: 현재값 크게 + 최대
+    let title = format!("{} ▏ now {}{} ▏ max {}{}", label, cur, unit, dmax, unit);
+    let ds = vec![Dataset::default()
+        .marker(Marker::Braille)
+        .graph_type(GraphType::Line)
+        .style(Style::default().fg(color))
+        .data(&data)];
+    let chart = Chart::new(ds)
+        .block(block(&title))
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, n])
+                .labels([format!("-{}s", crate::app::HIST), "now".into()])
+                .style(Style::default().fg(C_TRACK())),
+        )
+        .y_axis(
+            Axis::default()
+                .bounds([0.0, ymax])
+                .labels([format!("0{}", unit), format!("{:.0}{}", ymax, unit)])
+                .style(Style::default().fg(C_TRACK())),
+        );
+    f.render_widget(chart, area);
 }
+
 
 fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     let p = &app.snap.perf;
@@ -1022,10 +1046,10 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Length(3), Constraint::Min(5)])
+        .constraints([Constraint::Length(9), Constraint::Length(3), Constraint::Min(5)])
         .split(area);
 
-    // timeline: 라인 차트(util%/vram%) + tok/s·지연 스파크라인
+    // timeline: 라인 차트(util%/vram%) + tok/s 라인차트
     let top = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
@@ -1036,19 +1060,24 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         Dataset::default().name("util%").marker(Marker::Braille).graph_type(GraphType::Line).style(Style::default().fg(C_OK())).data(&util_d),
         Dataset::default().name("vram%").marker(Marker::Braille).graph_type(GraphType::Line).style(Style::default().fg(C_ACC())).data(&vram_d),
     ];
+    let cur_u = app.hist_for("sys:util").last().copied().unwrap_or(0);
+    let cur_v = app.hist_for("sys:vram").last().copied().unwrap_or(0);
     let chart = Chart::new(ds)
-        .block(block("Timeline · accel util% / VRAM% (cluster avg)"))
-        .x_axis(Axis::default().bounds([0.0, crate::app::HIST as f64]))
+        .block(block(&format!("Timeline cluster avg ▏ util {}% ▏ vram {}%", cur_u, cur_v)))
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, crate::app::HIST as f64])
+                .labels([format!("-{}s", crate::app::HIST), "now".into()])
+                .style(Style::default().fg(C_TRACK())),
+        )
         .y_axis(
             Axis::default()
                 .bounds([0.0, 100.0])
-                .labels(["0", "50", "100"])
-                .style(Style::default().fg(C_DIM())),
+                .labels(["0%", "50%", "100%"])
+                .style(Style::default().fg(C_TRACK())),
         );
     f.render_widget(chart, top[0]);
-    let rt = Layout::default().direction(Direction::Vertical).constraints([Constraint::Ratio(1, 2); 2]).split(top[1]);
-    spark(f, rt[0], app, "sys:tps", "tok/s", 0, C_OK());
-    spark(f, rt[1], app, "sys:lat", "e2e ms", 0, C_WARN());
+    line_chart(f, top[1], app, "sys:tps", "tokens/s", "", None, C_OK());
 
     // throughput 숫자 + 데이터 없음 안내
     let tl = Line::from(vec![
