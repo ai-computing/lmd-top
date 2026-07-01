@@ -80,6 +80,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             View::Routing => view_routing(f, body, app),
             View::Pods => view_pods(f, body, app),
             View::Perf => view_perf(f, body, app),
+            View::Launch => view_launch(f, body, app),
         }
     }
     footer(f, chunks[4], app);
@@ -1060,6 +1061,84 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         }
     }
     f.render_widget(Paragraph::new(ql).block(block("요청 분배 (per-pod queue, 절대값)")), bodyc[1]);
+}
+
+// ── Launch (모델 카탈로그 + 배치 솔버, 읽기전용) ────────
+fn view_launch(f: &mut Frame, area: Rect, app: &App) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(4)])
+        .split(area);
+
+    // 가속기 재고
+    let mut inv: Vec<Span> = vec![Span::styled("가속기 여유(free/total): ", Style::default().fg(C_DIM()))];
+    for (res, total, used) in &app.snap.inventory {
+        let free = (total - used).max(0);
+        let short = res.split('/').last().unwrap_or(res);
+        inv.push(Span::styled(
+            format!("{} {}/{}   ", short, free, total),
+            Style::default().fg(if free > 0 { C_OK() } else { C_DIM() }),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(inv)).block(block("Launch · 배포 가능 모델 (읽기전용)")), rows[0]);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(rows[1]);
+
+    // 카탈로그 목록
+    let order = app.order();
+    let lrows: Vec<Row> = order
+        .iter()
+        .map(|&i| {
+            let m = &app.catalog[i];
+            Row::new(vec![
+                cellw(m.id.clone(), 22),
+                Cell::from(Span::styled(m.role.clone(), Style::default().fg(C_DIM()))),
+            ])
+        })
+        .collect();
+    let lt = Table::new(lrows, [Constraint::Min(14), Constraint::Length(10)])
+        .header(hrow(&["MODEL", "ROLE"]))
+        .row_highlight_style(hl_style())
+        .highlight_symbol("▎")
+        .block(block("Catalog · ↑↓ 선택"));
+    let mut st = TableState::default();
+    st.select(Some(app.selected));
+    f.render_stateful_widget(lt, body[0], &mut st);
+
+    // 선택 모델의 배치 후보 × 라이브 재고
+    let mut pl: Vec<Line> = Vec::new();
+    if let Some(m) = app.selected_cat() {
+        pl.push(Line::from(Span::styled(
+            if m.display.is_empty() { m.id.clone() } else { m.display.clone() },
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )));
+        pl.push(Line::from(""));
+        for p in &m.placements {
+            let (state, free, need) = crate::catalog::solve(p, &app.snap.inventory);
+            let col = match state {
+                crate::catalog::Ready::Ready => C_OK(),
+                crate::catalog::Ready::NeedsArtifact => C_WARN(),
+                crate::catalog::Ready::NoCapacity => C_BAD(),
+            };
+            pl.push(Line::from(vec![
+                Span::styled(format!("{:<16} ", state.glyph()), Style::default().fg(col)),
+                Span::styled(format!("{} @{} {}×{}rep ", p.engine, p.accel, p.count, p.replicas), Style::default().fg(Color::White)),
+                Span::styled(format!("need {} / free {}", need, free), Style::default().fg(C_DIM())),
+            ]));
+            pl.push(Line::from(Span::styled(format!("      {}", truncw(&p.uri, 44)), Style::default().fg(C_DIM()))));
+        }
+        pl.push(Line::from(""));
+        pl.push(Line::from(Span::styled(
+            "읽기전용 — 실제 배포(ModelService)는 다음 단계",
+            Style::default().fg(C_DIM()),
+        )));
+    } else {
+        pl.push(Line::from(Span::styled("← 모델을 선택하세요", Style::default().fg(C_DIM()))));
+    }
+    f.render_widget(Paragraph::new(pl).block(block("배치 후보 × 라이브 재고")), body[1]);
 }
 
 // ── 진단 ───────────────────────────────────────────────

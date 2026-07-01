@@ -3,6 +3,7 @@
 //!       `lmd-top --snapshot` → 1회 수집 후 텍스트 출력(헤드리스 검증용)
 
 mod app;
+mod catalog;
 mod collect;
 mod kube;
 mod prom;
@@ -167,7 +168,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                         KeyCode::Enter => app.toggle_detail(),
                         KeyCode::Char('o') => app.cycle_sort(),
                         KeyCode::Tab => app.next_tab(),
-                        KeyCode::Char(c @ '0'..='6') => {
+                        KeyCode::Char(c @ '0'..='7') => {
                             app.set_view_idx(c as usize - '0' as usize)
                         }
                         KeyCode::Up | KeyCode::Char('k') => app.move_sel(-1),

@@ -52,7 +52,8 @@ lmd-top 은 그 빈자리를 채우며, 특히 **EPP 라우팅 의사결정**을
 | 3 | **EPP** | 활성 scorer·가중치(ConfigMap introspect) + picker + InferencePool endpoints + **요청 분배**(라우팅 결정) |
 | 4 | **Topo** | **전체 구성 한눈에** — Gateway → HTTPRoute → backend(모델 상태/가속기/노드) + InferencePool/EPP/**SLO**(InferenceObjective) + *EPP 우회 진단* |
 | 5 | **Pods** | llm-serving 파드 상태 |
-| **6** | **Perf** | **EPP 정책용** — 구간별 지연 p50/p95/p99(queue/TTFT/TPOT/E2E) · 토큰 길이 분포 · tok/s · 요청 분배 + **timeline 스파크라인**(util/vram/tok·s/지연 추이) |
+| **6** | **Perf** | **EPP 정책용** — 구간별 지연 p50/p95/p99(queue/TTFT/TPOT/E2E) · 토큰 길이 분포 · tok/s · 요청 분배 + **timeline 라인 차트**(util/vram) |
+| **7** | **Launch** | 모델 **카탈로그** × 라이브 가속기 재고 → 배치 가능성(✓ready/⚙needs-artifact/✗no-capacity). 읽기전용(배포는 로드맵). 카탈로그=`catalog/models.yaml` |
 
 > **Topo 뷰**가 "어느 모델이 어디서 돌고, 어디로 라우팅되며, 요청이 어떻게 분배되는가"를 답하고,
 > HTTPRoute 가 InferencePool(EPP) 을 경유하는지/우회하는지 자동 진단합니다.

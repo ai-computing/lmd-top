@@ -27,10 +27,11 @@ pub enum View {
     Routing,
     Pods,
     Perf,
+    Launch,
 }
 
 impl View {
-    pub const ALL: [View; 7] = [
+    pub const ALL: [View; 8] = [
         View::Overview,
         View::Accel,
         View::Models,
@@ -38,6 +39,7 @@ impl View {
         View::Routing,
         View::Pods,
         View::Perf,
+        View::Launch,
     ];
     pub fn idx(&self) -> usize {
         View::ALL.iter().position(|v| v == self).unwrap_or(0)
@@ -51,6 +53,7 @@ impl View {
             View::Routing => "Topo",
             View::Pods => "Pods",
             View::Perf => "Perf",
+            View::Launch => "Launch",
         }
     }
 }
@@ -70,6 +73,7 @@ pub struct App {
     pub filtering: bool,  // 필터 입력 모드
     pub help: bool,       // 도움말/범례 오버레이
     pub cols: HashMap<String, Vec<String>>, // 뷰별 표시 컬럼(순서) — 설정파일
+    pub catalog: Vec<crate::catalog::CatModel>, // 모델 카탈로그(런처)
 }
 
 /// ~/.config/lmd-top/lmd-top.yaml 의 columns: {view: [col,...]} 로드. 없으면 빈 맵(=기본 전체).
@@ -112,6 +116,15 @@ impl App {
             filtering: false,
             help: false,
             cols: load_columns(),
+            catalog: crate::catalog::load(),
+        }
+    }
+
+    pub fn selected_cat(&self) -> Option<&crate::catalog::CatModel> {
+        if self.view == View::Launch {
+            self.sel_orig().and_then(|i| self.catalog.get(i))
+        } else {
+            None
         }
     }
 
@@ -166,6 +179,7 @@ impl App {
                 .unwrap_or_default(),
             View::Models | View::Overview => self.snap.models.get(i).map(|m| format!("{} {}", m.name, m.accel)).unwrap_or_default(),
             View::Pods => self.snap.pods.get(i).map(|p| format!("{} {}", p.name, p.node)).unwrap_or_default(),
+            View::Launch => self.catalog.get(i).map(|m| format!("{} {}", m.id, m.display)).unwrap_or_default(),
             _ => String::new(),
         }
     }
@@ -330,6 +344,7 @@ impl App {
                 });
                 idx
             }
+            View::Launch => (0..self.catalog.len()).collect(),
             _ => Vec::new(),
         };
         if !self.filter.is_empty() {

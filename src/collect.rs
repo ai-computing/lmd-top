@@ -139,6 +139,7 @@ pub struct Snapshot {
     pub prefix_idx: f64,   // inference_extension_prefix_indexer_size
     pub gw_addr: String,
     pub gw_ok: bool,
+    pub inventory: Vec<(String, i64, i64)>, // (가속기 resource, allocatable total, 사용중 requests)
     pub warnings: Vec<String>,
 }
 
@@ -480,8 +481,65 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     // ---------- kube: deployments / pods / routes / gateway / epp ----------
     collect_kube(cfg, &mut snap, &vllm, &mut warn).await;
 
+    // ---------- 가속기 재고(런처 솔버용) ----------
+    collect_inventory(&mut snap.inventory, &mut warn).await;
+
     snap.warnings = warn;
     snap
+}
+
+const ACCEL_RESOURCES: [&str; 3] = ["nvidia.com/gpu", "rebellions.ai/ATOM", "furiosa.ai/rngd"];
+
+/// 노드 allocatable 합계 − 파드 requests 합계 = 여유. (가속기 resource별)
+async fn collect_inventory(inv: &mut Vec<(String, i64, i64)>, warn: &mut Vec<String>) {
+    let mut total: BTreeMap<String, i64> = BTreeMap::new();
+    let mut used: BTreeMap<String, i64> = BTreeMap::new();
+    for r in ACCEL_RESOURCES {
+        total.insert(r.to_string(), 0);
+        used.insert(r.to_string(), 0);
+    }
+    // 노드 allocatable
+    match kube::get_json(&["get", "nodes", "-o", "json"]).await {
+        Ok(v) => {
+            if let Some(items) = v["items"].as_array() {
+                for n in items {
+                    if let Some(a) = n["status"]["allocatable"].as_object() {
+                        for r in ACCEL_RESOURCES {
+                            if let Some(q) = a.get(r).and_then(|x| x.as_str()).and_then(|s| s.parse::<i64>().ok()) {
+                                *total.get_mut(r).unwrap() += q;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => warn.push(format!("inv nodes: {}", e)),
+    }
+    // 파드 requests (비종료 파드, 전 네임스페이스)
+    if let Ok(v) = kube::get_json(&["get", "pods", "-A", "-o", "json"]).await {
+        if let Some(items) = v["items"].as_array() {
+            for p in items {
+                let phase = p["status"]["phase"].as_str().unwrap_or("");
+                if phase == "Succeeded" || phase == "Failed" {
+                    continue;
+                }
+                if let Some(cs) = p["spec"]["containers"].as_array() {
+                    for c in cs {
+                        if let Some(req) = c["resources"]["requests"].as_object() {
+                            for r in ACCEL_RESOURCES {
+                                if let Some(q) = req.get(r).and_then(|x| x.as_str()).and_then(|s| s.parse::<i64>().ok()) {
+                                    *used.get_mut(r).unwrap() += q;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for r in ACCEL_RESOURCES {
+        inv.push((r.to_string(), total[r], used[r]));
+    }
 }
 
 fn norm_pct(v: f64) -> f64 {
