@@ -11,17 +11,20 @@ mod theme;
 pub(crate) use theme::*;
 mod widgets;
 pub(crate) use widgets::*;
+mod fx;
+pub use fx::FxState;
 
 
-pub fn draw(f: &mut Frame, app: &App) {
-    let (body, footer_area) = if app.zoom {
+pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
+    let dt = fxs.begin(app); // 경과시간 + 상태변화 감지(이펙트 무장)
+    let (body, footer_area, summary) = if app.zoom {
         // 포커스 모드: 헤더/탭 숨기고 본문 최대화
         let c = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
             .split(f.area());
         title_bar(f, c[0], app);
-        (c[1], c[2])
+        (c[1], c[2], None)
     } else {
         let c = Layout::default()
             .direction(Direction::Vertical)
@@ -36,7 +39,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         title_bar(f, c[0], app);
         summary_bar(f, c[1], app);
         tabs(f, c[2], app);
-        (c[3], c[4])
+        (c[3], c[4], Some(c[1]))
     };
     if app.detail && matches!(app.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes) {
         detail_panel(f, body, app);
@@ -54,7 +57,11 @@ pub fn draw(f: &mut Frame, app: &App) {
             View::Nodes => view_nodes(f, body, app),
         }
     }
+    fxs.body(f, body, dt); // 본문 트랜지션(오버레이 전에)
     footer(f, footer_area, app);
+    if let Some(sa) = summary {
+        fxs.flash(f, sa, dt); // 신규 알림 플래시
+    }
     if app.logs_mode {
         logs_overlay(f, app);
     }

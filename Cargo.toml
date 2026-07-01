@@ -1,6 +1,6 @@
 [package]
 name = "lmd-top"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2021"
 description = "llm-d 클러스터용 터미널 관측·운영 도구 (Phase 1: monitor)"
 
@@ -17,6 +17,8 @@ serde_json = "1"
 serde_yaml = "0.9"         # 순수 Rust(unsafe-libyaml) — EPP ConfigMap 파싱
 anyhow = "1"
 unicode-width = "0.2"      # CJK 등 표시 폭 정확 계산(절단/정렬 깨짐 방지)
+tachyonfx = "=0.16.0"      # 순수 Rust TUI 이펙트. 0.16 이 ratatui 0.29(모놀리식) 마지막 호환(이후는 ratatui-core 0.30 계열)
+tachyonfx = "0.16.0"
 
 [profile.release]
 opt-level = 2
