@@ -94,6 +94,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
     footer(f, footer_area, app);
+    if app.logs_mode {
+        logs_overlay(f, app);
+    }
     if app.help {
         help_overlay(f);
     }
@@ -132,6 +135,7 @@ fn help_overlay(f: &mut Frame) {
         g("Enter", "detail (drill-down)"),
         g("o", "cycle sort"),
         g("/", "filter (substring)"),
+        g("l", "logs (selected pod/model, scroll+refresh)"),
         g("s", "scale selected model up/down"),
         g("t", "cycle theme (default/high-contrast/colorblind)"),
         g("g", "open Grafana dashboard"),
@@ -167,6 +171,49 @@ fn help_overlay(f: &mut Frame) {
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(C_ACC()))
                 .title(Span::styled(" lmd-top · help (press any key to close) ", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD))),
+        ),
+        area,
+    );
+}
+
+fn logs_overlay(f: &mut Frame, app: &App) {
+    let full = f.area();
+    let area = Rect {
+        x: full.x + 1,
+        y: full.y + 1,
+        width: full.width.saturating_sub(2),
+        height: full.height.saturating_sub(2),
+    };
+    f.render_widget(Clear, area);
+    let lines: Vec<Line> = app
+        .logs
+        .iter()
+        .map(|l| {
+            let low = l.to_ascii_lowercase();
+            let col = if low.contains("error") || low.contains("traceback") || low.contains("fatal") || low.contains("exception") {
+                C_BAD()
+            } else if low.contains("warn") {
+                C_WARN()
+            } else if low.contains("info") {
+                C_OK()
+            } else {
+                Color::Gray
+            };
+            Line::from(Span::styled(l.clone(), Style::default().fg(col)))
+        })
+        .collect();
+    let title = format!(
+        " logs · {} · {} lines · ↑↓ scroll · r refresh · esc/q close ",
+        app.logs_target,
+        app.logs.len()
+    );
+    f.render_widget(
+        Paragraph::new(lines).scroll((app.logs_scroll, 0)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(C_ACC()))
+                .title(Span::styled(title, Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD))),
         ),
         area,
     );
@@ -279,7 +326,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     if sortable {
         hint.push_str(&format!("o sort:{}  ", app.sort_label()));
     }
-    hint.push_str("s scale  t theme  z zoom  g grafana↗  ? help  q quit");
+    hint.push_str("l logs  s scale  t theme  z zoom  g grafana↗  ? help  q quit");
     spans.push(Span::styled(hint, Style::default().fg(C_DIM())));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -368,6 +415,15 @@ fn bar_line(pct: f64, width: usize, color: Color) -> Line<'static> {
         Span::styled(filled, Style::default().fg(color)),
         Span::styled(track, Style::default().fg(C_TRACK())),
     ])
+}
+
+/// all-smi 식 게이지 행: `label  ██████░░░░  value`.
+/// pct=바 채움(0~100), value=우측 현재값 텍스트, color=값 색.
+fn gauge_row(label: &str, pct: f64, value: &str, color: Color, barw: usize) -> Line<'static> {
+    let mut sp = vec![Span::styled(format!("{:<8} ", label), Style::default().fg(C_DIM()))];
+    sp.extend(grad_bar(pct, barw).spans);
+    sp.push(Span::styled(format!("  {}", value), Style::default().fg(color).add_modifier(Modifier::BOLD)));
+    Line::from(sp)
 }
 
 /// all-smi 식 인라인 텍스트 스파크라인(▁▂▃▄▅▆▇█). 최근 width개, max 기준 정규화.
@@ -904,8 +960,34 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     let s = &app.snap;
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Length(5), Constraint::Min(4), Constraint::Length(3)])
+        .constraints([Constraint::Length(3), Constraint::Length(6), Constraint::Length(5), Constraint::Min(4), Constraint::Length(3)])
         .split(area);
+
+    // ── 클러스터 요약 카드(all-smi 식 aggregate) ──────────
+    {
+        let mut kinds: std::collections::BTreeMap<&str, (usize, Color)> = std::collections::BTreeMap::new();
+        let (mut usum, mut mu, mut mt, mut pw) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for a in &s.accel {
+            let e = kinds.entry(a.kind.label()).or_insert((0, kind_color(a.kind)));
+            e.0 += 1;
+            usum += a.util; mu += a.mem_used_gb; mt += a.mem_total_gb; pw += a.power;
+        }
+        let ncnt = s.accel.len().max(1);
+        let avg = usum / ncnt as f64;
+        let mempct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
+        let ready = s.models.iter().filter(|m| m.ready > 0).count();
+        let mut sp = vec![Span::styled("Σ ", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))];
+        for (k, (c, col)) in &kinds {
+            sp.push(Span::styled(format!("{}×{} ", k, c), Style::default().fg(*col).add_modifier(Modifier::BOLD)));
+        }
+        sp.push(Span::styled(format!("· util {:.0}% ", avg), Style::default().fg(util_color(avg))));
+        sp.push(Span::styled(format!("· VRAM {:.0}/{:.0}GB ({:.0}%) ", mu, mt, mempct), Style::default().fg(mem_color(mempct))));
+        sp.push(Span::styled(format!("· {:.0}W ", pw), Style::default().fg(C_DIM())));
+        sp.push(Span::styled(format!("· models {}/{} ", ready, s.models.len()), Style::default().fg(if ready > 0 { C_OK() } else { C_DIM() })));
+        sp.push(Span::styled(format!("· req/s {} ", rate(s.perf.req_rate)), Style::default().fg(C_DIM())));
+        sp.push(Span::styled(format!("· TTFT {}", ms(s.perf.ttft_p95)), Style::default().fg(C_DIM())));
+        f.render_widget(Paragraph::new(Line::from(sp)).block(block("Cluster")), rows[0]);
+    }
 
     // 가속기: (종류,노드)별 집계 — 한눈에 + 절대 메모리(GB) + health 아이콘
     let mut groups: Vec<(AccelKind, String, usize, f64, f64, f64, bool, bool)> = Vec::new();
@@ -929,13 +1011,15 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         ];
         sp.extend(grad_bar(util, 10).spans);
         sp.push(Span::styled(format!(" {:>3.0}%  ", util), Style::default().fg(util_color(util))));
-        sp.push(Span::styled(format!("mem {:.0}/{:.0} GB", mu, mt), Style::default().fg(mem_color(mempct)))); // 절대값
+        sp.push(Span::styled(format!("mem {:.0}/{:.0} GB  ", mu, mt), Style::default().fg(mem_color(mempct)))); // 절대값
+        let trend = sparkstr(&app.hist_for(&format!("sys:{}_util", kind.label())), 14, 100); // all-smi식 인라인 트렌드
+        sp.push(Span::styled(trend, Style::default().fg(util_color(util))));
         al.push(Line::from(sp));
     }
     if al.is_empty() {
         al.push(Line::from(Span::styled("  (no accelerator metrics)", Style::default().fg(C_DIM()))));
     }
-    f.render_widget(Paragraph::new(al).block(block("Accelerators (by kind / node)")), rows[0]);
+    f.render_widget(Paragraph::new(al).block(block("Accelerators (by kind / node)")), rows[1]);
 
     // Inference: EPP 경로 + 풀 endpoints + scorers + autoscale
     let mut pl: Vec<Line> = Vec::new();
@@ -957,56 +1041,62 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         let names: Vec<String> = cfg.scorers.iter().map(|(n, w)| format!("{}·{:.0}", n.replace("-scorer", ""), w)).collect();
         pl.push(Line::from(Span::styled(format!("scorers: {}", names.join("  ")), Style::default().fg(C_DIM()))));
     }
-    f.render_widget(Paragraph::new(pl).block(block("Inference (EPP / InferencePool)")), rows[1]);
+    f.render_widget(Paragraph::new(pl).block(block("Inference (EPP / InferencePool)")), rows[2]);
 
     let mut st = TableState::default();
     st.select(Some(app.selected));
-    f.render_stateful_widget(models_table(app, "Models"), rows[2], &mut st);
+    f.render_stateful_widget(models_table(app, "Models"), rows[3], &mut st);
 
     let (txt, col) = diagnose(s);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(truncw(&txt, rows[3].width.saturating_sub(2) as usize), Style::default().fg(col))))
+        Paragraph::new(Line::from(Span::styled(truncw(&txt, rows[4].width.saturating_sub(2) as usize), Style::default().fg(col))))
             .block(block("Diagnosis")),
-        rows[3],
+        rows[4],
     );
 }
 
 // ── Detail (drill-down) ────────────────────────────────
 fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     let (cur, tot) = app.detail_pos();
-    let nav = format!(" ◂{}/{}▸ ←→ prev/next · esc back", cur, tot);
+    let (prev, next) = app.neighbor_names();
+    let nav = format!(" · ◂ {}  {}/{}  {} ▸ · esc back", truncw(&prev, 16), cur, tot, truncw(&next, 16));
     // Accelerator: info + util/mem/temp timeline
     if let Some(a) = app.selected_accel() {
-        let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(9), Constraint::Min(3)]).split(area);
+        let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(9), Constraint::Min(6)]).split(area);
         let mempct = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
         let health = if !a.alive {
-            ("✗ not alive".to_string(), C_BAD())
+            ("✗ not alive", C_BAD())
         } else if a.throttle > 0.0 {
-            (format!("⚠ throttling {:.0}", a.throttle), C_WARN())
+            ("⚠ throttling", C_WARN())
         } else {
-            ("● healthy".to_string(), C_OK())
+            ("● healthy", C_OK())
         };
+        // 헤더 + 현재 포션 게이지(all-smi식)
+        let barw = (rows[0].width as usize).saturating_sub(34).clamp(10, 46);
         let lines = vec![
-            kv("kind", &format!("{} (accelerator)", a.kind.label()), kind_color(a.kind)),
-            kv("id / node", &format!("{} / {}", a.id, a.node), Color::White),
-            kv("compute util", &format!("{:.0} %", a.util), util_color(a.util)),
-            kv("memory (VRAM)", &format!("{:.1} / {:.1} GB ({:.0}%)", a.mem_used_gb, a.mem_total_gb, mempct), mem_color(mempct)),
-            kv("temp", &format!("{:.0} °C", a.temp), temp_color(a.temp)),
-            kv("power", &format!("{:.0} W", a.power), Color::White),
-            kv("health", &health.0, health.1),
-            kv("model/pod", if a.busy_model.is_empty() { "(idle)" } else { a.busy_model.as_str() }, C_ACC()),
+            Line::from(vec![
+                Span::styled(format!("{} ", a.kind.label()), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("id {} @ {}   ", a.id, a.node), Style::default().fg(C_DIM())),
+                Span::styled(health.0, Style::default().fg(health.1).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("   {:.0} W", a.power), Style::default().fg(C_DIM())),
+                Span::styled(format!("   {}", if a.busy_model.is_empty() { "(idle)" } else { a.busy_model.as_str() }), Style::default().fg(C_ACC())),
+            ]),
+            Line::from(""),
+            gauge_row("compute", a.util, &format!("{:.0} %", a.util), util_color(a.util), barw),
+            gauge_row("VRAM", mempct, &format!("{:.1} / {:.1} GB  ({:.0}%)", a.mem_used_gb, a.mem_total_gb, mempct), mem_color(mempct), barw),
+            gauge_row("temp", a.temp.min(100.0), &format!("{:.0} °C", a.temp), temp_color(a.temp), barw),
         ];
-        f.render_widget(Paragraph::new(lines).scroll((app.detail_scroll, 0)).block(block(&format!("Accelerator{}", nav))), rows[0]);
+        f.render_widget(Paragraph::new(lines).block(block(&format!("Accelerator{}", nav))), rows[0]);
+        // 타임라인: util% / VRAM% 두 개만 넓게(반응형). temp/power 는 위 게이지로.
         let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
-        let sp = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 3); 3]).split(rows[1]);
-        line_chart(f, sp[0], app, &format!("{}:util", k), "compute util", "%", Some(100.0), util_color(a.util));
-        line_chart(f, sp[1], app, &format!("{}:mem", k), "memory", "%", Some(100.0), C_ACC());
-        line_chart(f, sp[2], app, &format!("{}:temp", k), "temp", "C", None, temp_color(a.temp));
+        let (l, r) = two_panes(rows[1], 50);
+        line_chart(f, l, app, &format!("{}:util", k), "compute util", "%", Some(100.0), util_color(a.util));
+        line_chart(f, r, app, &format!("{}:mem", k), "VRAM", "%", Some(100.0), C_ACC());
         return;
     }
     // Node: info + cpu/mem/load timeline
     if let Some(n) = app.selected_node() {
-        let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(8), Constraint::Min(3)]).split(area);
+        let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(9), Constraint::Min(6)]).split(area);
         let (hg, hc) = if n.cordoned {
             ("⊘ cordoned", C_WARN())
         } else if !n.ready {
@@ -1016,20 +1106,27 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         } else {
             ("● ready", C_OK())
         };
+        let mempct = if n.mem_total_gb > 0.0 { n.mem_used_gb / n.mem_total_gb * 100.0 } else { 0.0 };
+        let barw = (rows[0].width as usize).saturating_sub(34).clamp(10, 46);
         let lines = vec![
-            kv("node", &n.name, Color::White),
-            kv("status", hg, hc),
-            kv("kubelet", &n.version, Color::White),
-            kv("host CPU", &if n.cpu_pct.is_nan() { "-".into() } else { format!("{:.0} %", n.cpu_pct) }, Color::White),
-            kv("host memory", &if n.mem_total_gb <= 0.0 { "-".into() } else { format!("{:.0} / {:.0} GB", n.mem_used_gb, n.mem_total_gb) }, Color::White),
-            kv("load1", &if n.load1.is_nan() { "-".into() } else { format!("{:.2}", n.load1) }, Color::White),
+            Line::from(vec![
+                Span::styled(format!("{}  ", truncw(&n.name, 30)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(hg, Style::default().fg(hc).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("   kubelet {}", n.version), Style::default().fg(C_DIM())),
+            ]),
+            Line::from(""),
+            gauge_row("cpu", if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct }, &if n.cpu_pct.is_nan() { "–".into() } else { format!("{:.0} %", n.cpu_pct) }, util_color(n.cpu_pct.max(0.0)), barw),
+            gauge_row("memory", mempct, &if n.mem_total_gb <= 0.0 { "–".into() } else { format!("{:.0} / {:.0} GB  ({:.0}%)", n.mem_used_gb, n.mem_total_gb, mempct) }, mem_color(mempct), barw),
+            Line::from(vec![
+                Span::styled(format!("{:<8} ", "load1"), Style::default().fg(C_DIM())),
+                Span::styled(if n.load1.is_nan() { "–".into() } else { format!("{:.2}", n.load1) }, Style::default().fg(C_WARN()).add_modifier(Modifier::BOLD)),
+            ]),
         ];
-        f.render_widget(Paragraph::new(lines).scroll((app.detail_scroll, 0)).block(block(&format!("Node{}", nav))), rows[0]);
+        f.render_widget(Paragraph::new(lines).block(block(&format!("Node{}", nav))), rows[0]);
         let k = format!("nod:{}", n.name);
-        let sp = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 3); 3]).split(rows[1]);
-        line_chart(f, sp[0], app, &format!("{}:cpu", k), "host cpu", "%", Some(100.0), C_OK());
-        line_chart(f, sp[1], app, &format!("{}:mem", k), "host mem", "%", Some(100.0), C_ACC());
-        line_chart(f, sp[2], app, &format!("{}:load", k), "load1x10", "", None, C_WARN());
+        let (l, r) = two_panes(rows[1], 50);
+        line_chart(f, l, app, &format!("{}:cpu", k), "host cpu", "%", Some(100.0), C_OK());
+        line_chart(f, r, app, &format!("{}:mem", k), "host mem", "%", Some(100.0), C_ACC());
         return;
     }
 
@@ -1093,18 +1190,34 @@ fn line_chart(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, unit
     let raw = app.hist_for(key);
     let cur = raw.last().copied().unwrap_or(0);
     let dmax = raw.iter().copied().max().unwrap_or(0);
-    let data: Vec<(f64, f64)> = raw.iter().enumerate().map(|(i, v)| (i as f64, *v as f64)).collect();
-    let ymax = ymax_opt.unwrap_or_else(|| nice_ceil((dmax as f64) * 1.1));
     let n = crate::app::HIST as f64;
-    // 제목: 현재값 크게 + 최대
-    let title = format!("{} ▏ now {}{} ▏ max {}{}", label, cur, unit, dmax, unit);
+    // 최신값을 오른쪽(now)에 고정 — 히스토리가 아직 짧아도 왼쪽에 뭉치지 않음.
+    let len = raw.len() as f64;
+    let data: Vec<(f64, f64)> = raw
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (n - (len - 1.0) + i as f64, *v as f64))
+        .collect();
+    let ymax = ymax_opt.unwrap_or_else(|| nice_ceil((dmax as f64) * 1.1));
+    // 제목: 라벨 + 현재값(강조색) + 최대
+    let ttl = Line::from(vec![
+        Span::styled(format!(" {} ", label), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("▏ now {}{} ", cur, unit), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("▏ max {}{} ", dmax, unit), Style::default().fg(C_DIM())),
+    ]);
     let ds = vec![Dataset::default()
         .marker(Marker::Braille)
         .graph_type(GraphType::Line)
         .style(Style::default().fg(color))
         .data(&data)];
     let chart = Chart::new(ds)
-        .block(block(&title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(C_TRACK()))
+                .title(ttl),
+        )
         .x_axis(
             Axis::default()
                 .bounds([0.0, n])
