@@ -491,49 +491,59 @@ fn view_models(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(models_table(app, "Models · ⏎ detail"), area, &mut st);
 }
 
+const MODEL_COLS: [&str; 9] = ["name", "accel", "ready", "run", "wait", "kv", "tps", "path", "status"];
+
+fn model_col_header(k: &str) -> &'static str {
+    match k {
+        "name" => "MODEL", "accel" => "ACCEL", "ready" => "READY", "run" => "RUN",
+        "wait" => "WAIT", "kv" => "KV", "tps" => "t/s", "path" => "PATH", "status" => "STATUS", _ => "?",
+    }
+}
+fn model_col_width(k: &str) -> Constraint {
+    match k {
+        "name" => Constraint::Min(14),
+        "accel" => Constraint::Length(13),
+        "path" => Constraint::Length(11),
+        "status" => Constraint::Length(11),
+        "ready" => Constraint::Length(6),
+        "kv" | "tps" => Constraint::Length(5),
+        _ => Constraint::Length(4),
+    }
+}
+fn model_cell(k: &str, m: &crate::collect::ModelRow, selected: bool, tick: u64) -> Cell<'static> {
+    match k {
+        "name" => Cell::from(if selected { marquee(&m.name, 20, tick) } else { truncw(&m.name, 20) }),
+        "accel" => Cell::from(Span::styled(truncw(&m.accel, 13), Style::default().fg(C_DIM()))),
+        "ready" => cellw(format!("{}/{}", m.ready, m.desired), 6),
+        "run" => cellw(fmt_opt(m.running), 4),
+        "wait" => cellw(fmt_opt(m.waiting), 4),
+        "kv" => cellw(m.kv.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or("–".into()), 5),
+        "tps" => cellw(m.tps.map(|x| format!("{:.0}", x)).unwrap_or("–".into()), 5),
+        "path" => cellw(if m.route.is_empty() { "–".into() } else { m.route.clone() }, 11),
+        "status" => {
+            let color = if m.status.contains("Running") { C_OK() } else if m.status.contains("Pending") { C_WARN() } else { C_DIM() };
+            Cell::from(Span::styled(m.status.clone(), Style::default().fg(color)))
+        }
+        _ => Cell::from(""),
+    }
+}
+
 fn models_table<'a>(app: &'a App, title: &'a str) -> Table<'static> {
+    let _ = title;
+    let cols = app.columns("models", &MODEL_COLS); // 설정파일 columns.models 순서/표시
     let order = app.order();
     let rows: Vec<Row> = order
         .iter()
         .enumerate()
         .map(|(pos, &i)| {
             let m = &app.snap.models[i];
-            let color = if m.status.contains("Running") {
-                C_OK()
-            } else if m.status.contains("Pending") {
-                C_WARN()
-            } else {
-                C_DIM()
-            };
-            let kv = m.kv.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or("–".into());
-            let name = if pos == app.selected { marquee(&m.name, 20, app.tick) } else { truncw(&m.name, 20) };
-            Row::new(vec![
-                Cell::from(name),
-                Cell::from(Span::styled(truncw(&m.accel, 13), Style::default().fg(C_DIM()))),
-                cellw(format!("{}/{}", m.ready, m.desired), 6),
-                cellw(fmt_opt(m.running), 4),
-                cellw(fmt_opt(m.waiting), 4),
-                cellw(kv, 5),
-                cellw(m.tps.map(|x| format!("{:.0}", x)).unwrap_or("–".into()), 5),
-                cellw(if m.route.is_empty() { "–".into() } else { m.route.clone() }, 11),
-                Cell::from(Span::styled(m.status.clone(), Style::default().fg(color))),
-            ])
+            Row::new(cols.iter().map(|c| model_cell(c, m, pos == app.selected, app.tick)).collect::<Vec<_>>())
         })
         .collect();
-    let widths = [
-        Constraint::Min(14),
-        Constraint::Length(13),
-        Constraint::Length(6),
-        Constraint::Length(4),
-        Constraint::Length(4),
-        Constraint::Length(5),
-        Constraint::Length(5),
-        Constraint::Length(11),
-        Constraint::Length(11),
-    ];
-    let _ = title;
+    let widths: Vec<Constraint> = cols.iter().map(|c| model_col_width(c)).collect();
+    let header: Vec<&str> = cols.iter().map(|c| model_col_header(c)).collect();
     Table::new(rows, widths)
-        .header(hrow(&["MODEL", "ACCEL", "READY", "RUN", "WAIT", "KV", "t/s", "PATH", "STATUS"]))
+        .header(hrow(&header))
         .column_spacing(1)
         .row_highlight_style(hl_style())
         .highlight_symbol("▎")

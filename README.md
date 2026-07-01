@@ -118,10 +118,18 @@ LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top
 | `?` | **도움말/색 범례** 오버레이 |
 | `o` | **정렬** 순환 (Accel: util/temp/mem/name · Models: name/status/ready · Pods: name/phase/restarts) |
 | `s` | 선택 모델 scale (desired 0↔1 토글) |
-| `Esc` | 상세 닫기 / (상세 아닐 때) 종료 |
+| `t` | **테마 전환** (default / 고대비 / 색맹친화) |
+| 마우스 | 스크롤로 행 이동 |
+| `Esc` | 상세 닫기 / 필터 해제 / 종료 |
 | `q` | 종료 |
 
-> 표시 컬럼/색 커스터마이징(설정 파일)은 로드맵(Phase 3) — 현재는 합리적 기본값.
+### 설정 파일 (선택) — `~/.config/lmd-top/lmd-top.yaml`
+컬럼 표시/순서 커스터마이징:
+```yaml
+columns:
+  models: [name, accel, status, tps]   # 원하는 컬럼만, 이 순서로 (기본: 전체 9개)
+```
+(없으면 합리적 기본값. 현재 Models 뷰 지원, 다른 뷰로 확장 가능.)
 
 ### 환경 변수
 | 변수 | 기본값 | 의미 |

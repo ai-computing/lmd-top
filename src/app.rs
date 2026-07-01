@@ -69,6 +69,32 @@ pub struct App {
     pub filter: String,   // 행 필터(부분일치)
     pub filtering: bool,  // 필터 입력 모드
     pub help: bool,       // 도움말/범례 오버레이
+    pub cols: HashMap<String, Vec<String>>, // 뷰별 표시 컬럼(순서) — 설정파일
+}
+
+/// ~/.config/lmd-top/lmd-top.yaml 의 columns: {view: [col,...]} 로드. 없으면 빈 맵(=기본 전체).
+fn load_columns() -> HashMap<String, Vec<String>> {
+    let path = std::env::var("HOME").map(|h| format!("{}/.config/lmd-top/lmd-top.yaml", h)).unwrap_or_default();
+    let txt = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return HashMap::new(),
+    };
+    let v: serde_yaml::Value = match serde_yaml::from_str(&txt) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+    let mut out = HashMap::new();
+    if let Some(m) = v.get("columns").and_then(|c| c.as_mapping()) {
+        for (k, val) in m {
+            if let (Some(view), Some(seq)) = (k.as_str(), val.as_sequence()) {
+                let cols: Vec<String> = seq.iter().filter_map(|s| s.as_str().map(|x| x.to_string())).collect();
+                if !cols.is_empty() {
+                    out.insert(view.to_string(), cols);
+                }
+            }
+        }
+    }
+    out
 }
 
 impl App {
@@ -85,6 +111,19 @@ impl App {
             filter: String::new(),
             filtering: false,
             help: false,
+            cols: load_columns(),
+        }
+    }
+
+    /// 뷰의 표시 컬럼 순서(설정 없으면 default 반환). 설정의 미지 키는 무시(default에서 교집합).
+    pub fn columns<'a>(&'a self, view: &str, default: &'a [&'a str]) -> Vec<&'a str> {
+        match self.cols.get(view) {
+            Some(cfg) => cfg
+                .iter()
+                .filter(|c| default.contains(&c.as_str()))
+                .map(|c| default.iter().find(|d| **d == c.as_str()).copied().unwrap())
+                .collect(),
+            None => default.to_vec(),
         }
     }
 
