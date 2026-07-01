@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.9.3]
+### Changed — 리팩토링 R3: collect_fast 소스별 수집기로 해체
+- `collect_fast` 의 **25-요소 `tokio::join!` 위치 튜플**(메트릭 추가 때마다 튜플/구조분해 동기화 필요 → 반복적으로 삐끗)을 제거. **소스별 수집기 4개**(`collect_furiosa`/`collect_rbln`/`collect_gpu`/`collect_nodes`)로 분리 — 각자 자기 메트릭만 작은 join! 로 처리하고 Vec 반환. `collect_fast` 는 4개를 병렬 실행 후 합치고 통합-메모리 backfill 만. 메트릭 추가 시 해당 함수 1곳만 수정.
+
 ## [0.9.2]
 ### Changed — 리팩토링 R4: 반복 테이블 렌더 헬퍼
 - Accel/Pods/Events 의 Table+헤더+선택 하이라이트+스크롤바+위치카운터 보일러플레이트(3회 중복)를 **`render_list_table` 헬퍼 1곳**으로 통합. 뷰는 rows/widths/headers/title 만 넘김.
