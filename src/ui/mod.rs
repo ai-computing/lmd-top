@@ -13,6 +13,8 @@ mod widgets;
 pub(crate) use widgets::*;
 mod fx;
 pub use fx::FxState;
+mod panel;
+pub(crate) use panel::Dashboard;
 
 
 pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
@@ -1238,9 +1240,12 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             let mk = mkey.unwrap();
             let split = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(15), Constraint::Min(6)]).split(area);
             f.render_widget(pblk, split[0]);
-            for (t, (s, label, unit)) in tile_rects(split[1], present.len(), 30).iter().zip(present.iter()) {
-                bar_timeline(f, *t, app, &format!("{}:{}", mk, s), label, unit, None);
+            let mut dash = Dashboard::new().min_width(30);
+            for (s, label, unit) in present {
+                let key = format!("{}:{}", mk, s);
+                dash = dash.cell(move |f, rect| bar_timeline(f, rect, app, &key, label, unit, None));
             }
+            dash.render(f, split[1]);
         }
         return;
     }
@@ -1327,9 +1332,12 @@ fn perf_detail_view(f: &mut Frame, area: Rect, app: &App, d: &PerfDetail) {
             grid_area,
         );
     } else {
-        for (t, (s, label, unit)) in tile_rects(grid_area, present.len(), 30).iter().zip(present.iter()) {
-            bar_timeline(f, *t, app, &format!("{}:{}", mk, s), label, unit, None);
+        let mut dash = Dashboard::new().min_width(30);
+        for (s, label, unit) in present {
+            let key = format!("{}:{}", mk, s);
+            dash = dash.cell(move |f, rect| bar_timeline(f, rect, app, &key, label, unit, None));
         }
+        dash.render(f, grid_area);
     }
 
     // E2E 지연 버킷 분포(히스토그램) — 누적차 rate, 바 길이 = 상대 빈도.
