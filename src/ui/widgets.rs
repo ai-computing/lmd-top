@@ -109,6 +109,50 @@ pub(crate) fn gauge_row(label: &str, pct: f64, value: &str, color: Color, barw: 
     Line::from(sp)
 }
 
+/// 컬러 인라인 스파크라인 — 각 점을 값(0..max)에 따라 grad_color(초록→빨강). 최근 width개, 오른쪽=now.
+/// 데이터가 짧으면 왼쪽을 track 점(·)으로 패딩해 폭 고정(정렬 유지).
+pub(crate) fn spark_colored(data: &[u64], width: usize, max: u64) -> Vec<Span<'static>> {
+    const B: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let slice: &[u64] = if data.len() > width { &data[data.len() - width..] } else { data };
+    let mx = if max > 0 { max } else { (*slice.iter().max().unwrap_or(&1)).max(1) };
+    let mut sp: Vec<Span> = Vec::with_capacity(width);
+    for _ in 0..width.saturating_sub(slice.len()) {
+        sp.push(Span::styled("·".to_string(), Style::default().fg(C_TRACK())));
+    }
+    for &v in slice {
+        let frac = (v as f64 / mx as f64).clamp(0.0, 1.0);
+        let idx = (frac * 7.0).round().clamp(0.0, 7.0) as usize;
+        sp.push(Span::styled(B[idx].to_string(), Style::default().fg(grad_color(frac * 100.0))));
+    }
+    sp
+}
+
+/// n개 타일을 area 에 균형 배치(반응형 열 수, 폭 기준). 반환 Rect 순서는 좌→우, 위→아래.
+/// min_w=타일 최소 폭(이보다 좁아지지 않게 열 수 제한). 마지막 줄이 덜 차면 그리드 정렬 유지(끝 여백).
+pub(crate) fn tile_rects(area: Rect, n: usize, min_w: u16) -> Vec<Rect> {
+    if n == 0 || area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    let cols = ((area.width / min_w.max(1)) as usize).clamp(1, n);
+    let rows = n.div_ceil(cols);
+    let row_rects = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Ratio(1, rows as u32); rows])
+        .split(area);
+    let mut out = Vec::with_capacity(n);
+    for (r, rr) in row_rects.iter().enumerate() {
+        let in_this = (n - r * cols).min(cols);
+        let cells = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Ratio(1, cols as u32); cols])
+            .split(*rr);
+        for c in 0..in_this {
+            out.push(cells[c]);
+        }
+    }
+    out
+}
+
 /// all-smi 식 인라인 텍스트 스파크라인(▁▂▃▄▅▆▇█). 최근 width개, max 기준 정규화.
 pub(crate) fn sparkstr(data: &[u64], width: usize, max: u64) -> String {
     const B: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];

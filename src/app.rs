@@ -490,7 +490,7 @@ impl App {
             View::Events => self.snap.events.get(i).map(|e| format!("{} {} {}", e.reason, e.object, e.message)).unwrap_or_default(),
             View::Nodes => self.snap.nodes.get(i).map(|n| n.name.clone()).unwrap_or_default(),
             View::Routing => self.snap.routes.get(i).map(|r| format!("{} {}", r.path, r.backend)).unwrap_or_default(),
-            _ => String::new(),
+            View::Perf => self.snap.perf_rows.get(i).map(|r| r.model.clone()).unwrap_or_default(),
         }
     }
 
@@ -524,6 +524,7 @@ impl App {
             View::Accel => 4,  // util / temp / mem / name
             View::Models => 3, // name / status / ready
             View::Pods => 3,   // name / phase / restarts
+            View::Perf => 5,   // tok/s / E2E / TTFT / queue / name
             _ => 1,
         }
     }
@@ -543,6 +544,11 @@ impl App {
             (View::Pods, 0) => "name",
             (View::Pods, 1) => "phase",
             (View::Pods, 2) => "restarts",
+            (View::Perf, 0) => "tok/s",
+            (View::Perf, 1) => "E2E",
+            (View::Perf, 2) => "TTFT",
+            (View::Perf, 3) => "queue",
+            (View::Perf, 4) => "name",
             _ => "—",
         }
     }
@@ -821,7 +827,31 @@ impl App {
             View::Epp => (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect(),
             View::Events => (0..self.snap.events.len()).collect(),
             View::Nodes => (0..self.snap.nodes.len()).collect(),
-            View::Perf => (0..self.snap.perf_rows.len()).collect(),
+            View::Perf => {
+                use crate::collect::PerfRow;
+                // "지금 켜진 것"만: 서빙 신호(req/tps/지연 중 하나라도 유효)가 있는 모델.
+                let v = &self.snap.perf_rows;
+                let active = |r: &PerfRow| {
+                    (!r.req.is_nan() && r.req > 0.0)
+                        || (!r.tps.is_nan() && r.tps > 0.0)
+                        || !r.e2e_p95.is_nan()
+                        || !r.ttft_p95.is_nan()
+                        || !r.queue_p95.is_nan()
+                };
+                let mut idx: Vec<usize> = (0..v.len()).filter(|&i| active(&v[i])).collect();
+                let key = |x: f64| if x.is_nan() { f64::MIN } else { x }; // 값 없는 건 뒤로
+                idx.sort_by(|&a, &b| {
+                    let (x, y): (&PerfRow, &PerfRow) = (&v[a], &v[b]);
+                    match self.sort {
+                        1 => key(y.e2e_p95).partial_cmp(&key(x.e2e_p95)).unwrap_or(Equal),
+                        2 => key(y.ttft_p95).partial_cmp(&key(x.ttft_p95)).unwrap_or(Equal),
+                        3 => key(y.queue_p95).partial_cmp(&key(x.queue_p95)).unwrap_or(Equal),
+                        4 => x.model.cmp(&y.model),
+                        _ => key(y.tps).partial_cmp(&key(x.tps)).unwrap_or(Equal), // 0=tok/s desc
+                    }
+                });
+                idx
+            }
             View::Routing => (0..self.snap.routes.len()).collect(),
         };
         if !self.filter.is_empty() {
