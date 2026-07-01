@@ -169,6 +169,16 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                         app.help = false;
                         continue;
                     }
+                    // 알림 히스토리 오버레이: esc/q/A 로 닫기(다른 키 무시)
+                    if app.alerts_panel {
+                        match k.code {
+                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('A') | KeyCode::Char('a') => {
+                                app.alerts_panel = false
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     // 로그 오버레이 모드
                     if app.logs_mode {
                         match k.code {
@@ -197,6 +207,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                             }
                         }
                         KeyCode::Char('?') => app.toggle_help(),
+                        KeyCode::Char('A') | KeyCode::Char('a') => app.toggle_alerts(),
                         KeyCode::Char('t') => app.cycle_theme(),
                         KeyCode::Char('z') => app.zoom = !app.zoom,
                         KeyCode::Char(' ') => app.paused = !app.paused,
@@ -210,7 +221,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                                 .stdout(Stdio::null())
                                 .stderr(Stdio::null())
                                 .spawn();
-                            app.toast = Some(format!("Grafana: {}  (open in browser · llm-models dashboard)", base));
+                            app.notify(format!("Grafana: {}  (open in browser · llm-models dashboard)", base));
                             terminal.clear().ok(); // 혹시 모를 잔상 제거 → 전체 재그리기
                         }
                         KeyCode::Char('/') => app.start_filter(),
@@ -246,10 +257,10 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                                         app.logs_target = pod;
                                         app.logs_mode = true;
                                     }
-                                    Err(e) => app.toast = Some(format!("logs: {}", e)),
+                                    Err(e) => app.notify(format!("logs: {}", e)),
                                 }
                             } else {
-                                app.toast = Some("logs: Pods/Models 뷰에서 pod/model 선택".into());
+                                app.notify("logs: Pods/Models 뷰에서 pod/model 선택".to_string());
                             }
                         }
                         KeyCode::Char('s') => {
@@ -257,14 +268,11 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                                 let (name, target) =
                                     (m.name.clone(), if m.desired == 0 { 1 } else { 0 });
                                 match kube::scale_deploy(&ns, &name, target) {
-                                    Ok(_) => {
-                                        app.toast =
-                                            Some(format!("scaled {} → {}", name, target))
-                                    }
-                                    Err(e) => app.toast = Some(format!("scale failed: {}", e)),
+                                    Ok(_) => app.notify(format!("scaled {} → {}", name, target)),
+                                    Err(e) => app.notify(format!("scale failed: {}", e)),
                                 }
                             } else {
-                                app.toast = Some("scale: select a model in Models/Overview".into());
+                                app.notify("scale: select a model in Models/Overview".to_string());
                             }
                         }
                         _ => {

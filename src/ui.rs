@@ -2,7 +2,7 @@
 //! 모든 문자열은 표시 폭(unicode-width) 기준으로 절단해 CJK/와이드 글자 깨짐을 방지.
 //! 선택 하이라이트는 REVERSED 대신 은은한 배경색(htop/all-smi 스타일).
 
-use crate::app::{App, View};
+use crate::app::{App, Sev, View};
 use crate::collect::{AccelKind, Snapshot};
 use ratatui::prelude::*;
 use ratatui::widgets::{
@@ -82,7 +82,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             ])
             .split(f.area());
         title_bar(f, c[0], &app.snap, app.tick, app.paused);
-        summary_bar(f, c[1], &app.snap);
+        summary_bar(f, c[1], app);
         tabs(f, c[2], app);
         (c[3], c[4])
     };
@@ -106,9 +106,46 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.logs_mode {
         logs_overlay(f, app);
     }
+    if app.alerts_panel {
+        alerts_overlay(f, app);
+    }
     if app.help {
         help_overlay(f);
     }
+}
+
+/// 알림 히스토리 오버레이(A) — 최신 앞, 상대시각 + 심각도색.
+fn alerts_overlay(f: &mut Frame, app: &App) {
+    let area = centered(f.area(), 78, 22);
+    f.render_widget(Clear, area);
+    let now = crate::collect::now_secs();
+    let lines: Vec<Line> = if app.alerts.is_empty() {
+        vec![Line::from(Span::styled("  no alerts — all clear ●", Style::default().fg(C_OK())))]
+    } else {
+        app.alerts
+            .iter()
+            .map(|al| {
+                let age = now.saturating_sub(al.ts);
+                let (g, c) = if al.sev == Sev::Bad { ("✗", C_BAD()) } else { ("⚠", C_WARN()) };
+                Line::from(vec![
+                    Span::styled(format!("  {} ", g), Style::default().fg(c).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{:>4}s ago  ", age), Style::default().fg(C_DIM())),
+                    Span::styled(truncw(&al.msg, area.width.saturating_sub(18) as usize), Style::default().fg(Color::White)),
+                ])
+            })
+            .collect()
+    };
+    let title = format!(" alerts · {} recent · esc/A close ", app.alerts.len());
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(C_BAD()))
+                .title(Span::styled(title, Style::default().fg(C_BAD()).add_modifier(Modifier::BOLD))),
+        ),
+        area,
+    );
 }
 
 /// 2-패널: 넓으면 좌우, 좁으면(<100) 위아래로 — 반응형.
@@ -128,7 +165,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 fn help_overlay(f: &mut Frame) {
-    let area = centered(f.area(), 64, 22);
+    let area = centered(f.area(), 64, 23);
     f.render_widget(Clear, area);
     let g = |k: &str, d: &str| {
         Line::from(vec![
@@ -146,6 +183,7 @@ fn help_overlay(f: &mut Frame) {
         g("/", "filter (substring)"),
         g("l", "logs (selected pod/model, scroll+refresh)"),
         g("s", "scale selected model up/down"),
+        g("A", "alert history (threshold/health events)"),
         g("t", "cycle theme (default/high-contrast/colorblind)"),
         g("g", "open Grafana dashboard"),
         g("z", "zoom/focus (hide header+tabs)"),
@@ -260,7 +298,8 @@ fn title_bar(f: &mut Frame, area: Rect, s: &Snapshot, tick: u64, paused: bool) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-fn summary_bar(f: &mut Frame, area: Rect, s: &Snapshot) {
+fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
+    let s = &app.snap;
     let (mut gpu, mut rbln, mut rngd, mut busy) = (0, 0, 0, 0);
     let (mut mu, mut mt) = (0.0, 0.0);
     for a in &s.accel {
@@ -296,11 +335,28 @@ fn summary_bar(f: &mut Frame, area: Rect, s: &Snapshot) {
     if warns > 0 {
         spans.push(Span::styled(format!("│ ⚠{} warn", warns), Style::default().fg(C_WARN())));
     }
-    let line = Line::from(spans);
-    f.render_widget(Paragraph::new(line), area);
+    // 활성 알림 카운트(A 로 히스토리)
+    let nalert = app.active_alerts.len();
+    if nalert > 0 {
+        spans.push(Span::styled(format!("  ⚠{} alert (A)", nalert), Style::default().fg(C_BAD()).add_modifier(Modifier::BOLD)));
+    }
+    let mut para = Paragraph::new(Line::from(spans));
+    // 신규 알림 플래시: flash_until 이전이면 ~0.6s 주기로 요약바 전체를 반전.
+    let now = crate::collect::now_secs();
+    if now < app.flash_until && (app.tick / 3) % 2 == 0 {
+        para = para.style(Style::default().bg(C_BAD()).fg(Color::Black).add_modifier(Modifier::BOLD));
+    }
+    f.render_widget(para, area);
 }
 
 fn tabs(f: &mut Frame, area: Rect, app: &App) {
+    // 전체 라벨 폭이 화면을 넘으면 비활성 탭은 번호만 표시(활성 탭은 라벨 유지) — 반응형.
+    let full_w: usize = View::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, v)| format!(" {}:{} ", i, v.title()).len() + 1)
+        .sum();
+    let compact = full_w > area.width as usize;
     let mut spans: Vec<Span> = Vec::new();
     for (i, v) in View::ALL.iter().enumerate() {
         let sel = *v == app.view;
@@ -309,7 +365,12 @@ fn tabs(f: &mut Frame, area: Rect, app: &App) {
         } else {
             Style::default().fg(C_DIM())
         };
-        spans.push(Span::styled(format!(" {}:{} ", i, v.title()), st));
+        let label = if sel || !compact {
+            format!(" {}:{} ", i, v.title())
+        } else {
+            format!(" {} ", i)
+        };
+        spans.push(Span::styled(label, st));
         spans.push(Span::raw(" "));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -330,12 +391,15 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     if let Some(t) = &app.toast {
-        let msg = truncw(t, area.width.saturating_sub(1) as usize);
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(format!(" {} ", msg), Style::default().fg(Color::Black).bg(C_WARN())))),
-            area,
-        );
-        return;
+        if crate::collect::now_secs() < app.toast_until {
+            let msg = truncw(t, area.width.saturating_sub(1) as usize);
+            let bg = if app.toast_bad { C_BAD() } else { C_WARN() };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(format!(" {} ", msg), Style::default().fg(Color::Black).bg(bg)))),
+                area,
+            );
+            return;
+        }
     }
     let mut spans: Vec<Span> = Vec::new();
     if !app.filter.is_empty() {
@@ -347,7 +411,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     if sortable {
         hint.push_str(&format!("o sort:{}  ", app.sort_label()));
     }
-    hint.push_str("l logs  s scale  t theme  z zoom  g grafana↗  ? help  q quit");
+    hint.push_str("l logs  s scale  A alerts  t theme  z zoom  g grafana↗  ? help  q quit");
     spans.push(Span::styled(hint, Style::default().fg(C_DIM())));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -436,6 +500,30 @@ fn bar_line(pct: f64, width: usize, color: Color) -> Line<'static> {
         Span::styled(filled, Style::default().fg(color)),
         Span::styled(track, Style::default().fg(C_TRACK())),
     ])
+}
+
+/// all-smi 식 스택형 바: 세그먼트(값,색)를 비율대로 이어 붙이고 나머지는 track.
+/// 이종 가속기 VRAM 구성(GPU|RBLN|RNGD|free) 등 "무엇이 얼마나 차지하나" 표시용.
+fn stacked_bar(segments: &[(f64, Color)], total: f64, width: usize) -> Vec<Span<'static>> {
+    if total <= 0.0 || width == 0 {
+        return vec![Span::styled("░".repeat(width), Style::default().fg(C_TRACK()))];
+    }
+    let mut spans: Vec<Span> = Vec::new();
+    let mut used = 0usize;
+    for (val, col) in segments {
+        if used >= width {
+            break;
+        }
+        let w = (((val / total) * width as f64).round() as usize).min(width - used);
+        if w > 0 {
+            spans.push(Span::styled("█".repeat(w), Style::default().fg(*col)));
+            used += w;
+        }
+    }
+    if used < width {
+        spans.push(Span::styled("░".repeat(width - used), Style::default().fg(C_TRACK())));
+    }
+    spans
 }
 
 /// all-smi 식 게이지 행: `label  ██████░░░░  value`.
@@ -1037,11 +1125,13 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     // Σ 요약 1줄 + LED 그리드(폭에 맞춰 줄바꿈). 카드 높이는 LED 줄 수에 맞춰 가변.
     let mut cluster_lines: Vec<Line> = Vec::new();
     {
-        let mut kinds: std::collections::BTreeMap<&str, (usize, Color)> = std::collections::BTreeMap::new();
+        // 벤더별 (수, 색, 사용메모리GB) — 스택 바용.
+        let mut kinds: std::collections::BTreeMap<&str, (usize, Color, f64)> = std::collections::BTreeMap::new();
         let (mut usum, mut mu, mut mt, mut pw) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
         for a in &s.accel {
-            let e = kinds.entry(a.kind.label()).or_insert((0, kind_color(a.kind)));
+            let e = kinds.entry(a.kind.label()).or_insert((0, kind_color(a.kind), 0.0));
             e.0 += 1;
+            e.2 += a.mem_used_gb;
             usum += a.util; mu += a.mem_used_gb; mt += a.mem_total_gb; pw += a.power;
         }
         let ncnt = s.accel.len().max(1);
@@ -1049,7 +1139,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         let mempct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
         let ready = s.models.iter().filter(|m| m.ready > 0).count();
         let mut sp = vec![Span::styled("Σ ", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))];
-        for (k, (c, col)) in &kinds {
+        for (k, (c, col, _)) in &kinds {
             sp.push(Span::styled(format!("{}×{} ", k, c), Style::default().fg(*col).add_modifier(Modifier::BOLD)));
         }
         sp.push(Span::styled(format!("· util {:.0}% ", avg), Style::default().fg(util_color(avg))));
@@ -1059,6 +1149,16 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         sp.push(Span::styled(format!("· req/s {} ", rate(s.perf.req_rate)), Style::default().fg(C_DIM())));
         sp.push(Span::styled(format!("· TTFT {}", ms(s.perf.ttft_p95)), Style::default().fg(C_DIM())));
         cluster_lines.push(Line::from(sp));
+
+        // VRAM 구성(벤더별 스택 바 + free) — 이종 가속기 메모리 점유를 한눈에.
+        if mt > 0.0 {
+            let barw = ((area.width as usize).saturating_sub(24)).clamp(10, 48);
+            let segs: Vec<(f64, Color)> = kinds.values().map(|(_, col, m)| (*m, *col)).collect();
+            let mut vsp = vec![Span::styled(format!("{:<6}", "VRAM"), Style::default().fg(C_DIM()))];
+            vsp.extend(stacked_bar(&segs, mt, barw));
+            vsp.push(Span::styled(format!(" {:.0}/{:.0}GB used", mu, mt), Style::default().fg(C_DIM())));
+            cluster_lines.push(Line::from(vsp));
+        }
 
         // all-smi 식 LED 그리드: 디바이스 1개=글리프 1개. vendor=색, util=●채움/○유휴, dead=✗, throttle=⚠.
         // 폭 초과 시 다음 줄로 감싸고(라벨 폭만큼 들여쓰기), 큰 fleet 대비 최대 줄 수 제한.
