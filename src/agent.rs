@@ -71,6 +71,9 @@ struct Acc {
     mem_used_gb: f64,
     mem_total_gb: f64,
     unified_mem: bool, // true → mem is the host-shared unified pool (GB10 등)
+    mem_bw_pct: Option<f64>, // DCGM MEM_COPY_UTIL — memory bandwidth pressure
+    clock_mhz: Option<f64>,
+    mem_temp_c: Option<f64>,
     temp_c: f64,
     power_w: f64,
     alive: bool,
@@ -167,6 +170,9 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             mem_used_gb: a.mem_used_gb,
             mem_total_gb: a.mem_total_gb,
             unified_mem: a.unified_mem,
+            mem_bw_pct: opt(a.mem_bw),
+            clock_mhz: opt(a.clock_mhz),
+            mem_temp_c: opt(a.mem_temp),
             temp_c: a.temp,
             power_w: a.power,
             alive: a.alive,
