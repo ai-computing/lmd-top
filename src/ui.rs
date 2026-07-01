@@ -5,10 +5,9 @@
 use crate::app::{App, View};
 use crate::collect::{AccelKind, Snapshot};
 use ratatui::prelude::*;
-use ratatui::symbols::Marker;
 use ratatui::widgets::{
-    Axis, Block, BorderType, Borders, Cell, Chart, Clear, Dataset, GraphType, Paragraph, Row,
-    Table, TableState, Wrap,
+    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Table, TableState, Wrap,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -51,6 +50,16 @@ fn C_HL() -> Color {
 }
 
 const FRAC: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+
+// ── 심각도 임계치 (단일 출처) ───────────────────────────
+// 개념 "warn/bad" 를 지표별로 한 곳에서 정의 → 바 색과 값 색이 어긋나지 않음.
+const UTIL_WARN: f64 = 60.0;
+const UTIL_BAD: f64 = 85.0;
+const MEM_WARN: f64 = 70.0;
+const MEM_BAD: f64 = 90.0;
+const TEMP_WARN: f64 = 60.0;
+const TEMP_BAD: f64 = 80.0;
+const IDLE_UTIL: f64 = 10.0; // 이하는 dim(유휴)
 
 pub fn draw(f: &mut Frame, app: &App) {
     let (body, footer_area) = if app.zoom {
@@ -119,7 +128,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 fn help_overlay(f: &mut Frame) {
-    let area = centered(f.area(), 62, 20);
+    let area = centered(f.area(), 64, 22);
     f.render_widget(Clear, area);
     let g = |k: &str, d: &str| {
         Line::from(vec![
@@ -149,6 +158,7 @@ fn help_overlay(f: &mut Frame) {
             Span::styled("○ ", Style::default().fg(C_DIM())), Span::styled("idle  ", Style::default().fg(C_DIM())),
             Span::styled("◐ ", Style::default().fg(C_WARN())), Span::styled("pending  ", Style::default().fg(C_DIM())),
             Span::styled("⚠ ", Style::default().fg(C_WARN())), Span::styled("throttle  ", Style::default().fg(C_DIM())),
+            Span::styled("⊘ ", Style::default().fg(C_WARN())), Span::styled("cordoned  ", Style::default().fg(C_DIM())),
             Span::styled("✗ ", Style::default().fg(C_BAD())), Span::styled("down", Style::default().fg(C_DIM())),
         ]),
         Line::from(vec![
@@ -207,6 +217,7 @@ fn logs_overlay(f: &mut Frame, app: &App) {
         app.logs_target,
         app.logs.len()
     );
+    let total = app.logs.len();
     f.render_widget(
         Paragraph::new(lines).scroll((app.logs_scroll, 0)).block(
             Block::default()
@@ -217,6 +228,7 @@ fn logs_overlay(f: &mut Frame, app: &App) {
         ),
         area,
     );
+    list_scrollbar(f, area, total, (app.logs_scroll as usize).min(total.saturating_sub(1)));
 }
 
 // ── 헤더 ───────────────────────────────────────────────
@@ -263,7 +275,7 @@ fn summary_bar(f: &mut Frame, area: Rect, s: &Snapshot) {
         Span::styled(format!("RNGD {} ", rngd), Style::default().fg(kind_color(AccelKind::Rngd))),
         Span::styled(format!("· {} busy ", busy), Style::default().fg(C_DIM())),
         Span::raw("│ "),
-        Span::styled(format!("vram {:.0}/{:.0}G ", mu, mt), Style::default().fg(mem_color(mempct))),
+        Span::styled(format!("vram {:.0}/{:.0}GB ", mu, mt), Style::default().fg(mem_color(mempct))),
         Span::raw("│ "),
         Span::styled(
             format!("models {}/{} ", serving, s.models.len()),
@@ -356,11 +368,11 @@ fn truncw(s: &str, max: usize) -> String {
     out
 }
 
-/// 셀 위치별 색(초록→노랑→빨강)
+/// 셀 위치별 색(초록→노랑→빨강). util 임계치와 동일 기준.
 fn grad_color(pct: f64) -> Color {
-    if pct > 80.0 {
+    if pct > UTIL_BAD {
         C_BAD()
-    } else if pct > 55.0 {
+    } else if pct > UTIL_WARN {
         C_WARN()
     } else {
         C_OK()
@@ -443,20 +455,20 @@ fn sparkstr(data: &[u64], width: usize, max: u64) -> String {
 }
 
 fn util_color(p: f64) -> Color {
-    if p > 85.0 {
+    if p > UTIL_BAD {
         C_BAD()
-    } else if p > 60.0 {
+    } else if p > UTIL_WARN {
         C_WARN()
-    } else if p > 10.0 {
+    } else if p > IDLE_UTIL {
         C_OK()
     } else {
         C_DIM()
     }
 }
 fn mem_color(p: f64) -> Color {
-    if p > 90.0 {
+    if p > MEM_BAD {
         C_BAD()
-    } else if p > 70.0 {
+    } else if p > MEM_WARN {
         C_WARN()
     } else if p > 1.0 {
         C_OK()
@@ -465,9 +477,9 @@ fn mem_color(p: f64) -> Color {
     }
 }
 fn temp_color(t: f64) -> Color {
-    if t > 75.0 {
+    if t > TEMP_BAD {
         C_BAD()
-    } else if t > 60.0 {
+    } else if t > TEMP_WARN {
         C_WARN()
     } else if t > 0.0 {
         Color::Gray
@@ -503,6 +515,15 @@ fn block(title: &str) -> Block<'static> {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(C_TRACK()))
         .title(Span::styled(format!(" {} ", title), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)))
+}
+
+/// 활성(선택 대상) 패널용 블록 — 멀티패널 뷰에서 ↑↓가 움직이는 패널을 밝은 테두리로 강조.
+fn block_active(title: &str) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD))
+        .title(Span::styled(format!(" ▸ {} ", title), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)))
 }
 
 /// 애니메이션 마퀴 — 폭 초과 시 tick 에 따라 가로 스크롤(선택 행 강조용). 이름은 대개 ASCII.
@@ -541,6 +562,34 @@ fn hl_style() -> Style {
     Style::default().bg(C_HL()).add_modifier(Modifier::BOLD)
 }
 
+/// 리스트/테이블 오른쪽에 스크롤바(오버플로 표시). 블록 테두리 안쪽 세로로 렌더.
+/// total=전체 항목 수, pos=현재 선택 인덱스. 화면보다 짧으면 그리지 않음.
+fn list_scrollbar(f: &mut Frame, area: Rect, total: usize, pos: usize) {
+    let viewport = area.height.saturating_sub(2) as usize; // 테두리 제외 대략치
+    if total == 0 || total <= viewport {
+        return;
+    }
+    let mut st = ScrollbarState::new(total).position(pos);
+    let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .thumb_symbol("█")
+        .track_symbol(Some("│"))
+        .thumb_style(Style::default().fg(C_ACC()))
+        .track_style(Style::default().fg(C_TRACK()));
+    let inner = area.inner(Margin { vertical: 1, horizontal: 0 });
+    f.render_stateful_widget(sb, inner, &mut st);
+}
+
+/// 블록 타이틀용 위치 카운터 접미사 " · sel/total". total<=0 이면 빈 문자열.
+fn count_suffix(sel: usize, total: usize) -> String {
+    if total == 0 {
+        " · 0".to_string()
+    } else {
+        format!(" · {}/{}", sel + 1, total)
+    }
+}
+
 fn cellw(text: String, w: usize) -> Cell<'static> {
     Cell::from(truncw(&text, w))
 }
@@ -563,7 +612,7 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
             util.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
             let mut mem = grad_bar(mempct, 7).spans;
             mem.push(Span::styled(
-                format!(" {:.0}/{:.0}G", a.mem_used_gb, a.mem_total_gb),
+                format!(" {:.0}/{:.0}GB", a.mem_used_gb, a.mem_total_gb),
                 Style::default().fg(C_DIM()),
             ));
             let (hg, hc) = if !a.alive {
@@ -602,22 +651,26 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(13),
         Constraint::Min(8),
     ];
+    let total = order.len();
     let table = Table::new(rows, widths)
         .header(hrow(&["KIND", "ID", "NODE", "UTIL", "MEM", "TEMP", "PWR", "TREND(util)", "MODEL/POD"]))
         .column_spacing(1)
         .row_highlight_style(hl_style())
         .highlight_symbol("▎")
-        .block(block("Accelerators · UTIL=compute% MEM=VRAM · TREND=util history · ⏎ full timeline"));
+        .block(block(&format!("Accelerators · UTIL=compute% MEM=VRAM · ⏎ timeline{}", count_suffix(app.selected, total))));
     let mut st = TableState::default();
     st.select(Some(app.selected));
     f.render_stateful_widget(table, area, &mut st);
+    list_scrollbar(f, area, total, app.selected);
 }
 
 // ── Models ─────────────────────────────────────────────
 fn view_models(f: &mut Frame, area: Rect, app: &App) {
     let mut st = TableState::default();
     st.select(Some(app.selected));
+    let total = app.order().len();
     f.render_stateful_widget(models_table(app, "Models · ⏎ detail"), area, &mut st);
+    list_scrollbar(f, area, total, app.selected);
 }
 
 const MODEL_COLS: [&str; 10] = ["name", "engine", "accel", "ready", "run", "wait", "kv", "tps", "path", "status"];
@@ -720,10 +773,11 @@ fn view_pods(f: &mut Frame, area: Rect, app: &App) {
         .column_spacing(1)
         .row_highlight_style(hl_style())
         .highlight_symbol("▎")
-        .block(block("Pods (llm-serving) · ⏎ detail"));
+        .block(block(&format!("Pods (llm-serving) · ⏎ detail{}", count_suffix(app.selected, order.len()))));
     let mut st = TableState::default();
     st.select(Some(app.selected));
     f.render_stateful_widget(table, area, &mut st);
+    list_scrollbar(f, area, order.len(), app.selected);
 }
 
 // ── EPP ────────────────────────────────────────────────
@@ -769,10 +823,11 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                 .column_spacing(1)
                 .row_highlight_style(hl_style())
                 .highlight_symbol("▎")
-                .block(block("EPP scorers · select for description"));
+                .block(block_active(&format!("EPP scorers · select for description{}", count_suffix(app.selected, order.len()))));
             let mut st = TableState::default();
             st.select(Some(app.selected));
             f.render_stateful_widget(t, top_l, &mut st);
+            list_scrollbar(f, top_l, order.len(), app.selected);
 
             let sel = order.get(app.selected).and_then(|&i| cfg.scorers.get(i));
             let mut dl: Vec<Line> = vec![
@@ -960,7 +1015,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     let s = &app.snap;
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Length(6), Constraint::Length(5), Constraint::Min(4), Constraint::Length(3)])
+        .constraints([Constraint::Length(4), Constraint::Length(6), Constraint::Length(5), Constraint::Min(4), Constraint::Length(3)])
         .split(area);
 
     // ── 클러스터 요약 카드(all-smi 식 aggregate) ──────────
@@ -986,7 +1041,33 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         sp.push(Span::styled(format!("· models {}/{} ", ready, s.models.len()), Style::default().fg(if ready > 0 { C_OK() } else { C_DIM() })));
         sp.push(Span::styled(format!("· req/s {} ", rate(s.perf.req_rate)), Style::default().fg(C_DIM())));
         sp.push(Span::styled(format!("· TTFT {}", ms(s.perf.ttft_p95)), Style::default().fg(C_DIM())));
-        f.render_widget(Paragraph::new(Line::from(sp)).block(block("Cluster")), rows[0]);
+        // all-smi 식 LED 그리드: 디바이스 1개=글리프 1개. vendor=색, util=●채움/○유휴, dead=✗, throttle=⚠.
+        let mut bykind: std::collections::BTreeMap<&str, Vec<&crate::collect::Accel>> = std::collections::BTreeMap::new();
+        for a in &s.accel {
+            bykind.entry(a.kind.label()).or_default().push(a);
+        }
+        let mut led: Vec<Span> = Vec::new();
+        for (k, list) in &bykind {
+            let kc = kind_color(list[0].kind);
+            led.push(Span::styled(format!("{} ", k), Style::default().fg(kc).add_modifier(Modifier::BOLD)));
+            for a in list {
+                let (g, c) = if !a.alive {
+                    ("✗", C_BAD())
+                } else if a.throttle > 0.0 {
+                    ("⚠", C_WARN())
+                } else if a.util > IDLE_UTIL {
+                    ("●", kc)
+                } else {
+                    ("○", C_DIM())
+                };
+                led.push(Span::styled(format!("{} ", g), Style::default().fg(c)));
+            }
+            led.push(Span::raw(" "));
+        }
+        if led.is_empty() {
+            led.push(Span::styled("(no accelerators)", Style::default().fg(C_DIM())));
+        }
+        f.render_widget(Paragraph::new(vec![Line::from(sp), Line::from(led)]).block(block("Cluster")), rows[0]);
     }
 
     // 가속기: (종류,노드)별 집계 — 한눈에 + 절대 메모리(GB) + health 아이콘
@@ -1090,8 +1171,8 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         // 타임라인: util% / VRAM% 두 개만 넓게(반응형). temp/power 는 위 게이지로.
         let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
         let (l, r) = two_panes(rows[1], 50);
-        line_chart(f, l, app, &format!("{}:util", k), "compute util", "%", Some(100.0), util_color(a.util));
-        line_chart(f, r, app, &format!("{}:mem", k), "VRAM", "%", Some(100.0), C_ACC());
+        bar_timeline(f, l, app, &format!("{}:util", k), "compute util", "%", Some(100.0));
+        bar_timeline(f, r, app, &format!("{}:mem", k), "VRAM", "%", Some(100.0));
         return;
     }
     // Node: info + cpu/mem/load timeline
@@ -1125,8 +1206,8 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(Paragraph::new(lines).block(block(&format!("Node{}", nav))), rows[0]);
         let k = format!("nod:{}", n.name);
         let (l, r) = two_panes(rows[1], 50);
-        line_chart(f, l, app, &format!("{}:cpu", k), "host cpu", "%", Some(100.0), C_OK());
-        line_chart(f, r, app, &format!("{}:mem", k), "host mem", "%", Some(100.0), C_ACC());
+        bar_timeline(f, l, app, &format!("{}:cpu", k), "host cpu", "%", Some(100.0));
+        bar_timeline(f, r, app, &format!("{}:mem", k), "host mem", "%", Some(100.0));
         return;
     }
 
@@ -1181,53 +1262,52 @@ fn ms(v: f64) -> String {
 fn rate(v: f64) -> String {
     if v.is_nan() { "–".into() } else { format!("{:.2}", v) }
 }
-/// all-smi 식 라인 차트: X축=시간(최근 N초), Y축=값+단위, 제목에 현재/최대값.
-/// ymax_opt=Some(100) 이면 0~100 고정(%), None 이면 데이터 최대×1.25 자동.
-fn line_chart(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, unit: &str, ymax_opt: Option<f64>, color: Color) {
+/// 채움(area-fill) 타임라인. 컬럼당 값 1개를 세로 블록(▁▂▃▄▅▆▇█, 8단계)으로 채우고
+/// 높이(값)에 따라 green→yellow→red 심각도색을 입힘(btop/nvtop식). 최신값을 오른쪽(now)에 고정.
+/// 외부 크레이트 없이 프레임 버퍼에 직접 렌더(순수 Rust 원칙). ymax_opt=Some(100)→0~100 고정.
+fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, unit: &str, ymax_opt: Option<f64>) {
+    const LV: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let raw = app.hist_for(key);
     let cur = raw.last().copied().unwrap_or(0);
     let dmax = raw.iter().copied().max().unwrap_or(0);
-    let n = crate::app::HIST as f64;
-    // 최신값을 오른쪽(now)에 고정 — 히스토리가 아직 짧아도 왼쪽에 뭉치지 않음.
-    let len = raw.len() as f64;
-    let data: Vec<(f64, f64)> = raw
-        .iter()
-        .enumerate()
-        .map(|(i, v)| (n - (len - 1.0) + i as f64, *v as f64))
-        .collect();
-    let ymax = ymax_opt.unwrap_or_else(|| nice_ceil((dmax as f64) * 1.1));
-    // 제목: 라벨 + 현재값(강조색) + 최대
+    let ymax = ymax_opt.unwrap_or_else(|| nice_ceil((dmax as f64) * 1.1)).max(1.0);
+    let cur_pct = (cur as f64 / ymax * 100.0).clamp(0.0, 100.0);
     let ttl = Line::from(vec![
         Span::styled(format!(" {} ", label), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("▏ now {}{} ", cur, unit), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("▏ now {}{} ", cur, unit), Style::default().fg(grad_color(cur_pct)).add_modifier(Modifier::BOLD)),
         Span::styled(format!("▏ max {}{} ", dmax, unit), Style::default().fg(C_DIM())),
     ]);
-    let ds = vec![Dataset::default()
-        .marker(Marker::Braille)
-        .graph_type(GraphType::Line)
-        .style(Style::default().fg(color))
-        .data(&data)];
-    let chart = Chart::new(ds)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(C_TRACK()))
-                .title(ttl),
-        )
-        .x_axis(
-            Axis::default()
-                .bounds([0.0, n])
-                .labels([format!("-{}s", crate::app::HIST), "now".into()])
-                .style(Style::default().fg(C_TRACK())),
-        )
-        .y_axis(
-            Axis::default()
-                .bounds([0.0, ymax])
-                .labels([format!("0{}", unit), format!("{:.0}", ymax / 2.0), format!("{:.0}{}", ymax, unit)])
-                .style(Style::default().fg(C_TRACK())),
-        );
-    f.render_widget(chart, area);
+    let blk = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(C_TRACK()))
+        .title(ttl);
+    let inner = blk.inner(area);
+    f.render_widget(blk, area);
+    if inner.width == 0 || inner.height == 0 || raw.is_empty() {
+        return;
+    }
+    let w = inner.width as usize;
+    let rows_h = inner.height as usize;
+    // 컬럼당 최신 값 1개(오른쪽 정렬). 폭보다 데이터가 많으면 최근 w개만.
+    let data: Vec<u64> = raw.iter().rev().take(w).rev().copied().collect();
+    let start_x = inner.x + inner.width - data.len() as u16; // 오른쪽 정렬(now)
+    let buf = f.buffer_mut();
+    for (ci, &v) in data.iter().enumerate() {
+        let frac = (v as f64 / ymax).clamp(0.0, 1.0);
+        let eighths_total = (frac * (rows_h as f64) * 8.0).round() as usize; // 전체 채움(1/8칸 단위)
+        let color = grad_color(frac * 100.0);
+        let x = start_x + ci as u16;
+        for r in 0..rows_h {
+            // r=0 = 맨 아래 행
+            let filled = eighths_total.saturating_sub(r * 8).min(8);
+            if filled == 0 {
+                continue;
+            }
+            let y = inner.y + inner.height - 1 - r as u16;
+            buf[(x, y)].set_char(LV[filled]).set_fg(color);
+        }
+    }
 }
 
 /// 1/2/5 ×10^n 로 올림(축 상한을 깔끔하게).
@@ -1274,8 +1354,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             .direction(Direction::Horizontal)
             .constraints(vec![Constraint::Ratio(1, cols as u32); cols])
             .split(grid_rows[i / cols]);
-        let color = if label.contains("mem") { C_ACC() } else { C_OK() };
-        line_chart(f, cells[i % cols], app, key, label, "%", Some(100.0), color);
+        bar_timeline(f, cells[i % cols], app, key, label, "%", Some(100.0));
     }
 
     // throughput 숫자 + 데이터 없음 안내
@@ -1412,10 +1491,11 @@ fn view_launch(f: &mut Frame, area: Rect, app: &App) {
         .header(hrow(&["MODEL", "ROLE"]))
         .row_highlight_style(hl_style())
         .highlight_symbol("▎")
-        .block(block("Catalog · up/dn to select"));
+        .block(block_active(&format!("Catalog · up/dn to select{}", count_suffix(app.selected, app.catalog.len()))));
     let mut st = TableState::default();
     st.select(Some(app.selected));
     f.render_stateful_widget(lt, body_l, &mut st);
+    list_scrollbar(f, body_l, app.catalog.len(), app.selected);
 
     // 선택 모델의 배치 후보 × 라이브 재고
     let mut pl: Vec<Line> = Vec::new();
@@ -1495,7 +1575,7 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
                 cellw(n.version.clone(), 11),
                 Cell::from(Line::from(cpu)),
                 cellw(if n.load1.is_nan() { "-".into() } else { format!("{:.1}", n.load1) }, 5),
-                cellw(if n.mem_total_gb <= 0.0 { "-".into() } else { format!("{:.0}/{:.0}G", n.mem_used_gb, n.mem_total_gb) }, 10),
+                cellw(if n.mem_total_gb <= 0.0 { "-".into() } else { format!("{:.0}/{:.0}GB", n.mem_used_gb, n.mem_total_gb) }, 11),
                 Cell::from(Span::styled(accel, Style::default().fg(C_ACC()))),
             ])
         })
@@ -1506,7 +1586,7 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(11),
         Constraint::Length(13),
         Constraint::Length(5),
-        Constraint::Length(10),
+        Constraint::Length(11),
         Constraint::Min(12),
     ];
     let t = Table::new(rows, widths)
@@ -1514,10 +1594,11 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
         .column_spacing(1)
         .row_highlight_style(hl_style())
         .highlight_symbol("▎")
-        .block(block("Nodes (health / placement)"));
+        .block(block(&format!("Nodes (health / placement){}", count_suffix(app.selected, order.len()))));
     let mut st = TableState::default();
     st.select(Some(app.selected));
     f.render_stateful_widget(t, area, &mut st);
+    list_scrollbar(f, area, order.len(), app.selected);
 }
 
 // ── Events (k8s + llm-d 이벤트) ─────────────────────────
@@ -1549,10 +1630,11 @@ fn view_events(f: &mut Frame, area: Rect, app: &App) {
         .column_spacing(1)
         .row_highlight_style(hl_style())
         .highlight_symbol("▎")
-        .block(block("Events (k8s + llm-d, newest first)"));
+        .block(block(&format!("Events (k8s + llm-d, newest first){}", count_suffix(app.selected, order.len()))));
     let mut st = TableState::default();
     st.select(Some(app.selected));
     f.render_stateful_widget(t, area, &mut st);
+    list_scrollbar(f, area, order.len(), app.selected);
 }
 
 // ── 진단 ───────────────────────────────────────────────

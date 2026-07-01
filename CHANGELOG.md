@@ -2,6 +2,17 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.4.0]
+### Added — polish pass (btop/all-smi/bottom 벤치마크)
+- **채움(area-fill) 타임라인**: 타임라인을 세로 블록(▁▂▃▄▅▆▇█) 채움 + 값 높이별 green→yellow→red 심각도색으로(btop/bottom식). 외부 크레이트 없이 프레임 버퍼 직접 렌더(tui-bar-graph는 ratatui 0.29 비호환이라 자체 구현).
+- **스크롤바 + 위치 카운터**: Accel/Models/Pods/Nodes/Events/Logs/EPP/Launch 테이블에 ratatui Scrollbar(오버플로 표시) + 블록 타이틀에 `· sel/total`.
+- **활성 패널 포커스**: 멀티패널 뷰(EPP·Launch)에서 ↑↓가 움직이는 패널만 밝은 C_ACC 테두리 + `▸` 표식.
+- **all-smi LED 그리드**: Overview Cluster 카드에 디바이스 1개=글리프 1개(vendor=색, util=●채움/○유휴, dead=✗, throttle=⚠) — fleet 밀도 한눈에.
+
+### Changed — 일관성 폴리시
+- 심각도 임계치를 단일 상수(UTIL_WARN/BAD·MEM_WARN/BAD·TEMP_WARN/BAD)로 통일 → 바 색과 값 색이 어긋나지 않음.
+- 메모리 단위 `G`→`GB` 통일. help 범례에 `⊘ cordoned` 추가(실사용 글리프와 일치).
+
 ## [0.3.0]
 ### Fixed — serving metrics actually populate now
 - **핵심 버그**: Perf/Models 의 req/s·TTFT·TPOT·E2E·in/out tokens 가 존재하지 않는 `inference_objective_*`(EPP 전용, 이 클러스터는 EPP 우회) 를 쿼리해서 항상 비어 있었음. → 전부 네이티브 **`vllm:*`** 로 교체(request_success_total / e2e_request_latency / request_time_per_output_token / request_prompt·generation_tokens). KV=`kv_cache_usage_perc`, prefix-hit=hits/queries, err=abort finished_reason.
