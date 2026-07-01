@@ -4,7 +4,16 @@
 
 ## [Unreleased]
 ### Added
-- **Events 뷰(8)**: k8s + llm-d 이벤트 통합(Warning/Normal, reason/object/message/count, 최신순). MVP1.
+- **Nodes 뷰(9)** · **Events 뷰(8)** · **Perf 종류별 동적 그리드**(존재하는 가속기만 이름+수) · **Topology 트리**(Gateway→HTTPRoute→route→pods) · **entity drill-down 멀티지표 타임라인**.
+- **all-smi식 인라인 트렌드**: Accel 뷰 각 디바이스에 util 히스토리 스파크라인(▁▂▃▅▇) 컬럼.
+- **detail 네비게이션**: ←→ 이전/다음 항목, ↑↓ 내부 스크롤, 제목에 `◂ i/n ▸` 위치.
+- **btop 그라디언트 바** · **반응형 레이아웃**(two_panes, 폭<100 세로) · **zoom(z)** · **일시정지(space)** · **테마(t)** · **필터(/)** · **도움말(?)**.
+- **추론 엔진** 컬럼(vLLM/SGLang/vLLM-RBLN/Ollama/…).
+- Events 뷰(8): k8s + llm-d 이벤트 통합.
+
+### Changed
+- Esc는 **뒤로가기만**(종료는 q). 애니메이션 100ms(부드럽게). 타임라인 축(nice_ceil)+현재값.
+- 경량화: fast tier(가속기+노드 1s, tokio::join! 병렬) + full 3s, Perf 쿼리 병렬/축소.
 - **Nodes 뷰(9)**: 노드 health(ready/cordoned/pressure)·kubelet·CPU%·load·mem·노드별 가속기(전체 노드, cordoned 포함).
 - **Entity drill-down timeline**: 가속기/노드 선택→⏎ → 그 대상의 다중 지표 타임라인(가속기 util/mem/temp · 노드 cpu/mem/load 스파크라인).
 - summary/diagnosis 에 Warning 이벤트 반영.

@@ -80,6 +80,7 @@ pub struct App {
     pub help: bool,       // 도움말/범례 오버레이
     pub zoom: bool,       // 포커스(줌) — 헤더/탭 숨기고 본문 최대화
     pub paused: bool,     // 화면 갱신 일시정지(데이터 고정, 읽기용)
+    pub detail_scroll: u16, // detail 내부 세로 스크롤
     pub cols: HashMap<String, Vec<String>>, // 뷰별 표시 컬럼(순서) — 설정파일
     pub catalog: Vec<crate::catalog::CatModel>, // 모델 카탈로그(런처)
 }
@@ -125,6 +126,7 @@ impl App {
             help: false,
             zoom: false,
             paused: false,
+            detail_scroll: 0,
             cols: load_columns(),
             catalog: crate::catalog::load(),
         }
@@ -327,6 +329,14 @@ impl App {
         }
         let cur = self.selected as i64 + delta;
         self.selected = cur.rem_euclid(n as i64) as usize;
+        self.detail_scroll = 0; // 항목 바뀌면 스크롤 리셋
+    }
+    pub fn scroll_detail(&mut self, delta: i64) {
+        self.detail_scroll = (self.detail_scroll as i64 + delta).max(0) as u16;
+    }
+    /// detail 위치(현재/전체) — "◂ prev  i/n  next ▸" 표시용.
+    pub fn detail_pos(&self) -> (usize, usize) {
+        (self.selected + 1, self.list_len())
     }
 
     /// 현재 뷰의 표시 순서(정렬 적용된 원본 인덱스 목록). 렌더와 액션이 공유.
