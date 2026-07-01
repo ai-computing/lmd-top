@@ -126,7 +126,7 @@ impl View {
             View::Accel => "Accel",
             View::Models => "Models",
             View::Epp => "EPP",
-            View::Routing => "Topo",
+            View::Routing => "Flow",
             View::Pods => "Pods",
             View::Perf => "Perf",
             View::Launch => "Launch",
@@ -288,6 +288,15 @@ impl App {
         *self.epp_weights.get(name).unwrap_or(&base)
     }
 
+    /// Flow(Topo)에서 선택된 route 의 backend(모델)명 — 경로에서 레이어 pivot 용.
+    pub fn selected_route_backend(&self) -> Option<String> {
+        if self.view == View::Routing {
+            self.sel_orig().and_then(|i| self.snap.routes.get(i)).map(|r| r.backend.clone())
+        } else {
+            None
+        }
+    }
+
     /// 선택된 per-model perf 행의 모델(서비스)명 — Perf 드릴용. sel_orig 경유(정렬/필터 안전).
     pub fn selected_perf_model(&self) -> Option<String> {
         if self.view == View::Perf {
@@ -316,7 +325,15 @@ impl App {
         let pod = self.selected_pod().map(|p| p.name.clone());
         let node = self.selected_node().map(|n| n.name.clone());
         let perf_model = self.selected_perf_model();
+        let route_backend = self.selected_route_backend();
         let target: Option<(View, String)> = match self.view {
+            View::Routing => route_backend.and_then(|b| match key {
+                'p' => Some((View::Pods, b)),
+                'i' => Some((View::Accel, b)),
+                'm' => Some((View::Models, b)),
+                'e' => Some((View::Epp, String::new())),
+                _ => None,
+            }),
             View::Perf => perf_model.and_then(|name| match key {
                 'p' => Some((View::Pods, name)),
                 'i' => Some((View::Accel, name)),
@@ -371,6 +388,7 @@ impl App {
                         View::Pods => Some("i/m"),
                         View::Nodes => Some("i"),
                         View::Perf => Some("p/i/e"),
+                        View::Routing => Some("p/i/m/e"),
                         _ => None,
                     };
                     if let Some(h) = hint {
@@ -474,6 +492,7 @@ impl App {
             View::Epp => self.snap.epp.as_ref().and_then(|e| e.scorers.get(i)).map(|(n, _)| n.clone()).unwrap_or_default(),
             View::Events => self.snap.events.get(i).map(|e| format!("{} {} {}", e.reason, e.object, e.message)).unwrap_or_default(),
             View::Nodes => self.snap.nodes.get(i).map(|n| n.name.clone()).unwrap_or_default(),
+            View::Routing => self.snap.routes.get(i).map(|r| format!("{} {}", r.path, r.backend)).unwrap_or_default(),
             _ => String::new(),
         }
     }
@@ -749,6 +768,7 @@ impl App {
             View::Events => (0..self.snap.events.len()).collect(),
             View::Nodes => (0..self.snap.nodes.len()).collect(),
             View::Perf => (0..self.snap.perf_rows.len()).collect(),
+            View::Routing => (0..self.snap.routes.len()).collect(),
             _ => Vec::new(),
         };
         if !self.filter.is_empty() {
