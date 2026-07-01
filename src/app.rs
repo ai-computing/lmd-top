@@ -79,6 +79,7 @@ pub struct App {
     pub filtering: bool,  // 필터 입력 모드
     pub help: bool,       // 도움말/범례 오버레이
     pub zoom: bool,       // 포커스(줌) — 헤더/탭 숨기고 본문 최대화
+    pub paused: bool,     // 화면 갱신 일시정지(데이터 고정, 읽기용)
     pub cols: HashMap<String, Vec<String>>, // 뷰별 표시 컬럼(순서) — 설정파일
     pub catalog: Vec<crate::catalog::CatModel>, // 모델 카탈로그(런처)
 }
@@ -123,6 +124,7 @@ impl App {
             filtering: false,
             help: false,
             zoom: false,
+            paused: false,
             cols: load_columns(),
             catalog: crate::catalog::load(),
         }
@@ -261,24 +263,43 @@ impl App {
                     self.push_hist(&format!("{}:load", k), (n.load1 * 10.0).round().max(0.0) as u64);
                 }
             }
-            // 클러스터 레벨 추이(timeline)
-            let n = snap.accel.len().max(1);
-            let util_avg = snap.accel.iter().map(|a| a.util).sum::<f64>() / n as f64;
-            let (mu, mt): (f64, f64) = snap.accel.iter().fold((0.0, 0.0), |(u, t), a| (u + a.mem_used_gb, t + a.mem_total_gb));
-            let vram_pct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
-            self.push_hist("sys:util", util_avg.round().clamp(0.0, 100.0) as u64);
-            self.push_hist("sys:vram", vram_pct.round().clamp(0.0, 100.0) as u64);
+            // 클러스터 추이 — 종류별 분리(GPU util/mem · NPU util/mem · host cpu/mem)
+            use crate::collect::AccelKind;
+            let mean = |v: &[f64]| if v.is_empty() { f64::NAN } else { v.iter().sum::<f64>() / v.len() as f64 };
+            let pct = |u: f64, t: f64| if t > 0.0 { u / t * 100.0 } else { 0.0 };
+            let (mut gu, mut gmu, mut gmt) = (Vec::new(), 0.0, 0.0);
+            let (mut nu, mut nmu, mut nmt) = (Vec::new(), 0.0, 0.0);
+            for a in &snap.accel {
+                match a.kind {
+                    AccelKind::Gpu => {
+                        gu.push(a.util);
+                        gmu += a.mem_used_gb;
+                        gmt += a.mem_total_gb;
+                    }
+                    _ => {
+                        nu.push(a.util);
+                        nmu += a.mem_used_gb;
+                        nmt += a.mem_total_gb;
+                    }
+                }
+            }
+            if !gu.is_empty() {
+                self.push_hist("sys:gpu_util", mean(&gu).round().clamp(0.0, 100.0) as u64);
+                self.push_hist("sys:gpu_mem", pct(gmu, gmt).round() as u64);
+            }
+            if !nu.is_empty() {
+                self.push_hist("sys:npu_util", mean(&nu).round().clamp(0.0, 100.0) as u64);
+                self.push_hist("sys:npu_mem", pct(nmu, nmt).round() as u64);
+            }
+            let cpus: Vec<f64> = snap.nodes.iter().filter(|n| !n.cpu_pct.is_nan()).map(|n| n.cpu_pct).collect();
+            if !cpus.is_empty() {
+                self.push_hist("sys:cpu", mean(&cpus).round().clamp(0.0, 100.0) as u64);
+            }
+            let (hmu, hmt): (f64, f64) = snap.nodes.iter().fold((0.0, 0.0), |(u, t), n| (u + n.mem_used_gb, t + n.mem_total_gb));
+            self.push_hist("sys:host_mem", pct(hmu, hmt).round().clamp(0.0, 100.0) as u64);
             let tps = snap.perf.tps;
             if !tps.is_nan() {
                 self.push_hist("sys:tps", tps.round().max(0.0) as u64);
-            }
-            let lat = snap.perf.e2e_p95;
-            if !lat.is_nan() {
-                self.push_hist("sys:lat", (lat * 1000.0).round().max(0.0) as u64);
-            }
-            let rq = snap.perf.req_rate;
-            if !rq.is_nan() {
-                self.push_hist("sys:reqs", (rq * 100.0).round().max(0.0) as u64);
             }
         }
         self.snap = snap;

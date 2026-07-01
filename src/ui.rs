@@ -59,7 +59,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
             .split(f.area());
-        title_bar(f, c[0], &app.snap, app.tick);
+        title_bar(f, c[0], &app.snap, app.tick, app.paused);
         (c[1], c[2])
     } else {
         let c = Layout::default()
@@ -72,7 +72,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Constraint::Length(1),
             ])
             .split(f.area());
-        title_bar(f, c[0], &app.snap, app.tick);
+        title_bar(f, c[0], &app.snap, app.tick, app.paused);
         summary_bar(f, c[1], &app.snap);
         tabs(f, c[2], app);
         (c[3], c[4])
@@ -173,8 +173,8 @@ fn help_overlay(f: &mut Frame) {
 }
 
 // ── 헤더 ───────────────────────────────────────────────
-fn title_bar(f: &mut Frame, area: Rect, s: &Snapshot, tick: u64) {
-    let spin = SPINNER[(tick as usize) % SPINNER.len()];
+fn title_bar(f: &mut Frame, area: Rect, s: &Snapshot, tick: u64, paused: bool) {
+    let spin = if paused { "⏸" } else { SPINNER[(tick as usize) % SPINNER.len()] };
     let gw = if s.gw_addr.is_empty() {
         Span::styled("⌂ gw —", Style::default().fg(C_DIM()))
     } else if s.gw_ok {
@@ -183,10 +183,11 @@ fn title_bar(f: &mut Frame, area: Rect, s: &Snapshot, tick: u64) {
         Span::styled(format!("⌂ gw {} ○", s.gw_addr), Style::default().fg(C_WARN()))
     };
     let line = Line::from(vec![
-        Span::styled(format!("{} ", spin), Style::default().fg(C_ACC())),
+        Span::styled(format!("{} ", spin), Style::default().fg(if paused { C_WARN() } else { C_ACC() })),
         Span::styled("lmd-top", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
         Span::styled(format!("  llm-d · {} nodes  ", s.nodes.len()), Style::default().fg(C_DIM())),
         gw,
+        Span::styled(if paused { "  ⏸ PAUSED (space)" } else { "" }, Style::default().fg(C_WARN())),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -1111,35 +1112,19 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Length(3), Constraint::Min(5)])
+        .constraints([Constraint::Length(12), Constraint::Length(3), Constraint::Min(5)])
         .split(area);
 
-    // timeline: 라인 차트(util%/vram%) + tok/s 라인차트
-    let (top_l, top_r) = two_panes(rows[0], 62);
-    let util_d: Vec<(f64, f64)> = app.hist_for("sys:util").iter().enumerate().map(|(i, v)| (i as f64, *v as f64)).collect();
-    let vram_d: Vec<(f64, f64)> = app.hist_for("sys:vram").iter().enumerate().map(|(i, v)| (i as f64, *v as f64)).collect();
-    let ds = vec![
-        Dataset::default().name("util%").marker(Marker::Braille).graph_type(GraphType::Line).style(Style::default().fg(C_OK())).data(&util_d),
-        Dataset::default().name("vram%").marker(Marker::Braille).graph_type(GraphType::Line).style(Style::default().fg(C_ACC())).data(&vram_d),
-    ];
-    let cur_u = app.hist_for("sys:util").last().copied().unwrap_or(0);
-    let cur_v = app.hist_for("sys:vram").last().copied().unwrap_or(0);
-    let chart = Chart::new(ds)
-        .block(block(&format!("Timeline cluster avg ▏ util {}% ▏ vram {}%", cur_u, cur_v)))
-        .x_axis(
-            Axis::default()
-                .bounds([0.0, crate::app::HIST as f64])
-                .labels([format!("-{}s", crate::app::HIST), "now".into()])
-                .style(Style::default().fg(C_TRACK())),
-        )
-        .y_axis(
-            Axis::default()
-                .bounds([0.0, 100.0])
-                .labels(["0%", "50%", "100%"])
-                .style(Style::default().fg(C_TRACK())),
-        );
-    f.render_widget(chart, top_l);
-    line_chart(f, top_r, app, "sys:tps", "tokens/s", "", None, C_OK());
+    // 종류별 분리 타임라인 그리드: [CPU util · GPU util · NPU util] / [host mem · GPU mem · NPU mem]
+    let g = Layout::default().direction(Direction::Vertical).constraints([Constraint::Ratio(1, 2); 2]).split(rows[0]);
+    let r0 = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 3); 3]).split(g[0]);
+    let r1 = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 3); 3]).split(g[1]);
+    line_chart(f, r0[0], app, "sys:cpu", "CPU util", "%", Some(100.0), C_OK());
+    line_chart(f, r0[1], app, "sys:gpu_util", "GPU util", "%", Some(100.0), C_OK());
+    line_chart(f, r0[2], app, "sys:npu_util", "NPU util", "%", Some(100.0), C_OK());
+    line_chart(f, r1[0], app, "sys:host_mem", "host mem", "%", Some(100.0), C_ACC());
+    line_chart(f, r1[1], app, "sys:gpu_mem", "GPU mem", "%", Some(100.0), C_ACC());
+    line_chart(f, r1[2], app, "sys:npu_mem", "NPU mem", "%", Some(100.0), C_ACC());
 
     // throughput 숫자 + 데이터 없음 안내
     let tl = Line::from(vec![
