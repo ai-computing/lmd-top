@@ -51,7 +51,8 @@ uniquely **observes and explains EPP routing decisions**.
   (`RBLN_DEVICE_STATUS:*`), and Furiosa RNGD (`furiosa_npu_*`) are shown side by side —
   vendor identity by color, health by glyph. The exact GPU model (A100 / GB10 / H100 …)
   and its total VRAM are **auto-detected** from DCGM (`modelName` / `FB_TOTAL`), not
-  hardcoded.
+  hardcoded. **Unified-memory** parts (GB10 / GH200 / GB200) are recognized — their memory
+  reflects the host-shared pool and is marked `∪`.
 - **EPP-aware.** Introspects the EPP `ConfigMap` (active scorers, weights, picker),
   visualizes routing decisions and per-pod queues, and **auto-diagnoses whether an
   HTTPRoute goes through the InferencePool (EPP) or bypasses it** (a common misconfig
