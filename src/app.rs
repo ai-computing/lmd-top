@@ -174,6 +174,9 @@ pub struct App {
     pub perf_detail: Option<crate::collect::PerfDetail>, // 선택 모델 지연 분포(Enter 시 온디맨드)
     // ── EPP scorer 가중치 what-if(로컬 시뮬, 클러스터 무변경) ──
     pub epp_weights: HashMap<String, f64>, // scorer 이름 → 조정 가중치 오버라이드
+    // ── 세션 에너지(누적 mJ 기준선) ──
+    pub energy_base: HashMap<String, f64>, // 디바이스 key → 세션 시작 시 누적 에너지(mJ)
+    pub energy_since: u64,                 // 세션 시작 epoch초
 }
 
 /// ~/.config/lmd-top/lmd-top.yaml 의 columns: {view: [col,...]} 로드. 없으면 빈 맵(=기본 전체).
@@ -236,7 +239,33 @@ impl App {
             nav_stack: Vec::new(),
             perf_detail: None,
             epp_weights: HashMap::new(),
+            energy_base: HashMap::new(),
+            energy_since: 0,
         }
+    }
+
+    /// 디바이스 안정 key(에너지/히스토리 공용).
+    pub fn accel_key(a: &crate::collect::Accel) -> String {
+        format!("{}:{}:{}", a.kind.label(), a.node, a.id)
+    }
+    /// 세션 에너지(Wh) = (현재 누적 − 기준선) mJ / 3.6e6. 데이터 없으면 NaN.
+    pub fn energy_session_wh(&self, a: &crate::collect::Accel) -> f64 {
+        if a.energy_mj.is_nan() {
+            return f64::NAN;
+        }
+        let base = self.energy_base.get(&Self::accel_key(a)).copied().unwrap_or(a.energy_mj);
+        (a.energy_mj - base).max(0.0) / 3.6e6
+    }
+    /// 세션 에너지 리셋(R) — 현재 누적을 새 기준선으로.
+    pub fn reset_energy(&mut self) {
+        self.energy_base.clear();
+        for a in &self.snap.accel {
+            if !a.energy_mj.is_nan() {
+                self.energy_base.insert(Self::accel_key(a), a.energy_mj);
+            }
+        }
+        self.energy_since = crate::collect::now_secs();
+        self.notify("energy session reset".to_string());
     }
 
     /// EPP what-if: 선택 scorer 가중치를 delta 만큼 조정(로컬 오버라이드, ≥0).
@@ -513,6 +542,15 @@ impl App {
                 self.push_hist("sys:tps", tps.round().max(0.0) as u64);
             }
             self.detect_alerts(&snap);
+            // 세션 에너지 기준선(디바이스 최초 관측 시 캡처).
+            for a in &snap.accel {
+                if !a.energy_mj.is_nan() {
+                    self.energy_base.entry(Self::accel_key(a)).or_insert(a.energy_mj);
+                }
+            }
+            if self.energy_since == 0 {
+                self.energy_since = snap.ts;
+            }
         }
         self.snap = snap;
         let n = self.list_len();

@@ -165,7 +165,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 fn help_overlay(f: &mut Frame) {
-    let area = centered(f.area(), 66, 24);
+    let area = centered(f.area(), 66, 25);
     f.render_widget(Clear, area);
     let g = |k: &str, d: &str| {
         Line::from(vec![
@@ -185,6 +185,7 @@ fn help_overlay(f: &mut Frame) {
         g("l", "logs (selected pod/model, scroll+refresh)"),
         g("s", "scale selected model (needs --mode admin+, confirms y/n)"),
         g("A", "alert history (threshold/health events)"),
+        g("R", "reset energy session (per-accel Wh)"),
         g("t", "cycle theme (default/high-contrast/colorblind)"),
         g("g", "open Grafana dashboard"),
         g("z", "zoom/focus (hide header+tabs)"),
@@ -1220,7 +1221,12 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         sp.push(Span::styled(format!("· {:.0}W ", pw), Style::default().fg(C_DIM())));
         sp.push(Span::styled(format!("· models {}/{} ", ready, s.models.len()), Style::default().fg(if ready > 0 { C_OK() } else { C_DIM() })));
         sp.push(Span::styled(format!("· req/s {} ", rate(s.perf.req_rate)), Style::default().fg(C_DIM())));
-        sp.push(Span::styled(format!("· TTFT {}", ms(s.perf.ttft_p95)), Style::default().fg(C_DIM())));
+        sp.push(Span::styled(format!("· TTFT {} ", ms(s.perf.ttft_p95)), Style::default().fg(C_DIM())));
+        // 세션 에너지 총합(R 리셋)
+        let ewh: f64 = s.accel.iter().map(|a| app.energy_session_wh(a)).filter(|x| !x.is_nan()).sum();
+        if ewh > 0.0 {
+            sp.push(Span::styled(format!("· E {:.1}Wh", ewh), Style::default().fg(C_ACC())));
+        }
         cluster_lines.push(Line::from(sp));
 
         // VRAM 구성(벤더별 스택 바 + free) — 이종 가속기 메모리 점유를 한눈에.
@@ -1413,6 +1419,18 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
                     if a.mem_temp.is_nan() { "–".into() } else { format!("{:.0} °C", a.mem_temp) },
                     Style::default().fg(temp_color(a.mem_temp)),
                 ),
+            ]));
+        }
+        // 세션 에너지(누적) — R 로 리셋
+        let ewh = app.energy_session_wh(a);
+        if !ewh.is_nan() {
+            let hrs = crate::collect::now_secs().saturating_sub(app.energy_since) as f64 / 3600.0;
+            let avg = if hrs > 1e-6 { ewh / hrs } else { f64::NAN };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<8} ", "energy"), Style::default().fg(C_DIM())),
+                Span::styled(format!("{:.2} Wh", ewh), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  (session · avg {})", if avg.is_nan() { "–".into() } else { format!("{:.0} W", avg) }), Style::default().fg(C_DIM())),
+                Span::styled("  R reset", Style::default().fg(C_DIM())),
             ]));
         }
         f.render_widget(Paragraph::new(lines).block(block(&format!("Accelerator{}", nav))), rows[0]);

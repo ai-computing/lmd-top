@@ -70,6 +70,7 @@ pub struct Accel {
     pub mem_bw: f64,        // DCGM MEM_COPY_UTIL % (메모리 대역폭 압박), NaN=미지원
     pub clock_mhz: f64,     // DCGM SM_CLOCK MHz, NaN=미지원
     pub mem_temp: f64,      // DCGM MEMORY_TEMP °C, NaN=미지원
+    pub energy_mj: f64,     // DCGM TOTAL_ENERGY_CONSUMPTION 누적(mJ), NaN=미지원
 }
 impl Accel {
     /// 표시용 계열/모델 라벨 — 감지된 모델이 있으면 그것, 없으면 벤더 라벨.
@@ -423,7 +424,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
     // 모든 프롬 쿼리 + kube nodes 를 동시 실행(순차 대비 대폭 단축)
     let (
         f_util, f_temp, f_pow, f_du, f_dt, f_alive, f_thr, r_util, r_temp, r_pow, r_du, r_dt, r_health, g_util,
-        g_mu, g_mt, g_temp, g_pow, g_bw, g_clk, g_mtemp, n_load, n_mt, n_ma, n_cpu, node_res,
+        g_mu, g_mt, g_temp, g_pow, g_bw, g_clk, g_mtemp, g_energy, n_load, n_mt, n_ma, n_cpu, node_res,
     ) = tokio::join!(
         prom::query(p, "avg by (uuid,device,hostname) (furiosa_npu_core_utilization)"),
         prom::query(p, "max by (uuid) (furiosa_npu_hw_temperature)"),
@@ -446,6 +447,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
         prom::query(p, "DCGM_FI_DEV_MEM_COPY_UTIL"), // 메모리 컨트롤러 busy% = 대역폭 압박
         prom::query(p, "DCGM_FI_DEV_SM_CLOCK"),       // SM 클럭 MHz
         prom::query(p, "DCGM_FI_DEV_MEMORY_TEMP"),    // 메모리 정션 온도 °C
+        prom::query(p, "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"), // 누적 에너지(mJ)
         prom::query(p, "node_load1"),
         prom::query(p, "node_memory_MemTotal_bytes"),
         prom::query(p, "node_memory_MemAvailable_bytes"),
@@ -481,6 +483,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
             mem_bw: f64::NAN,
             clock_mhz: f64::NAN,
             mem_temp: f64::NAN,
+            energy_mj: f64::NAN,
         });
     }
     // RBLN
@@ -509,6 +512,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
             mem_bw: f64::NAN,
             clock_mhz: f64::NAN,
             mem_temp: f64::NAN,
+            energy_mj: f64::NAN,
         });
     }
     // NVIDIA DCGM — 모델명/총메모리는 하드코딩하지 않고 메트릭에서 자동 감지.
@@ -520,6 +524,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
     let g_bw = map_by(ok(g_bw), "gpu");
     let g_clk = map_by(ok(g_clk), "gpu");
     let g_mtemp = map_by(ok(g_mtemp), "gpu");
+    let g_energy = map_by(ok(g_energy), "gpu");
     for s in &g_util {
         let gpu = s.l("gpu");
         let model = gpu_model(s.l("modelName")); // "NVIDIA GB10" → "GB10"
@@ -545,6 +550,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
             mem_bw: g_bw.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
             clock_mhz: g_clk.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
             mem_temp: g_mtemp.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
+            energy_mj: g_energy.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
         });
     }
     accel.sort_by(|a, b| (a.kind as u8, &a.node, &a.id).cmp(&(b.kind as u8, &b.node, &b.id)));
