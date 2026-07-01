@@ -149,6 +149,7 @@ fn help_overlay(f: &mut Frame) {
         g("A", "alert history (threshold/health events)"),
         g("R", "reset energy session (per-accel Wh)"),
         g("t", "cycle theme (default/high-contrast/colorblind)"),
+        g("f", "animations on/off"),
         g("g", "open Grafana dashboard"),
         g("z", "zoom/focus (hide header+tabs)"),
         g("Esc", "back: close detail/filter/zoom (does NOT quit)"),

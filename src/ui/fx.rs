@@ -81,4 +81,14 @@ impl FxState {
     pub fn animating(&self) -> bool {
         self.body.is_some() || self.flash.is_some()
     }
+
+    /// 애니메이션 On/Off 토글(런타임). 끄면 진행 중 이펙트도 즉시 제거. 반환=새 상태(on).
+    pub fn toggle(&mut self) -> bool {
+        self.enabled = !self.enabled;
+        if !self.enabled {
+            self.body = None;
+            self.flash = None;
+        }
+        self.enabled
+    }
 }
