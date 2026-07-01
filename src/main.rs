@@ -205,8 +205,22 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                         KeyCode::Char(c @ '0'..='9') => {
                             app.set_view_idx(c as usize - '0' as usize)
                         }
-                        KeyCode::Up | KeyCode::Char('k') => app.move_sel(-1),
-                        KeyCode::Down | KeyCode::Char('j') => app.move_sel(1),
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if app.detail {
+                                app.scroll_detail(-1)
+                            } else {
+                                app.move_sel(-1)
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if app.detail {
+                                app.scroll_detail(1)
+                            } else {
+                                app.move_sel(1)
+                            }
+                        }
+                        KeyCode::Left | KeyCode::Char('h') => app.move_sel(-1), // 이전 항목
+                        KeyCode::Right | KeyCode::Char('l') => app.move_sel(1), // 다음 항목
                         KeyCode::Char('s') => {
                             if let Some(m) = app.selected_model() {
                                 let (name, target) =

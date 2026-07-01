@@ -8,7 +8,7 @@ use ratatui::prelude::*;
 use ratatui::symbols::Marker;
 use ratatui::widgets::{
     Axis, Block, BorderType, Borders, Cell, Chart, Clear, Dataset, GraphType, Paragraph, Row,
-    Sparkline, Table, TableState, Wrap,
+    Table, TableState, Wrap,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -370,6 +370,22 @@ fn bar_line(pct: f64, width: usize, color: Color) -> Line<'static> {
     ])
 }
 
+/// all-smi 식 인라인 텍스트 스파크라인(▁▂▃▄▅▆▇█). 최근 width개, max 기준 정규화.
+fn sparkstr(data: &[u64], width: usize, max: u64) -> String {
+    const B: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let slice: &[u64] = if data.len() > width { &data[data.len() - width..] } else { data };
+    let mx = if max > 0 { max } else { (*slice.iter().max().unwrap_or(&1)).max(1) };
+    let mut s = String::new();
+    for _ in 0..width.saturating_sub(slice.len()) {
+        s.push(' ');
+    }
+    for &v in slice {
+        let idx = ((v as f64 / mx as f64) * 7.0).round().clamp(0.0, 7.0) as usize;
+        s.push(B[idx]);
+    }
+    s
+}
+
 fn util_color(p: f64) -> Color {
     if p > 85.0 {
         C_BAD()
@@ -501,6 +517,7 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 ("●", C_OK())
             };
+            let trend = sparkstr(&app.hist_for(&format!("acc:{}:{}:{}:util", a.kind.label(), a.node, a.id)), 12, 100);
             Row::new(vec![
                 Cell::from(Line::from(vec![
                     Span::styled(hg, Style::default().fg(hc)),                                  // 상태=글리프
@@ -508,11 +525,12 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
                     Span::styled(a.kind.label(), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)), // 정체성=vendor색
                 ])),
                 cellw(a.id.clone(), 6),
-                cellw(a.node.clone(), 16),
+                cellw(a.node.clone(), 14),
                 Cell::from(Line::from(util)),
                 Cell::from(Line::from(mem)),
                 Cell::from(Span::styled(format!("{:.0}°C", a.temp), Style::default().fg(temp_color(a.temp)))),
                 cellw(format!("{:.0}W", a.power), 5),
+                Cell::from(Span::styled(trend, Style::default().fg(util_color(a.util)))), // 인라인 트렌드(all-smi식)
                 Cell::from(Span::styled(model_cell, Style::default().fg(C_DIM()))),
             ])
         })
@@ -520,38 +538,23 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
     let widths = [
         Constraint::Length(8),
         Constraint::Length(6),
-        Constraint::Length(16),
+        Constraint::Length(14),
         Constraint::Length(15),
         Constraint::Length(17),
         Constraint::Length(6),
-        Constraint::Length(6),
-        Constraint::Min(10),
+        Constraint::Length(5),
+        Constraint::Length(13),
+        Constraint::Min(8),
     ];
     let table = Table::new(rows, widths)
-        .header(hrow(&["KIND", "ID", "NODE", "UTIL", "MEM", "TEMP", "PWR", "MODEL/POD"]))
+        .header(hrow(&["KIND", "ID", "NODE", "UTIL", "MEM", "TEMP", "PWR", "TREND(util)", "MODEL/POD"]))
         .column_spacing(1)
         .row_highlight_style(hl_style())
         .highlight_symbol("▎")
-        .block(block("Accelerators · UTIL=compute% MEM=VRAM · ⏎ full timeline"));
-
-    let split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3)])
-        .split(area);
+        .block(block("Accelerators · UTIL=compute% MEM=VRAM · TREND=util history · ⏎ full timeline"));
     let mut st = TableState::default();
     st.select(Some(app.selected));
-    f.render_stateful_widget(table, split[0], &mut st);
-
-    if let Some(a) = app.selected_accel() {
-        let key = format!("acc:{}:{}:{}:util", a.kind.label(), a.node, a.id);
-        let data = app.hist_for(&key);
-        let spark = Sparkline::default()
-            .block(block(&format!("compute util % · {} {} (⏎ for full timeline)", a.kind.label(), a.id)))
-            .data(&data)
-            .max(100)
-            .style(Style::default().fg(util_color(a.util)));
-        f.render_widget(spark, split[1]);
-    }
+    f.render_stateful_widget(table, area, &mut st);
 }
 
 // ── Models ─────────────────────────────────────────────
@@ -970,6 +973,8 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
 
 // ── Detail (drill-down) ────────────────────────────────
 fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
+    let (cur, tot) = app.detail_pos();
+    let nav = format!(" ◂{}/{}▸ ←→ prev/next · esc back", cur, tot);
     // Accelerator: info + util/mem/temp timeline
     if let Some(a) = app.selected_accel() {
         let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(9), Constraint::Min(3)]).split(area);
@@ -991,7 +996,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             kv("health", &health.0, health.1),
             kv("model/pod", if a.busy_model.is_empty() { "(idle)" } else { a.busy_model.as_str() }, C_ACC()),
         ];
-        f.render_widget(Paragraph::new(lines).block(block("Accelerator detail · esc to close")), rows[0]);
+        f.render_widget(Paragraph::new(lines).scroll((app.detail_scroll, 0)).block(block(&format!("Accelerator{}", nav))), rows[0]);
         let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
         let sp = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 3); 3]).split(rows[1]);
         line_chart(f, sp[0], app, &format!("{}:util", k), "compute util", "%", Some(100.0), util_color(a.util));
@@ -1019,7 +1024,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             kv("host memory", &if n.mem_total_gb <= 0.0 { "-".into() } else { format!("{:.0} / {:.0} GB", n.mem_used_gb, n.mem_total_gb) }, Color::White),
             kv("load1", &if n.load1.is_nan() { "-".into() } else { format!("{:.2}", n.load1) }, Color::White),
         ];
-        f.render_widget(Paragraph::new(lines).block(block("Node detail · esc to close")), rows[0]);
+        f.render_widget(Paragraph::new(lines).scroll((app.detail_scroll, 0)).block(block(&format!("Node{}", nav))), rows[0]);
         let k = format!("nod:{}", n.name);
         let sp = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 3); 3]).split(rows[1]);
         line_chart(f, sp[0], app, &format!("{}:cpu", k), "host cpu", "%", Some(100.0), C_OK());
@@ -1031,7 +1036,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::new();
     let mut title = "Detail";
     if let Some(m) = app.selected_model() {
-        title = "Model detail · esc to close";
+        title = "Model";
         lines.push(kv("model", &m.name, Color::White));
         lines.push(kv("status", &m.status, if m.ready > 0 { C_OK() } else { C_DIM() }));
         lines.push(kv("replicas", &format!("{}/{} (ready/desired)", m.ready, m.desired), Color::White));
@@ -1049,7 +1054,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(kv("pods", &if pods.is_empty() { "(none)".to_string() } else { pods.join(", ") }, C_DIM()));
         lines.push(Line::from(Span::styled("  s = scale up/down", Style::default().fg(C_DIM()))));
     } else if let Some(p) = app.selected_pod() {
-        title = "Pod detail · esc to close";
+        title = "Pod";
         lines.push(kv("pod", &p.name, Color::White));
         lines.push(kv("phase", &p.phase, if p.phase == "Running" { C_OK() } else { C_DIM() }));
         lines.push(kv("ready", &p.ready, Color::White));
@@ -1059,7 +1064,10 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(Span::styled("no item selected", Style::default().fg(C_DIM()))));
     }
 
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block(title)), area);
+    f.render_widget(
+        Paragraph::new(lines).scroll((app.detail_scroll, 0)).wrap(Wrap { trim: false }).block(block(&format!("{}{}", title, nav))),
+        area,
+    );
 }
 
 fn kv(k: &str, v: &str, color: Color) -> Line<'static> {
