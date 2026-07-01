@@ -1178,9 +1178,6 @@ fn kv(k: &str, v: &str, color: Color) -> Line<'static> {
 fn ms(v: f64) -> String {
     if v.is_nan() { "–".into() } else if v >= 1.0 { format!("{:.2}s", v) } else { format!("{:.0}ms", v * 1000.0) }
 }
-fn tok(v: f64) -> String {
-    if v.is_nan() { "–".into() } else { format!("{:.0}", v) }
-}
 fn rate(v: f64) -> String {
     if v.is_nan() { "–".into() } else { format!("{:.2}", v) }
 }
@@ -1302,7 +1299,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(tl).block(block("Throughput")), rows[1]);
 
     // per-model 성능(모델=하드웨어 배치별) + per-pod 큐
-    let (bodyc_l, bodyc_r) = two_panes(rows[2], 64);
+    let (bodyc_l, bodyc_r) = two_panes(rows[2], 72);
 
     if app.snap.perf_rows.is_empty() {
         f.render_widget(
@@ -1322,15 +1319,22 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             .perf_rows
             .iter()
             .map(|r| {
+                let preempt_cell = if r.preempt.is_nan() || r.preempt <= 0.0 {
+                    Cell::from(Span::styled("·", Style::default().fg(C_DIM())))
+                } else {
+                    Cell::from(Span::styled(format!("{:.2}", r.preempt), Style::default().fg(C_BAD())))
+                };
                 Row::new(vec![
                     cellw(r.model.clone(), 16),
                     Cell::from(Span::styled(rate(r.req), Style::default().fg(C_OK()))),
                     Cell::from(Span::styled(rate(r.tps), Style::default().fg(C_OK()))),
                     cellw(ms(r.ttft_p95), 7),
+                    Cell::from(Span::styled(ms(r.queue_p95), Style::default().fg(C_WARN()))), // 대기
+                    Cell::from(Span::styled(ms(r.prefill_p95), Style::default().fg(Color::Cyan))), // P
+                    Cell::from(Span::styled(ms(r.decode_p95), Style::default().fg(Color::Magenta))), // D
                     cellw(ms(r.tpot_p95), 7),
                     Cell::from(Span::styled(ms(r.e2e_p95), Style::default().fg(C_WARN()))),
-                    cellw(tok(r.in_tok_p95), 5),
-                    cellw(tok(r.out_tok_p95), 5),
+                    preempt_cell,
                 ])
             })
             .collect();
@@ -1343,13 +1347,15 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
                 Constraint::Length(7),
                 Constraint::Length(7),
                 Constraint::Length(7),
-                Constraint::Length(5),
-                Constraint::Length(5),
+                Constraint::Length(7),
+                Constraint::Length(7),
+                Constraint::Length(7),
+                Constraint::Length(6),
             ],
         )
-        .header(hrow(&["MODEL", "req/s", "tok/s", "TTFT", "TPOT", "E2E", "inTk", "outTk"]))
+        .header(hrow(&["MODEL", "req/s", "tok/s", "TTFT", "QUEUE", "PFILL", "DECODE", "TPOT", "E2E", "premt"]))
         .column_spacing(1)
-        .block(block("Per-model perf (p95) · latency in ms/s"));
+        .block(block("Per-model perf (p95) · QUEUE→PFILL(P)→DECODE(D) · latency ms/s"));
         f.render_widget(mt, bodyc_l);
     }
 
