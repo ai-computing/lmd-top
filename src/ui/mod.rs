@@ -1277,11 +1277,9 @@ fn ms(v: f64) -> String {
 fn rate(v: f64) -> String {
     if v.is_nan() { "–".into() } else { format!("{:.2}", v) }
 }
-/// 채움(area-fill) 타임라인. 컬럼당 값 1개를 세로 블록(▁▂▃▄▅▆▇█, 8단계)으로 채우고
-/// 높이(값)에 따라 green→yellow→red 심각도색을 입힘(btop/nvtop식). 최신값을 오른쪽(now)에 고정.
-/// 외부 크레이트 없이 프레임 버퍼에 직접 렌더(순수 Rust 원칙). ymax_opt=Some(100)→0~100 고정.
+/// htop 식 braille 영역 그래프 타임라인 — 셀당 2×4 점으로 고해상도, 시점 값별 색(초록→빨강).
+/// 최신값 오른쪽(now) 고정. 외부 크레이트 없이 프레임 버퍼 직접 렌더. ymax_opt=Some(100)→0~100.
 fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, unit: &str, ymax_opt: Option<f64>) {
-    const LV: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let raw = app.hist_for(key);
     let cur = raw.last().copied().unwrap_or(0);
     let dmax = raw.iter().copied().max().unwrap_or(0);
@@ -1302,32 +1300,47 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
     if inner.width == 0 || inner.height == 0 || raw.is_empty() {
         return;
     }
-    let draw_h = inner.height as usize;
-    // 컬럼당 데이터 1개(오른쪽 정렬, 인접). 최근 폭만큼.
-    let w = inner.width as usize;
-    let data: Vec<u64> = raw.iter().rev().take(w).rev().copied().collect();
-    // 가로 그리드라인: 10% 간격(y축 눈금). 값 높이를 눈금으로 읽음. 밝은 회색으로 보이게.
-    let gridrows: std::collections::HashSet<usize> =
-        (1..10).map(|k| k * draw_h / 10).filter(|&r| r > 0 && r < draw_h).collect();
+    // htop 식 braille 영역 그래프: 셀당 2×4 점 → 가로2·세로4 고해상도. 시점 값에 따라 색(초록→빨강).
+    let cols = inner.width as usize;
+    let rows = inner.height as usize;
+    let sub_cols = cols * 2; // braille 서브열(시간 샘플)
+    let sub_rows = rows * 4; // braille 서브행(세로 해상도)
+    let data: Vec<u64> = raw.iter().rev().take(sub_cols).rev().copied().collect(); // 오른쪽=now
+    let n = data.len();
+    // 서브열 gsc(왼→오)의 채움 높이(서브행, 바닥부터) / 값%
+    let sample = |gsc: usize| -> Option<f64> {
+        if gsc + n < sub_cols { return None; } // 데이터 없는 왼쪽
+        Some(data[gsc + n - sub_cols] as f64)
+    };
+    // 점 비트: [세로행 0..4(위→아래)][가로열 0..2]
+    const DOTS: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
     let buf = f.buffer_mut();
-    // 1) 전체 폭에 10% 가로 눈금(스케일 항상 보임, 데이터 없는 왼쪽도).
-    for &gr in &gridrows {
-        let y = inner.y + inner.height - 1 - gr as u16;
-        for lx in 0..inner.width {
-            buf[(inner.x + lx, y)].set_char('─').set_fg(Color::Indexed(244));
-        }
-    }
-    // 2) 시간 바 — 열마다 "그 시점 값"에 따른 severity 색(높으면 빨강, 낮으면 초록). 눈금 위에 얹음.
-    for (ci, &v) in data.iter().enumerate() {
-        let frac = (v as f64 / ymax).clamp(0.0, 1.0);
-        let bar_color = grad_color(frac * 100.0);
-        let eighths_total = (frac * (draw_h as f64) * 8.0).round() as usize;
-        let x = inner.x + inner.width - 1 - (data.len() - 1 - ci) as u16;
-        for r in 0..draw_h {
-            let filled = eighths_total.saturating_sub(r * 8).min(8);
-            if filled > 0 {
-                let y = inner.y + inner.height - 1 - r as u16;
-                buf[(x, y)].set_char(LV[filled]).set_fg(bar_color);
+    for cy in 0..rows {
+        for cx in 0..cols {
+            let mut bits: u8 = 0u8;
+            let mut vmax = 0.0f64; // 이 셀 대표값(색)
+            for dc in 0..2 {
+                let gsc = cx * 2 + dc;
+                let (h, vpct) = match sample(gsc) {
+                    Some(v) => {
+                        let frac = (v / ymax).clamp(0.0, 1.0);
+                        ((frac * sub_rows as f64).round() as usize, frac * 100.0)
+                    }
+                    None => (0, 0.0),
+                };
+                if vpct > vmax {
+                    vmax = vpct;
+                }
+                for dr in 0..4 {
+                    let gsr = cy * 4 + dr; // 0=맨 위
+                    if h > 0 && gsr >= sub_rows.saturating_sub(h) {
+                        bits |= DOTS[dr][dc];
+                    }
+                }
+            }
+            if bits != 0 {
+                let ch = char::from_u32(0x2800 + bits as u32).unwrap_or('⣿');
+                buf[(inner.x + cx as u16, inner.y + cy as u16)].set_char(ch).set_fg(grad_color(vmax));
             }
         }
     }
