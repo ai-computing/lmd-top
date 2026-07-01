@@ -2,6 +2,11 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.6.1]
+### Fixed — GPU model/VRAM auto-detection (no more hardcoded "A100"/80GB)
+- GPU 계열 라벨이 **하드코딩 "A100"** 이라 실제 장치(예: GB10)가 틀리게 표시되던 문제. 이제 DCGM `modelName` 라벨에서 **실제 모델을 자동 감지**(`"NVIDIA GB10"→"GB10"`, `"NVIDIA A100-SXM4-40GB"→"A100"`) → Accel KIND 열·Overview(Σ/그룹/LED)·상세·`--snapshot` 에 반영. 감지 실패 시 벤더 계열 `GPU` 로 fallback(더는 오답 "A100" 아님).
+- GPU **총 VRAM 도 하드코딩 80GB** 였음 → `DCGM_FI_DEV_FB_TOTAL` 로 자동 산출(GB10 등 정확).
+
 ## [0.6.0]
 ### Added — permission modes (Control-plane M1)
 - **권한 모드**(운영 사고 방지): 기동 시 `--mode observe|debug|admin|danger`(기본 observe), 헤더에 상시 배지(observe=은은, 상승 권한=색+굵게). 변경 작업을 권한 레벨로 게이트:

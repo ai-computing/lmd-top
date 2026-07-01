@@ -756,7 +756,7 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
                 Cell::from(Line::from(vec![
                     Span::styled(hg, Style::default().fg(hc)),                                  // 상태=글리프
                     Span::raw(" "),
-                    Span::styled(a.kind.label(), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)), // 정체성=vendor색
+                    Span::styled(a.disp(), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)), // 모델(감지)·vendor색
                 ])),
                 cellw(a.id.clone(), 6),
                 cellw(a.node.clone(), 14),
@@ -1151,7 +1151,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         let mut kinds: std::collections::BTreeMap<&str, (usize, Color, f64)> = std::collections::BTreeMap::new();
         let (mut usum, mut mu, mut mt, mut pw) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
         for a in &s.accel {
-            let e = kinds.entry(a.kind.label()).or_insert((0, kind_color(a.kind), 0.0));
+            let e = kinds.entry(a.disp()).or_insert((0, kind_color(a.kind), 0.0));
             e.0 += 1;
             e.2 += a.mem_used_gb;
             usum += a.util; mu += a.mem_used_gb; mt += a.mem_total_gb; pw += a.power;
@@ -1191,7 +1191,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         let per_line = per_line.max(1);
         let mut bykind: std::collections::BTreeMap<&str, Vec<&crate::collect::Accel>> = std::collections::BTreeMap::new();
         for a in &s.accel {
-            bykind.entry(a.kind.label()).or_default().push(a);
+            bykind.entry(a.disp()).or_default().push(a);
         }
         let mut led_lines: Vec<Line> = Vec::new();
         'kinds: for (k, list) in &bykind {
@@ -1240,23 +1240,23 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(cluster_lines).block(block("Cluster")), rows[0]);
 
     // 가속기: (종류,노드)별 집계 — 한눈에 + 절대 메모리(GB) + health 아이콘
-    let mut groups: Vec<(AccelKind, String, usize, f64, f64, f64, bool, bool)> = Vec::new();
+    let mut groups: Vec<(AccelKind, String, usize, f64, f64, f64, bool, bool, String)> = Vec::new();
     for a in &s.accel {
         if let Some(g) = groups.iter_mut().find(|g| g.0 == a.kind && g.1 == a.node) {
             g.2 += 1; g.3 += a.util; g.4 += a.mem_used_gb; g.5 += a.mem_total_gb;
             g.6 = g.6 && a.alive; g.7 = g.7 || a.throttle > 0.0;
         } else {
-            groups.push((a.kind, a.node.clone(), 1, a.util, a.mem_used_gb, a.mem_total_gb, a.alive, a.throttle > 0.0));
+            groups.push((a.kind, a.node.clone(), 1, a.util, a.mem_used_gb, a.mem_total_gb, a.alive, a.throttle > 0.0, a.disp().to_string()));
         }
     }
     let mut al: Vec<Line> = Vec::new();
-    for (kind, node, cnt, us, mu, mt, alive, thr) in &groups {
+    for (kind, node, cnt, us, mu, mt, alive, thr, model) in &groups {
         let util = us / (*cnt as f64);
         let mempct = if *mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
         let (hi, hc) = if !*alive { ("✗", C_BAD()) } else if *thr { ("⚠", C_WARN()) } else { ("●", C_OK()) };
         let mut sp = vec![
             Span::styled(format!("{} ", hi), Style::default().fg(hc)),
-            Span::styled(format!("{:<4}×{} ", kind.label(), cnt), Style::default().fg(kind_color(*kind)).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:<4}×{} ", model, cnt), Style::default().fg(kind_color(*kind)).add_modifier(Modifier::BOLD)),
             Span::styled(format!("@{:<16} ", truncw(node, 16)), Style::default().fg(C_DIM())),
         ];
         sp.extend(grad_bar(util, 10).spans);
@@ -1325,7 +1325,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         let barw = (rows[0].width as usize).saturating_sub(34).clamp(10, 46);
         let lines = vec![
             Line::from(vec![
-                Span::styled(format!("{} ", a.kind.label()), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{} ", a.disp()), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("id {} @ {}   ", a.id, a.node), Style::default().fg(C_DIM())),
                 Span::styled(health.0, Style::default().fg(health.1).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("   {:.0} W", a.power), Style::default().fg(C_DIM())),
