@@ -78,7 +78,7 @@ const ALERT_TEMP_BAD: f64 = 80.0;
 
 /// 전역 테마 인덱스 (0=default, 1=고대비, 2=색맹친화). ui 색 함수가 읽음.
 pub static THEME: AtomicUsize = AtomicUsize::new(0);
-pub const N_THEMES: usize = 3;
+pub const N_THEMES: usize = 4;
 pub fn theme() -> usize {
     THEME.load(Ordering::Relaxed)
 }
@@ -86,6 +86,7 @@ pub fn theme_name(i: usize) -> &'static str {
     match i {
         1 => "high-contrast",
         2 => "colorblind",
+        3 => "soft (catppuccin)",
         _ => "default",
     }
 }
