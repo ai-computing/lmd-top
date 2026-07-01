@@ -2,6 +2,11 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.8.4]
+### Changed — 모든 바/타임라인에 track(░) 표시 (대략 % 가늠)
+- track 없이 `█████`만 그리던 바들(EPP WEIGHT, Perf 지연 히스토그램)을 **고정폭 + track(░)** 으로 → `████████░░░░░░░░` 형태로 상한 대비 대략 %가 보임(`bar_line` 재사용).
+- **area-fill 타임라인**: 채워지지 않은 칸을 은은한 track(░, C_TRACK)으로 채워 **천장(ymax) 대비 현재 높이(%)** 를 한눈에. (grad_bar/bar_line/stacked_bar 는 이미 track 보유.)
+
 ## [0.8.3]
 ### Added — EPP scorer what-if + Perf pivot (인터랙티브)
 - **EPP scorer 가중치 what-if**: 선택 scorer를 `+`/`-`로 조정 → 정규화 WEIGHT 바 + **상대 영향도(infl%)**가 실시간 재계산(로컬 시뮬, 클러스터 무변경). "이 가중치를 올리면 밸런스가 어떻게 바뀌나"를 탐색 — EPP 정책 설계용. EPP 떠나면 리셋.

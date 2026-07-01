@@ -981,7 +981,6 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                     let (name, base) = &cfg.scorers[i];
                     let w = app.epp_weight(name, *base);
                     let ov = app.epp_weights.contains_key(name);
-                    let bw = ((w / maxw) * 8.0).round() as usize;
                     let infl = w / total * 100.0;
                     Row::new(vec![
                         cellw(name.clone(), 26),
@@ -989,7 +988,7 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                             format!("{:.0}", w),
                             Style::default().fg(if ov { C_ACC() } else { C_WARN() }).add_modifier(if ov { Modifier::BOLD } else { Modifier::empty() }),
                         )),
-                        Cell::from(Span::styled("█".repeat(bw), Style::default().fg(C_ACC()))),
+                        Cell::from(bar_line(w / maxw * 100.0, 8, C_ACC())), // 고정폭 + track(░)
                         Cell::from(Span::styled(format!("{:>3.0}%", infl), Style::default().fg(C_DIM()))),
                     ])
                 })
@@ -1566,12 +1565,10 @@ fn perf_detail_view(f: &mut Frame, area: Rect, d: &PerfDetail) {
                 continue;
             }
             let lbl = if le.is_infinite() { "  ∞".to_string() } else { format!("≤{}", ms(*le)) };
-            let barw = ((c / maxc) * 34.0).round() as usize;
-            hl.push(Line::from(vec![
-                Span::styled(format!("{:>9} ", lbl), Style::default().fg(C_DIM())),
-                Span::styled("█".repeat(barw), Style::default().fg(C_ACC())),
-                Span::styled(format!(" {:.2}/s", c), Style::default().fg(C_DIM())),
-            ]));
+            let mut sp = vec![Span::styled(format!("{:>9} ", lbl), Style::default().fg(C_DIM()))];
+            sp.extend(bar_line(c / maxc * 100.0, 34, C_ACC()).spans); // 고정폭 + track(░)
+            sp.push(Span::styled(format!(" {:.2}/s", c), Style::default().fg(C_DIM())));
+            hl.push(Line::from(sp));
         }
     }
     f.render_widget(Paragraph::new(hl).block(block("E2E latency distribution · rate by bucket")), rows[1]);
@@ -1623,11 +1620,13 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
         for r in 0..rows_h {
             // r=0 = 맨 아래 행
             let filled = eighths_total.saturating_sub(r * 8).min(8);
-            if filled == 0 {
-                continue;
-            }
             let y = inner.y + inner.height - 1 - r as u16;
-            buf[(x, y)].set_char(LV[filled]).set_fg(color);
+            if filled == 0 {
+                // 채워지지 않은 칸 = 은은한 track(░) → 상한(ymax) 대비 대략 %가 보임
+                buf[(x, y)].set_char('░').set_fg(C_TRACK());
+            } else {
+                buf[(x, y)].set_char(LV[filled]).set_fg(color);
+            }
         }
     }
 }
