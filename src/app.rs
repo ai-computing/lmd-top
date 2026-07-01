@@ -1,8 +1,27 @@
 //! UI 상태머신 — 현재 뷰, 선택, 스파크라인 히스토리. 데이터(Snapshot)와 분리.
 
 use crate::collect::Snapshot;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// 알림 심각도.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Sev {
+    Warn,
+    Bad,
+}
+
+/// 임계치 초과/상태 이상 이벤트 하나. key=중복/엣지검출용 안정 식별자.
+#[derive(Clone)]
+pub struct Alert {
+    pub ts: u64,
+    pub sev: Sev,
+    pub key: String,
+    pub msg: String,
+}
+
+// 알림 임계치(ui.rs 의 색 임계치와 개념 일치 — 여기선 "경보" 발생선).
+const ALERT_TEMP_BAD: f64 = 80.0;
 
 /// 전역 테마 인덱스 (0=default, 1=고대비, 2=색맹친화). ui 색 함수가 읽음.
 pub static THEME: AtomicUsize = AtomicUsize::new(0);
@@ -87,6 +106,14 @@ pub struct App {
     pub logs_scroll: u16,
     pub cols: HashMap<String, Vec<String>>, // 뷰별 표시 컬럼(순서) — 설정파일
     pub catalog: Vec<crate::catalog::CatModel>, // 모델 카탈로그(런처)
+    // ── 능동 알림 ──
+    pub alerts: VecDeque<Alert>,        // 히스토리(최신 앞), cap 50
+    pub active_alerts: HashSet<String>, // 현재 활성 키(엣지 검출용)
+    pub alerts_panel: bool,             // 알림 히스토리 오버레이(A)
+    pub flash_until: u64,               // epoch초 — 이 시각 전까지 요약바 플래시
+    pub toast_until: u64,               // epoch초 — 토스트 만료
+    pub toast_bad: bool,                // 토스트 배경색(빨강=심각)
+    prev_restarts: HashMap<String, i64>, // pod 재시작 델타 추적
 }
 
 /// ~/.config/lmd-top/lmd-top.yaml 의 columns: {view: [col,...]} 로드. 없으면 빈 맵(=기본 전체).
@@ -137,7 +164,21 @@ impl App {
             logs_scroll: 0,
             cols: load_columns(),
             catalog: crate::catalog::load(),
+            alerts: VecDeque::new(),
+            active_alerts: HashSet::new(),
+            alerts_panel: false,
+            flash_until: 0,
+            toast_until: 0,
+            toast_bad: false,
+            prev_restarts: HashMap::new(),
         }
+    }
+
+    /// 만료(toast_until)를 가진 토스트 알림 설정 — 액션 피드백/알림 공용.
+    pub fn notify(&mut self, msg: String) {
+        self.toast = Some(msg);
+        self.toast_until = crate::collect::now_secs() + 5;
+        self.toast_bad = false;
     }
 
     pub fn selected_cat(&self) -> Option<&crate::catalog::CatModel> {
@@ -163,10 +204,13 @@ impl App {
     pub fn toggle_help(&mut self) {
         self.help = !self.help;
     }
+    pub fn toggle_alerts(&mut self) {
+        self.alerts_panel = !self.alerts_panel;
+    }
     pub fn cycle_theme(&mut self) {
         let n = (theme() + 1) % N_THEMES;
         THEME.store(n, Ordering::Relaxed);
-        self.toast = Some(format!("theme: {}", theme_name(n)));
+        self.notify(format!("theme: {}", theme_name(n)));
     }
     pub fn start_filter(&mut self) {
         self.filtering = true;
@@ -297,12 +341,84 @@ impl App {
             if !tps.is_nan() {
                 self.push_hist("sys:tps", tps.round().max(0.0) as u64);
             }
+            self.detect_alerts(&snap);
         }
         self.snap = snap;
         let n = self.list_len();
         if n > 0 && self.selected >= n {
             self.selected = n - 1;
         }
+    }
+
+    /// 스냅샷에서 임계 조건을 뽑아 신규 발생분만 히스토리에 쌓고 토스트+플래시 트리거.
+    /// key 안정성으로 엣지(비활성→활성)만 알림 — 지속 조건은 반복 토스트하지 않음.
+    fn detect_alerts(&mut self, snap: &Snapshot) {
+        let now = snap.ts;
+        let mut current: Vec<Alert> = Vec::new();
+        // 가속기: not-alive / throttle / 고온
+        for a in &snap.accel {
+            let base = format!("{}/{}/{}", a.kind.label(), a.node, a.id);
+            if !a.alive {
+                current.push(Alert { ts: now, sev: Sev::Bad, key: format!("dead:{}", base), msg: format!("{} {} not alive @{}", a.kind.label(), a.id, a.node) });
+            } else if a.throttle > 0.0 {
+                current.push(Alert { ts: now, sev: Sev::Warn, key: format!("thr:{}", base), msg: format!("{} {} throttling @{}", a.kind.label(), a.id, a.node) });
+            }
+            if a.temp > ALERT_TEMP_BAD {
+                current.push(Alert { ts: now, sev: Sev::Warn, key: format!("temp:{}", base), msg: format!("{} {} hot {:.0}°C @{}", a.kind.label(), a.id, a.temp, a.node) });
+            }
+        }
+        // 노드: cordon / notready / pressure
+        for n in &snap.nodes {
+            if n.cordoned {
+                current.push(Alert { ts: now, sev: Sev::Warn, key: format!("cordon:{}", n.name), msg: format!("node {} cordoned", n.name) });
+            } else if !n.ready {
+                current.push(Alert { ts: now, sev: Sev::Bad, key: format!("notready:{}", n.name), msg: format!("node {} NotReady", n.name) });
+            } else if n.pressure {
+                current.push(Alert { ts: now, sev: Sev::Warn, key: format!("pressure:{}", n.name), msg: format!("node {} under pressure", n.name) });
+            }
+        }
+        // pod: 재시작 증가(델타) / Failed
+        for p in &snap.pods {
+            let prev = self.prev_restarts.get(&p.name).copied().unwrap_or(p.restarts);
+            if p.restarts > prev {
+                current.push(Alert { ts: now, sev: Sev::Warn, key: format!("restart:{}:{}", p.name, p.restarts), msg: format!("pod {} restarted (x{})", p.name, p.restarts) });
+            }
+            if p.phase == "Failed" {
+                current.push(Alert { ts: now, sev: Sev::Bad, key: format!("failed:{}", p.name), msg: format!("pod {} Failed", p.name) });
+            }
+        }
+        self.prev_restarts = snap.pods.iter().map(|p| (p.name.clone(), p.restarts)).collect();
+
+        // 엣지 검출: active_alerts 에 없던 key = 신규.
+        let mut new_alerts: Vec<Alert> = Vec::new();
+        for a in &current {
+            if !self.active_alerts.contains(&a.key) {
+                new_alerts.push(a.clone());
+            }
+        }
+        self.active_alerts = current.iter().map(|a| a.key.clone()).collect();
+        if new_alerts.is_empty() {
+            return;
+        }
+        // 히스토리 적재(최신 앞, cap 50)
+        for a in &new_alerts {
+            self.alerts.push_front(a.clone());
+        }
+        while self.alerts.len() > 50 {
+            self.alerts.pop_back();
+        }
+        // 토스트: 1건이면 메시지, 여러건이면 요약. 하나라도 Bad 면 빨강.
+        let any_bad = new_alerts.iter().any(|a| a.sev == Sev::Bad);
+        let msg = if new_alerts.len() == 1 {
+            let a = &new_alerts[0];
+            format!("{} {}", if a.sev == Sev::Bad { "✗" } else { "⚠" }, a.msg)
+        } else {
+            format!("⚠ {} new alerts — press A", new_alerts.len())
+        };
+        self.toast = Some(msg);
+        self.toast_until = now + 5;
+        self.toast_bad = any_bad;
+        self.flash_until = now + 3; // 3초 플래시
     }
 
     pub fn hist_for(&self, key: &str) -> Vec<u64> {
