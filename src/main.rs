@@ -13,7 +13,9 @@ use app::App;
 use collect::{collect, Config};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -98,7 +100,7 @@ async fn run_tui(cfg: Config) -> Result<()> {
 fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -113,7 +115,16 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
             terminal.draw(|f| ui::draw(f, &app))?;
 
             if event::poll(Duration::from_millis(250))? {
-                if let Event::Key(k) = event::read()? {
+                let ev = event::read()?;
+                if let Event::Mouse(m) = ev {
+                    match m.kind {
+                        MouseEventKind::ScrollDown => app.move_sel(1),
+                        MouseEventKind::ScrollUp => app.move_sel(-1),
+                        _ => {}
+                    }
+                    continue;
+                }
+                if let Event::Key(k) = ev {
                     if k.kind != KeyEventKind::Press {
                         continue;
                     }
@@ -180,7 +191,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
 
     // teardown (에러여도 복원)
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
     terminal.show_cursor().ok();
     result
 }
