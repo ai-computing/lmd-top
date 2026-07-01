@@ -66,7 +66,8 @@ uniquely **observes and explains EPP routing decisions**.
 - **Operator ergonomics.** Row selection with scrollbars & position counters, substring
   filtering, sorting, drill-down detail, pod/model **logs overlay**, `scale` action,
   a **data-freshness clock**, responsive tabs, focus highlight on the active pane, a
-  **zoom/focus** mode, and three themes (default / high-contrast / **colorblind-safe**).
+  **zoom/focus** mode, tasteful **animations** (toggle with `f`), and four themes —
+  **soft (Catppuccin, default)** / classic / high-contrast / **colorblind-safe**.
 - **Pure Rust, single static binary.** No TLS/heavy HTTP crates: Prometheus is queried
   over raw `tokio` HTTP/1.0, Kubernetes via `kubectl`. Nothing to install on GPU nodes.
 
@@ -179,7 +180,8 @@ without hand-writing PromQL.
 | `l` | **logs** overlay for selected pod/model (scroll, `r` refresh) |
 | `s` | **scale** selected model (desired 0↔1 toggle) |
 | `A` | **alert history** overlay (threshold / health events) |
-| `t` | cycle **theme** (default / high-contrast / colorblind-safe) |
+| `t` | cycle **theme** (soft / classic / high-contrast / colorblind-safe) |
+| `f` | toggle **animations** on/off |
 | `g` | open **Grafana** dashboard in browser |
 | `z` | **zoom / focus** (hide header + tabs, maximize body) |
 | `Space` | **pause** updates (freeze data for reading) |
@@ -223,6 +225,7 @@ columns:
 | `LMD_PROM` | `192.0.2.5:30090` | Prometheus `host:port` (plain HTTP) |
 | `LMD_NS` | `llm-serving` | target namespace |
 | `LMD_GRAFANA` | `http://192.0.2.5:30300` | Grafana base URL opened by `g` |
+| `LMD_THEME` | `soft` | startup theme: `soft` / `default` / `high-contrast` / `colorblind` (or `0`–`3`) |
 | `LMD_W` / `LMD_H` | `100` / `26` | render size for `--render` |
 
 ---
