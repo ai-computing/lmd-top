@@ -403,15 +403,9 @@ fn map_by(series: Vec<Series>, key: &str) -> BTreeMap<String, Series> {
     m
 }
 
-/// fast tier: 가속기(util/mem/temp/power/health) + 노드. 자주(1s) 갱신 — 프롬 ~12 + kube nodes.
-/// util/mem 반응성을 위해 collect()에서 분리. 무거운 나머지는 full collect(느린 주기).
-pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
-    let p = &cfg.prom;
-    // 모든 프롬 쿼리 + kube nodes 를 동시 실행(순차 대비 대폭 단축)
-    let (
-        f_util, f_temp, f_pow, f_du, f_dt, f_alive, f_thr, r_util, r_temp, r_pow, r_du, r_dt, r_health, g_util,
-        g_mu, g_mt, g_temp, g_pow, g_bw, g_clk, g_mtemp, g_energy, n_load, n_mt, n_ma, n_cpu, node_res,
-    ) = tokio::join!(
+/// 소스별 가속기 수집기 — 각자 자기 메트릭만 join! → 메트릭 추가 시 해당 함수만 수정(위치 튜플 결합 제거).
+async fn collect_furiosa(p: &str) -> Vec<Accel> {
+    let (util, temp, pow, du, dt, alive, thr) = tokio::join!(
         prom::query(p, "avg by (uuid,device,hostname) (furiosa_npu_core_utilization)"),
         prom::query(p, "max by (uuid) (furiosa_npu_hw_temperature)"),
         prom::query(p, "max by (uuid) (furiosa_npu_hw_power)"),
@@ -419,141 +413,129 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
         prom::query(p, "max by (uuid) (furiosa_npu_dram_total)"),
         prom::query(p, "max by (uuid) (furiosa_npu_alive)"),
         prom::query(p, "max by (uuid) (furiosa_npu_throttling_events_count)"),
+    );
+    let util = util.unwrap_or_default();
+    let temp = map_by(temp.unwrap_or_default(), "uuid");
+    let pow = map_by(pow.unwrap_or_default(), "uuid");
+    let du = map_by(du.unwrap_or_default(), "uuid");
+    let dt = map_by(dt.unwrap_or_default(), "uuid");
+    let alive = map_by(alive.unwrap_or_default(), "uuid");
+    let thr = map_by(thr.unwrap_or_default(), "uuid");
+    util.iter().map(|s| {
+        let uuid = s.l("uuid");
+        Accel {
+            kind: AccelKind::Rngd, model: String::new(),
+            id: s.l("device").to_string(), node: s.l("hostname").to_string(),
+            util: norm_pct(s.value),
+            mem_used_gb: du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
+            mem_total_gb: dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
+            temp: temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
+            power: pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
+            busy_model: String::new(),
+            alive: alive.get(uuid).map(|x| x.value > 0.0).unwrap_or(true),
+            throttle: thr.get(uuid).map(|x| x.value).unwrap_or(0.0),
+            unified_mem: false, mem_bw: f64::NAN, clock_mhz: f64::NAN, mem_temp: f64::NAN, energy_mj: f64::NAN,
+        }
+    }).collect()
+}
+
+async fn collect_rbln(p: &str) -> Vec<Accel> {
+    let (util, temp, pow, du, dt, health) = tokio::join!(
         prom::query(p, metrics::RBLN_UTIL),
         prom::query(p, metrics::RBLN_TEMP),
         prom::query(p, metrics::RBLN_POWER),
         prom::query(p, metrics::RBLN_DRAM_USED),
         prom::query(p, metrics::RBLN_DRAM_TOTAL),
         prom::query(p, metrics::RBLN_HEALTH),
+    );
+    let util = util.unwrap_or_default();
+    let temp = map_by(temp.unwrap_or_default(), "uuid");
+    let pow = map_by(pow.unwrap_or_default(), "uuid");
+    let du = map_by(du.unwrap_or_default(), "uuid");
+    let dt = map_by(dt.unwrap_or_default(), "uuid");
+    let health = map_by(health.unwrap_or_default(), "uuid");
+    util.iter().map(|s| {
+        let uuid = s.l("uuid");
+        Accel {
+            kind: AccelKind::Rbln, model: String::new(),
+            id: s.l("name").to_string(), node: s.l("node").to_string(),
+            util: norm_pct(s.value),
+            mem_used_gb: du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
+            mem_total_gb: dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
+            temp: temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
+            power: pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
+            busy_model: s.l("exported_pod").to_string(),
+            alive: health.get(uuid).map(|x| x.value == 0.0).unwrap_or(true),
+            throttle: 0.0,
+            unified_mem: false, mem_bw: f64::NAN, clock_mhz: f64::NAN, mem_temp: f64::NAN, energy_mj: f64::NAN,
+        }
+    }).collect()
+}
+
+/// NVIDIA DCGM — 모델명/총메모리/대역폭/클럭/에너지 자동 감지.
+async fn collect_gpu(p: &str) -> Vec<Accel> {
+    let (util, mu, mt, temp, pow, bw, clk, mtemp, energy) = tokio::join!(
         prom::query(p, metrics::DCGM_GPU_UTIL),
         prom::query(p, metrics::DCGM_FB_USED),
         prom::query(p, metrics::DCGM_FB_TOTAL),
         prom::query(p, metrics::DCGM_GPU_TEMP),
         prom::query(p, metrics::DCGM_POWER),
-        prom::query(p, metrics::DCGM_MEM_COPY_UTIL), // 메모리 컨트롤러 busy% = 대역폭 압박
-        prom::query(p, metrics::DCGM_SM_CLOCK),       // SM 클럭 MHz
-        prom::query(p, metrics::DCGM_MEM_TEMP),    // 메모리 정션 온도 °C
-        prom::query(p, metrics::DCGM_ENERGY), // 누적 에너지(mJ)
+        prom::query(p, metrics::DCGM_MEM_COPY_UTIL),
+        prom::query(p, metrics::DCGM_SM_CLOCK),
+        prom::query(p, metrics::DCGM_MEM_TEMP),
+        prom::query(p, metrics::DCGM_ENERGY),
+    );
+    let util = util.unwrap_or_default();
+    let mu = map_by(mu.unwrap_or_default(), "gpu");
+    let mt = map_by(mt.unwrap_or_default(), "gpu");
+    let temp = map_by(temp.unwrap_or_default(), "gpu");
+    let pow = map_by(pow.unwrap_or_default(), "gpu");
+    let bw = map_by(bw.unwrap_or_default(), "gpu");
+    let clk = map_by(clk.unwrap_or_default(), "gpu");
+    let mtemp = map_by(mtemp.unwrap_or_default(), "gpu");
+    let energy = map_by(energy.unwrap_or_default(), "gpu");
+    util.iter().map(|s| {
+        let gpu = s.l("gpu");
+        let model = gpu_model(s.l("modelName"));
+        let unified = is_unified(&model);
+        Accel {
+            kind: AccelKind::Gpu, model,
+            id: format!("gpu{}", gpu), node: s.l("Hostname").to_string(),
+            util: norm_pct(s.value),
+            mem_used_gb: mu.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
+            mem_total_gb: mt.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
+            temp: temp.get(gpu).map(|x| x.value).unwrap_or(0.0),
+            power: pow.get(gpu).map(|x| x.value).unwrap_or(0.0),
+            busy_model: s.l("exported_pod").to_string(),
+            alive: true, throttle: 0.0, unified_mem: unified,
+            mem_bw: bw.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
+            clock_mhz: clk.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
+            mem_temp: mtemp.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
+            energy_mj: energy.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
+        }
+    }).collect()
+}
+
+async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
+    let (load, mt, ma, cpu, node_res) = tokio::join!(
         prom::query(p, metrics::NODE_LOAD1),
         prom::query(p, "node_memory_MemTotal_bytes"),
         prom::query(p, "node_memory_MemAvailable_bytes"),
         prom::query(p, "100 - (avg by (instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)"),
         node_kube(),
     );
-    let ok = |r: anyhow::Result<Vec<Series>>| r.unwrap_or_default();
-    let mut accel: Vec<Accel> = Vec::new();
-    // Furiosa
-    let f_util = ok(f_util);
-    let f_temp = map_by(ok(f_temp), "uuid");
-    let f_pow = map_by(ok(f_pow), "uuid");
-    let f_du = map_by(ok(f_du), "uuid");
-    let f_dt = map_by(ok(f_dt), "uuid");
-    let f_alive = map_by(ok(f_alive), "uuid");
-    let f_thr = map_by(ok(f_thr), "uuid");
-    for s in &f_util {
-        let uuid = s.l("uuid");
-        accel.push(Accel {
-            kind: AccelKind::Rngd,
-            model: String::new(), // 벤더 라벨(RNGD)로 충분
-            id: s.l("device").to_string(),
-            node: s.l("hostname").to_string(),
-            util: norm_pct(s.value),
-            mem_used_gb: f_du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
-            mem_total_gb: f_dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
-            temp: f_temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
-            power: f_pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
-            busy_model: String::new(),
-            alive: f_alive.get(uuid).map(|x| x.value > 0.0).unwrap_or(true),
-            throttle: f_thr.get(uuid).map(|x| x.value).unwrap_or(0.0),
-            unified_mem: false,
-            mem_bw: f64::NAN,
-            clock_mhz: f64::NAN,
-            mem_temp: f64::NAN,
-            energy_mj: f64::NAN,
-        });
-    }
-    // RBLN
-    let r_util = ok(r_util);
-    let r_temp = map_by(ok(r_temp), "uuid");
-    let r_pow = map_by(ok(r_pow), "uuid");
-    let r_du = map_by(ok(r_du), "uuid");
-    let r_dt = map_by(ok(r_dt), "uuid");
-    let r_health = map_by(ok(r_health), "uuid");
-    for s in &r_util {
-        let uuid = s.l("uuid");
-        accel.push(Accel {
-            kind: AccelKind::Rbln,
-            model: String::new(), // 벤더 라벨(RBLN)로 충분
-            id: s.l("name").to_string(),
-            node: s.l("node").to_string(),
-            util: norm_pct(s.value),
-            mem_used_gb: r_du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
-            mem_total_gb: r_dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
-            temp: r_temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
-            power: r_pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
-            busy_model: s.l("exported_pod").to_string(),
-            alive: r_health.get(uuid).map(|x| x.value == 0.0).unwrap_or(true),
-            throttle: 0.0,
-            unified_mem: false,
-            mem_bw: f64::NAN,
-            clock_mhz: f64::NAN,
-            mem_temp: f64::NAN,
-            energy_mj: f64::NAN,
-        });
-    }
-    // NVIDIA DCGM — 모델명/총메모리는 하드코딩하지 않고 메트릭에서 자동 감지.
-    let g_util = ok(g_util);
-    let g_mu = map_by(ok(g_mu), "gpu");
-    let g_mt = map_by(ok(g_mt), "gpu");
-    let g_temp = map_by(ok(g_temp), "gpu");
-    let g_pow = map_by(ok(g_pow), "gpu");
-    let g_bw = map_by(ok(g_bw), "gpu");
-    let g_clk = map_by(ok(g_clk), "gpu");
-    let g_mtemp = map_by(ok(g_mtemp), "gpu");
-    let g_energy = map_by(ok(g_energy), "gpu");
-    for s in &g_util {
-        let gpu = s.l("gpu");
-        let model = gpu_model(s.l("modelName")); // "NVIDIA GB10" → "GB10"
-        let unified = is_unified(&model);
-        // 총 VRAM: DCGM_FI_DEV_FB_TOTAL(MiB) → GB. 통합 메모리(GB10 등)는 FB 가 0/무의미 →
-        // 아래에서 노드(호스트) 메모리로 backfill.
-        let mem_total_gb = g_mt.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0);
-        accel.push(Accel {
-            kind: AccelKind::Gpu,
-            model,
-            id: format!("gpu{}", gpu),
-            node: s.l("Hostname").to_string(),
-            util: norm_pct(s.value),
-            mem_used_gb: g_mu.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
-            mem_total_gb,
-            temp: g_temp.get(gpu).map(|x| x.value).unwrap_or(0.0),
-            power: g_pow.get(gpu).map(|x| x.value).unwrap_or(0.0),
-            // dcgm-exporter 가 붙이는 exported_pod(=이 GPU 를 점유한 모델서버 파드). GB10 exporter 는 항상 제공.
-            busy_model: s.l("exported_pod").to_string(),
-            alive: true,
-            throttle: 0.0,
-            unified_mem: unified,
-            mem_bw: g_bw.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
-            clock_mhz: g_clk.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
-            mem_temp: g_mtemp.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
-            energy_mj: g_energy.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
-        });
-    }
-    accel.sort_by(|a, b| (a.kind as u8, &a.node, &a.id).cmp(&(b.kind as u8, &b.node, &b.id)));
-
-    // Nodes
     let (node_ip, node_meta) = node_res;
-    let n_load = ok(n_load);
-    let n_mt = map_by(ok(n_mt), "instance");
-    let n_ma = map_by(ok(n_ma), "instance");
-    let n_cpu = map_by(ok(n_cpu), "instance");
+    let load = load.unwrap_or_default();
+    let n_mt = map_by(mt.unwrap_or_default(), "instance");
+    let n_ma = map_by(ma.unwrap_or_default(), "instance");
+    let n_cpu = map_by(cpu.unwrap_or_default(), "instance");
     let resolve = |inst: &str| -> String {
         let ip = inst.split(':').next().unwrap_or(inst);
         node_ip.get(ip).cloned().unwrap_or_else(|| ip.to_string())
     };
     let mut load_by: BTreeMap<String, f64> = BTreeMap::new();
     let mut inst_by: BTreeMap<String, String> = BTreeMap::new();
-    for s in &n_load {
+    for s in &load {
         let name = resolve(s.l("instance"));
         inst_by.insert(name.clone(), s.l("instance").to_string());
         load_by.insert(name, s.value);
@@ -570,27 +552,30 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
         let meta = node_meta.get(&name).cloned().unwrap_or_default();
         nodes.push(NodeInfo {
             load1: load_by.get(&name).copied().unwrap_or(f64::NAN),
-            mem_used_gb: to_gb(mt - ma),
-            mem_total_gb: to_gb(mt),
+            mem_used_gb: to_gb(mt - ma), mem_total_gb: to_gb(mt),
             cpu_pct: n_cpu.get(inst.as_str()).map(|x| x.value).unwrap_or(f64::NAN),
-            ready: meta.0,
-            cordoned: meta.1,
-            pressure: meta.2,
-            version: meta.3,
-            name,
+            ready: meta.0, cordoned: meta.1, pressure: meta.2, version: meta.3, name,
         });
     }
     nodes.sort_by(|a, b| a.name.cmp(&b.name));
+    nodes
+}
 
-    // 통합 메모리(GB10 등): 별도 VRAM 이 없으므로 노드(호스트) 메모리 풀을 mem 으로 채운다.
-    // DCGM FB_TOTAL 이 유효하면(>0) 그대로 두고, 0/무효일 때만 호스트 값으로 backfill.
+/// fast tier: 소스별 수집기 4개를 병렬 실행 후 합침. util/mem 반응성을 위해 collect()에서 분리.
+pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
+    let p = &cfg.prom;
+    let (fu, rb, gpu, nodes) = tokio::join!(collect_furiosa(p), collect_rbln(p), collect_gpu(p), collect_nodes(p));
+    let mut accel = fu;
+    accel.extend(rb);
+    accel.extend(gpu);
+    accel.sort_by(|a, b| (a.kind as u8, &a.node, &a.id).cmp(&(b.kind as u8, &b.node, &b.id)));
+    // 통합 메모리(GB10 등): 별도 VRAM 없음 → 노드(호스트) 메모리 풀로 backfill.
     for a in accel.iter_mut().filter(|a| a.unified_mem && a.mem_total_gb <= 0.0) {
         if let Some(n) = nodes.iter().find(|n| n.name == a.node) {
             a.mem_used_gb = n.mem_used_gb;
             a.mem_total_gb = n.mem_total_gb;
         }
     }
-
     (accel, nodes)
 }
 
