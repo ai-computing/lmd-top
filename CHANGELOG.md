@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.8.1]
+### Added — Perf 인터랙티브 드릴 (p50/p95/p99 + 히스토그램)
+- Perf per-model 표를 **선택 가능**하게 하고 **`⏎`** 로 드릴다운: 선택 모델의 **TTFT/TPOT/E2E p50·p95·p99** 백분위 표 + **E2E 지연 버킷 히스토그램**(rate by bucket)을 프로메테우스에서 온디맨드 조회. vLLM/ds4-proxy 엔진 구분. `esc` 로 복귀. (유휴 시 "no samples" — 트래픽 발생 시 채워짐.)
+
 ## [0.8.0]
 ### Added — 크로스레이어 드릴 내비게이션 (IA 리뷰 P0, crown jewel)
 - 선택 엔티티에서 **관련 레이어로 점프**(collector 는 이미 상관 연결됨, UI 내비만 없었음): Models/Overview 에서 **`p`**(pods)·**`i`**(infra/accel)·**`r`**(route/topo)·**`e`**(epp), Accel 에서 `p`·`m`(model)·`n`(node), Pods 에서 `i`·`m`. 점프 = 뷰 전환 + 상관 필터.
