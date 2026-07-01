@@ -33,6 +33,20 @@ pub(crate) fn truncw(s: &str, max: usize) -> String {
 
 
 
+/// 점 게이지 — 채움=색 점(●), 여백=흑린 점(·). 각 점이 이산 눈금. 폰트-안전.
+pub(crate) fn dot_bar(pct: f64, cells: usize, color: Color) -> Line<'static> {
+    let filled = ((pct.clamp(0.0, 100.0) / 100.0) * cells as f64).round() as usize;
+    let mut sp: Vec<Span> = Vec::with_capacity(cells);
+    for i in 0..cells {
+        if i < filled {
+            sp.push(Span::styled("●".to_string(), Style::default().fg(color)));
+        } else {
+            sp.push(Span::styled("·".to_string(), Style::default().fg(C_TRACK())));
+        }
+    }
+    Line::from(sp)
+}
+
 pub(crate) fn bar_line(pct: f64, width: usize, color: Color) -> Line<'static> {
     let p = pct.clamp(0.0, 100.0) / 100.0;
     let frac = p * width as f64;
@@ -65,7 +79,7 @@ pub(crate) fn stacked_bar(segments: &[(f64, Color)], total: f64, width: usize) -
     let mut spans: Vec<Span> = Vec::with_capacity(width);
     for i in 0..width {
         if tick_step >= 2 && i > 0 && i % tick_step == 0 {
-            spans.push(Span::styled("┊".to_string(), Style::default().fg(Color::Indexed(240))));
+            spans.push(Span::styled("│".to_string(), Style::default().fg(Color::Indexed(244))));
             continue;
         }
         let center = (i as f64 + 0.5) / width as f64 * total;
@@ -87,7 +101,7 @@ pub(crate) fn stacked_bar(segments: &[(f64, Color)], total: f64, width: usize) -
 /// pct=바 채움(0~100), value=우측 현재값 텍스트, color=값 색.
 pub(crate) fn gauge_row(label: &str, pct: f64, value: &str, color: Color, barw: usize) -> Line<'static> {
     let mut sp = vec![Span::styled(format!("{:<8} ", label), Style::default().fg(C_DIM()))];
-    sp.extend(bar_line(pct, barw, color).spans);
+    sp.extend(dot_bar(pct, barw, color).spans);
     sp.push(Span::styled(format!("  {}", value), Style::default().fg(color).add_modifier(Modifier::BOLD)));
     Line::from(sp)
 }
