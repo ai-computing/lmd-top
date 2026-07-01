@@ -239,12 +239,24 @@ impl App {
     /// 새 스냅샷 반영 + ts 가 바뀌었으면 히스토리 append.
     pub fn apply(&mut self, snap: Snapshot) {
         if snap.ts != self.snap.ts {
+            // per-accelerator: util / mem% / temp 타임라인
             for a in &snap.accel {
-                let key = format!("{}:{}:{}", a.kind.label(), a.node, a.id);
-                let buf = self.hist.entry(key).or_default();
-                buf.push_back(a.util.round().clamp(0.0, 100.0) as u64);
-                while buf.len() > HIST {
-                    buf.pop_front();
+                let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
+                self.push_hist(&format!("{}:util", k), a.util.round().clamp(0.0, 100.0) as u64);
+                let memp = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
+                self.push_hist(&format!("{}:mem", k), memp.round().clamp(0.0, 100.0) as u64);
+                self.push_hist(&format!("{}:temp", k), a.temp.round().max(0.0) as u64);
+            }
+            // per-node: cpu% / mem% / load
+            for n in &snap.nodes {
+                let k = format!("nod:{}", n.name);
+                if !n.cpu_pct.is_nan() {
+                    self.push_hist(&format!("{}:cpu", k), n.cpu_pct.round().clamp(0.0, 100.0) as u64);
+                }
+                let memp = if n.mem_total_gb > 0.0 { n.mem_used_gb / n.mem_total_gb * 100.0 } else { 0.0 };
+                self.push_hist(&format!("{}:mem", k), memp.round().clamp(0.0, 100.0) as u64);
+                if !n.load1.is_nan() {
+                    self.push_hist(&format!("{}:load", k), (n.load1 * 10.0).round().max(0.0) as u64);
                 }
             }
             // 클러스터 레벨 추이(timeline)
@@ -386,6 +398,12 @@ impl App {
     pub fn selected_pod(&self) -> Option<&crate::collect::PodRow> {
         match self.view {
             View::Pods => self.sel_orig().and_then(|i| self.snap.pods.get(i)),
+            _ => None,
+        }
+    }
+    pub fn selected_node(&self) -> Option<&crate::collect::NodeInfo> {
+        match self.view {
+            View::Nodes => self.sel_orig().and_then(|i| self.snap.nodes.get(i)),
             _ => None,
         }
     }

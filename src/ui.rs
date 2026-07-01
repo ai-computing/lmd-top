@@ -69,7 +69,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     tabs(f, chunks[2], app);
 
     let body = chunks[3];
-    if app.detail && matches!(app.view, View::Accel | View::Models | View::Overview | View::Pods) {
+    if app.detail && matches!(app.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes) {
         detail_panel(f, body, app);
     } else {
         match app.view {
@@ -471,7 +471,7 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
         .column_spacing(1)
         .row_highlight_style(hl_style())
         .highlight_symbol("▎")
-        .block(block("Accelerators (GPU / RBLN / Furiosa) · ⏎ detail"));
+        .block(block("Accelerators · UTIL=compute% MEM=VRAM · ⏎ full timeline"));
 
     let split = Layout::default()
         .direction(Direction::Vertical)
@@ -482,10 +482,10 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(table, split[0], &mut st);
 
     if let Some(a) = app.selected_accel() {
-        let key = format!("{}:{}:{}", a.kind.label(), a.node, a.id);
+        let key = format!("acc:{}:{}:{}:util", a.kind.label(), a.node, a.id);
         let data = app.hist_for(&key);
         let spark = Sparkline::default()
-            .block(block(&format!("util history · {} {}", a.kind.label(), a.id)))
+            .block(block(&format!("compute util % · {} {} (⏎ for full timeline)", a.kind.label(), a.id)))
             .data(&data)
             .max(100)
             .style(Style::default().fg(util_color(a.util)));
@@ -895,34 +895,67 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
 
 // ── Detail (drill-down) ────────────────────────────────
 fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
-    let mut lines: Vec<Line> = Vec::new();
-    let mut title = "Detail";
-
+    // Accelerator: info + util/mem/temp timeline
     if let Some(a) = app.selected_accel() {
-        title = "Accelerator detail · esc to close";
+        let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(9), Constraint::Min(3)]).split(area);
         let mempct = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
-        lines.push(kv("kind", a.kind.label(), kind_color(a.kind)));
-        lines.push(kv("id / node", &format!("{} / {}", a.id, a.node), Color::White));
-        let mut u = vec![Span::styled("util       ", Style::default().fg(C_DIM()))];
-        u.extend(bar_line(a.util, 24, util_color(a.util)).spans);
-        u.push(Span::styled(format!(" {:.0}%", a.util), Style::default().fg(util_color(a.util))));
-        lines.push(Line::from(u));
-        let mut m = vec![Span::styled("memory     ", Style::default().fg(C_DIM()))];
-        m.extend(bar_line(mempct, 24, mem_color(mempct)).spans);
-        m.push(Span::styled(format!(" {:.1}/{:.1} GB ({:.0}%)", a.mem_used_gb, a.mem_total_gb, mempct), Style::default().fg(C_DIM())));
-        lines.push(Line::from(m));
-        lines.push(kv("temp", &format!("{:.0} °C", a.temp), temp_color(a.temp)));
-        lines.push(kv("power", &format!("{:.0} W", a.power), Color::White));
         let health = if !a.alive {
             ("✗ not alive".to_string(), C_BAD())
         } else if a.throttle > 0.0 {
-            (format!("⚠ alive · throttling {:.0}", a.throttle), C_WARN())
+            (format!("⚠ throttling {:.0}", a.throttle), C_WARN())
         } else {
             ("● healthy".to_string(), C_OK())
         };
-        lines.push(kv("health", &health.0, health.1));
-        lines.push(kv("model/pod", if a.busy_model.is_empty() { "(idle)" } else { a.busy_model.as_str() }, C_ACC()));
-    } else if let Some(m) = app.selected_model() {
+        let lines = vec![
+            kv("kind", &format!("{} (accelerator)", a.kind.label()), kind_color(a.kind)),
+            kv("id / node", &format!("{} / {}", a.id, a.node), Color::White),
+            kv("compute util", &format!("{:.0} %", a.util), util_color(a.util)),
+            kv("memory (VRAM)", &format!("{:.1} / {:.1} GB ({:.0}%)", a.mem_used_gb, a.mem_total_gb, mempct), mem_color(mempct)),
+            kv("temp", &format!("{:.0} °C", a.temp), temp_color(a.temp)),
+            kv("power", &format!("{:.0} W", a.power), Color::White),
+            kv("health", &health.0, health.1),
+            kv("model/pod", if a.busy_model.is_empty() { "(idle)" } else { a.busy_model.as_str() }, C_ACC()),
+        ];
+        f.render_widget(Paragraph::new(lines).block(block("Accelerator detail · esc to close")), rows[0]);
+        let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
+        let sp = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 3); 3]).split(rows[1]);
+        spark(f, sp[0], app, &format!("{}:util", k), "compute util %", 100, util_color(a.util));
+        spark(f, sp[1], app, &format!("{}:mem", k), "memory %", 100, C_ACC());
+        spark(f, sp[2], app, &format!("{}:temp", k), "temp C", 0, temp_color(a.temp));
+        return;
+    }
+    // Node: info + cpu/mem/load timeline
+    if let Some(n) = app.selected_node() {
+        let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(8), Constraint::Min(3)]).split(area);
+        let (hg, hc) = if n.cordoned {
+            ("⊘ cordoned", C_WARN())
+        } else if !n.ready {
+            ("✗ not ready", C_BAD())
+        } else if n.pressure {
+            ("⚠ pressure", C_WARN())
+        } else {
+            ("● ready", C_OK())
+        };
+        let lines = vec![
+            kv("node", &n.name, Color::White),
+            kv("status", hg, hc),
+            kv("kubelet", &n.version, Color::White),
+            kv("host CPU", &if n.cpu_pct.is_nan() { "-".into() } else { format!("{:.0} %", n.cpu_pct) }, Color::White),
+            kv("host memory", &if n.mem_total_gb <= 0.0 { "-".into() } else { format!("{:.0} / {:.0} GB", n.mem_used_gb, n.mem_total_gb) }, Color::White),
+            kv("load1", &if n.load1.is_nan() { "-".into() } else { format!("{:.2}", n.load1) }, Color::White),
+        ];
+        f.render_widget(Paragraph::new(lines).block(block("Node detail · esc to close")), rows[0]);
+        let k = format!("nod:{}", n.name);
+        let sp = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 3); 3]).split(rows[1]);
+        spark(f, sp[0], app, &format!("{}:cpu", k), "host cpu %", 100, C_OK());
+        spark(f, sp[1], app, &format!("{}:mem", k), "host mem %", 100, C_ACC());
+        spark(f, sp[2], app, &format!("{}:load", k), "load1 x10", 0, C_WARN());
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut title = "Detail";
+    if let Some(m) = app.selected_model() {
         title = "Model detail · esc to close";
         lines.push(kv("model", &m.name, Color::White));
         lines.push(kv("status", &m.status, if m.ready > 0 { C_OK() } else { C_DIM() }));
@@ -1004,7 +1037,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         Dataset::default().name("vram%").marker(Marker::Braille).graph_type(GraphType::Line).style(Style::default().fg(C_ACC())).data(&vram_d),
     ];
     let chart = Chart::new(ds)
-        .block(block("Timeline · util% / vram%"))
+        .block(block("Timeline · accel util% / VRAM% (cluster avg)"))
         .x_axis(Axis::default().bounds([0.0, crate::app::HIST as f64]))
         .y_axis(
             Axis::default()

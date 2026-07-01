@@ -5,6 +5,13 @@
 ## [Unreleased]
 ### Added
 - **Events 뷰(8)**: k8s + llm-d 이벤트 통합(Warning/Normal, reason/object/message/count, 최신순). MVP1.
+- **Nodes 뷰(9)**: 노드 health(ready/cordoned/pressure)·kubelet·CPU%·load·mem·노드별 가속기(전체 노드, cordoned 포함).
+- **Entity drill-down timeline**: 가속기/노드 선택→⏎ → 그 대상의 다중 지표 타임라인(가속기 util/mem/temp · 노드 cpu/mem/load 스파크라인).
+- summary/diagnosis 에 Warning 이벤트 반영.
+
+### Changed
+- **성능(경량화)**: 가속기+노드는 fast tier(collect_fast) 1초 갱신, 무거운 나머지는 full collect 3초. util/mem 반응성↑.
+- **라벨 명확화**: Accel UTIL=compute%, MEM=VRAM. Perf timeline=accel util%/VRAM%(cluster avg). Node=host CPU/mem.
 - (다음) PD 뷰, EPP decision score table, cache 뷰, ModelService 단위 — [ROADMAP.md](./ROADMAP.md)
 
 ## [0.2.0] — 2026-06-30
