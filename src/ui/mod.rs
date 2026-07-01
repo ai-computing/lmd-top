@@ -1303,22 +1303,20 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
     const STEP: u16 = 2;
     let n = ((inner.width + 1) / STEP) as usize; // 들어갈 바 개수
     let data: Vec<u64> = raw.iter().rev().take(n).rev().copied().collect();
-    // 위아래 여백: 높이가 충분(≥4행)하면 맨 윗행을 헤드룸으로 비워 바 상단이 테두리에 안 붙게(가독).
-    // 작은 타임라인(Perf 그리드 등)은 높이가 아까우므로 전체 사용.
-    let draw_h = if rows_h >= 4 { rows_h - 1 } else { rows_h }.max(1);
+    let draw_h = rows_h;
     let denom = (draw_h as f64 - 1.0).max(1.0);
     let buf = f.buffer_mut();
     for (ci, &v) in data.iter().enumerate() {
         let frac = (v as f64 / ymax).clamp(0.0, 1.0);
-        let eighths_total = (frac * (draw_h as f64) * 8.0).round() as usize;
-        // 오른쪽 정렬(now=맨 오른쪽 바), 바 사이 1칸 간격.
+        let eighths_total = (frac * (draw_h as f64) * 8.0).round() as usize; // 채움(1/8칸 단위)
+        // 오른쪽 정렬(now=맨 오른쪽), 바 사이 1칸 간격.
         let x = inner.x + inner.width - 1 - ((data.len() - 1 - ci) as u16) * STEP;
         for r in 0..draw_h {
-            // r=0 = 맨 아래 행. 셀 색 = 세로 위치별 레인보우(아래 파랑 → 위 빨강).
+            // 값까지 █(세로 위치별 레인보우), 나머지는 ░ track → ████░░░░ 느낌.
             let filled = eighths_total.saturating_sub(r * 8).min(8);
             let y = inner.y + inner.height - 1 - r as u16;
             if filled == 0 {
-                buf[(x, y)].set_char('░').set_fg(C_TRACK()); // 헤드룸 track
+                buf[(x, y)].set_char('░').set_fg(C_TRACK());
             } else {
                 buf[(x, y)].set_char(LV[filled]).set_fg(rainbow(r as f64 / denom));
             }
