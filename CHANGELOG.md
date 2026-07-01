@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.19.1]
+### Added — 시작 테마 지정(LMD_THEME)
+- `LMD_THEME`(env) 또는 yaml `theme` 로 시작 테마 영구 지정 — 이름(soft/colorblind/high-contrast/default) 또는 번호(0~3). 예: `LMD_THEME=soft lmd-top`. soft 테마를 매번 `t` 안 누르고 기본으로 쓸 수 있음(기본값은 여전히 default라 무회귀).
+
 ## [0.19.0]
 ### Added — soft(Catppuccin Mocha) 테마
 - 거친 ANSI-16(순수 Red/Yellow) 대신 검증된 저채도 팔레트(Catppuccin Mocha)를 **테마 3 'soft'** 로 추가 — 눈편함·미감. 기본 테마(0)는 그대로라 무회귀. `t` 로 순환(default→high-contrast→colorblind→soft). truecolor 터미널 권장.

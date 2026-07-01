@@ -168,6 +168,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
 
     let mut app = App::new();
     app.mode = mode;
+    app::set_theme(cfg.theme); // 시작 테마(LMD_THEME / yaml)
     let mut fx = ui::FxState::new();
     let result = (|| -> Result<()> {
         loop {
