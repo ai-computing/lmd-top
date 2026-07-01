@@ -1313,7 +1313,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     let nav = format!(" · ◂ {}  {}/{}  {} ▸ · esc back", truncw(&prev, 16), cur, tot, truncw(&next, 16));
     // Accelerator: info + util/mem/temp timeline
     if let Some(a) = app.selected_accel() {
-        let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(9), Constraint::Min(6)]).split(area);
+        let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(11), Constraint::Min(6)]).split(area);
         let mempct = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
         let health = if !a.alive {
             ("✗ not alive", C_BAD())
@@ -1324,7 +1324,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         };
         // 헤더 + 현재 포션 게이지(all-smi식)
         let barw = (rows[0].width as usize).saturating_sub(34).clamp(10, 46);
-        let lines = vec![
+        let mut lines = vec![
             Line::from(vec![
                 Span::styled(format!("{} ", a.disp()), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("id {} @ {}   ", a.id, a.node), Style::default().fg(C_DIM())),
@@ -1347,6 +1347,24 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             ),
             gauge_row("temp", a.temp.min(100.0), &format!("{:.0} °C", a.temp), temp_color(a.temp), barw),
         ];
+        // 메모리 대역폭(통합 메모리에선 진짜 병목) — DCGM MEM_COPY_UTIL. 있을 때만.
+        if !a.mem_bw.is_nan() {
+            lines.push(gauge_row("mem bw", a.mem_bw, &format!("{:.0} %", a.mem_bw), grad_color(a.mem_bw), barw));
+        }
+        if !a.clock_mhz.is_nan() || !a.mem_temp.is_nan() {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<8} ", "clock"), Style::default().fg(C_DIM())),
+                Span::styled(
+                    if a.clock_mhz.is_nan() { "–".into() } else { format!("{:.0} MHz", a.clock_mhz) },
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("    mem temp ", Style::default().fg(C_DIM())),
+                Span::styled(
+                    if a.mem_temp.is_nan() { "–".into() } else { format!("{:.0} °C", a.mem_temp) },
+                    Style::default().fg(temp_color(a.mem_temp)),
+                ),
+            ]));
+        }
         f.render_widget(Paragraph::new(lines).block(block(&format!("Accelerator{}", nav))), rows[0]);
         // 타임라인: util% / VRAM% 두 개만 넓게(반응형). temp/power 는 위 게이지로.
         let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
