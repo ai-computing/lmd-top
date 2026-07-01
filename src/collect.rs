@@ -159,32 +159,20 @@ pub struct Snapshot {
 }
 
 /// EPP 정책 수립용 성능 지표(구간별 지연 percentile·토큰분포·처리량). 값 없으면 NaN.
+/// 클러스터 전역 성능 요약(throughput 라인 + timeline 용). 상세는 per-model(perf_rows)/drill-down.
 #[derive(Clone)]
 pub struct Perf {
     pub req_rate: f64,
     pub err_rate: f64,
     pub tps: f64,
     pub prefix_hit: f64,
-    pub queue_p95: f64,
     pub ttft_p95: f64,
-    pub ttft_p99: f64,
-    pub tpot_p95: f64,
-    pub e2e_p50: f64,
     pub e2e_p95: f64,
-    pub e2e_p99: f64,
-    pub in_tok_p50: f64,
-    pub in_tok_p95: f64,
-    pub out_tok_p50: f64,
-    pub out_tok_p95: f64,
 }
 impl Default for Perf {
     fn default() -> Self {
         let n = f64::NAN;
-        Perf {
-            req_rate: n, err_rate: n, tps: n, prefix_hit: n, queue_p95: n,
-            ttft_p95: n, ttft_p99: n, tpot_p95: n, e2e_p50: n, e2e_p95: n, e2e_p99: n,
-            in_tok_p50: n, in_tok_p95: n, out_tok_p50: n, out_tok_p95: n,
-        }
+        Perf { req_rate: n, err_rate: n, tps: n, prefix_hit: n, ttft_p95: n, e2e_p95: n }
     }
 }
 
@@ -241,9 +229,9 @@ fn short(s: &str) -> String {
     s.chars().take(28).collect()
 }
 
-/// 단일 스칼라 결과(첫 값) — 없으면 NaN.
-async fn qs(cfg: &Config, promql: &str, warn: &mut Vec<String>) -> f64 {
-    q(cfg, promql, warn).await.first().map(|s| s.value).unwrap_or(f64::NAN)
+/// 단일 스칼라 결과(첫 값) — 없으면 NaN. (join! 병렬용, warn 없음)
+async fn qs1(prom_base: &str, promql: &str) -> f64 {
+    prom::query(prom_base, promql).await.ok().and_then(|v| v.first().map(|s| s.value)).unwrap_or(f64::NAN)
 }
 
 /// vLLM 모델 메트릭 묶음 (model_name 키).
@@ -474,23 +462,16 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     snap.pod_queues.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // Perf: 구간별 지연 percentile·토큰분포·처리량 (EPP 정책용). 전부 graceful(NaN).
-    let mut pf = Perf::default();
-    pf.req_rate = qs(cfg, "sum(rate(inference_objective_request_total[1m]))", &mut warn).await;
-    pf.err_rate = qs(cfg, "sum(rate(inference_objective_request_error_total[1m]))", &mut warn).await;
-    pf.tps = qs(cfg, "sum(rate(vllm:generation_tokens_total[1m]))", &mut warn).await;
-    pf.prefix_hit = qs(cfg, "avg(vllm:gpu_prefix_cache_hit_rate)", &mut warn).await;
-    pf.queue_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(inference_extension_flow_control_request_queue_duration_seconds_bucket[5m])))", &mut warn).await;
-    pf.ttft_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(vllm:time_to_first_token_seconds_bucket[5m])))", &mut warn).await;
-    pf.ttft_p99 = qs(cfg, "histogram_quantile(0.99, sum by (le)(rate(vllm:time_to_first_token_seconds_bucket[5m])))", &mut warn).await;
-    pf.tpot_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(inference_objective_normalized_time_per_output_token_seconds_bucket[5m])))", &mut warn).await;
-    pf.e2e_p50 = qs(cfg, "histogram_quantile(0.50, sum by (le)(rate(inference_objective_request_duration_seconds_bucket[5m])))", &mut warn).await;
-    pf.e2e_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(inference_objective_request_duration_seconds_bucket[5m])))", &mut warn).await;
-    pf.e2e_p99 = qs(cfg, "histogram_quantile(0.99, sum by (le)(rate(inference_objective_request_duration_seconds_bucket[5m])))", &mut warn).await;
-    pf.in_tok_p50 = qs(cfg, "histogram_quantile(0.50, sum by (le)(rate(inference_objective_input_tokens_bucket[5m])))", &mut warn).await;
-    pf.in_tok_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(inference_objective_input_tokens_bucket[5m])))", &mut warn).await;
-    pf.out_tok_p50 = qs(cfg, "histogram_quantile(0.50, sum by (le)(rate(inference_objective_output_tokens_bucket[5m])))", &mut warn).await;
-    pf.out_tok_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(inference_objective_output_tokens_bucket[5m])))", &mut warn).await;
-    snap.perf = pf;
+    let pp = &cfg.prom;
+    let (req_rate, err_rate, tps, prefix_hit, ttft_p95, e2e_p95) = tokio::join!(
+        qs1(pp, "sum(rate(inference_objective_request_total[1m]))"),
+        qs1(pp, "sum(rate(inference_objective_request_error_total[1m]))"),
+        qs1(pp, "sum(rate(vllm:generation_tokens_total[1m]))"),
+        qs1(pp, "avg(vllm:gpu_prefix_cache_hit_rate)"),
+        qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(vllm:time_to_first_token_seconds_bucket[5m])))"),
+        qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(inference_objective_request_duration_seconds_bucket[5m])))"),
+    );
+    snap.perf = Perf { req_rate, err_rate, tps, prefix_hit, ttft_p95, e2e_p95 };
 
     // per-model 성능 (모델=하드웨어 배치별 구분) — model_name 기준 병합
     let mut pm: BTreeMap<String, PerfRow> = BTreeMap::new();
