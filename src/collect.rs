@@ -131,6 +131,8 @@ pub struct Snapshot {
     pub decisions: Vec<(String, f64)>, // (pod, 라우팅 픽 횟수) — 트래픽이 EPP 경유 시
     pub pod_queues: Vec<(String, f64)>, // per-pod 큐 깊이(요청 분배)
     pub perf: Perf,
+    pub perf_rows: Vec<PerfRow>, // 모델(=하드웨어)별 성능
+
     pub autoscalers: Vec<Autoscale>,
     pub epp: Option<EppCfg>,
     pub epp_in_path: bool, // HTTPRoute backend 중 InferencePool 이 있는가(없으면 EPP 우회)
@@ -170,6 +172,25 @@ impl Default for Perf {
     }
 }
 
+/// 모델(=특정 하드웨어 배치)별 성능 행. 값 없으면 NaN.
+#[derive(Clone)]
+pub struct PerfRow {
+    pub model: String,
+    pub req: f64,
+    pub tps: f64,
+    pub ttft_p95: f64,
+    pub tpot_p95: f64,
+    pub e2e_p95: f64,
+    pub in_tok_p95: f64,
+    pub out_tok_p95: f64,
+}
+impl PerfRow {
+    fn new(model: &str) -> Self {
+        let n = f64::NAN;
+        PerfRow { model: model.to_string(), req: n, tps: n, ttft_p95: n, tpot_p95: n, e2e_p95: n, in_tok_p95: n, out_tok_p95: n }
+    }
+}
+
 #[derive(Clone)]
 pub struct Autoscale {
     pub target: String, // scaleTargetRef (deployment)
@@ -181,13 +202,12 @@ pub struct Autoscale {
     pub triggers: String,
 }
 
+/// 메모리 바이트 → GB. RBLN/Furiosa/node DRAM 모두 bytes 단위(실측 확인).
 fn to_gb(v: f64) -> f64 {
-    if v > 1.0e9 {
-        v / 1.0e9
-    } else if v > 1.0e3 {
-        v / 1.0e3
+    if v.is_nan() {
+        0.0
     } else {
-        v
+        v / 1.0e9
     }
 }
 
@@ -403,6 +423,27 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     pf.out_tok_p50 = qs(cfg, "histogram_quantile(0.50, sum by (le)(rate(inference_objective_output_tokens_bucket[5m])))", &mut warn).await;
     pf.out_tok_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(inference_objective_output_tokens_bucket[5m])))", &mut warn).await;
     snap.perf = pf;
+
+    // per-model 성능 (모델=하드웨어 배치별 구분) — model_name 기준 병합
+    let mut pm: BTreeMap<String, PerfRow> = BTreeMap::new();
+    macro_rules! merge {
+        ($promql:expr, $field:ident) => {
+            for s in &q(cfg, $promql, &mut warn).await {
+                let m = s.l("model_name").to_string();
+                if !m.is_empty() {
+                    pm.entry(m.clone()).or_insert_with(|| PerfRow::new(&m)).$field = s.value;
+                }
+            }
+        };
+    }
+    merge!("sum by (model_name)(rate(inference_objective_request_total[1m]))", req);
+    merge!("sum by (model_name)(rate(vllm:generation_tokens_total[1m]))", tps);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:time_to_first_token_seconds_bucket[5m])))", ttft_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(inference_objective_normalized_time_per_output_token_seconds_bucket[5m])))", tpot_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(inference_objective_request_duration_seconds_bucket[5m])))", e2e_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(inference_objective_input_tokens_bucket[5m])))", in_tok_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(inference_objective_output_tokens_bucket[5m])))", out_tok_p95);
+    snap.perf_rows = pm.into_values().collect();
 
     for s in &p_ready {
         let name = s.l("name");

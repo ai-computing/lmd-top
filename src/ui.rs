@@ -651,53 +651,69 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
 
 // ── Overview ───────────────────────────────────────────
 fn view_overview(f: &mut Frame, area: Rect, app: &App) {
+    let s = &app.snap;
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Length(5), Constraint::Min(4), Constraint::Length(3)])
+        .constraints([Constraint::Length(6), Constraint::Length(5), Constraint::Min(4), Constraint::Length(3)])
         .split(area);
 
+    // 가속기: (종류,노드)별 집계 — 한눈에 + 절대 메모리(GB) + health 아이콘
+    let mut groups: Vec<(AccelKind, String, usize, f64, f64, f64, bool, bool)> = Vec::new();
+    for a in &s.accel {
+        if let Some(g) = groups.iter_mut().find(|g| g.0 == a.kind && g.1 == a.node) {
+            g.2 += 1; g.3 += a.util; g.4 += a.mem_used_gb; g.5 += a.mem_total_gb;
+            g.6 = g.6 && a.alive; g.7 = g.7 || a.throttle > 0.0;
+        } else {
+            groups.push((a.kind, a.node.clone(), 1, a.util, a.mem_used_gb, a.mem_total_gb, a.alive, a.throttle > 0.0));
+        }
+    }
     let mut al: Vec<Line> = Vec::new();
-    for a in app.snap.accel.iter().take(6) {
-        let mut spans = vec![
-            Span::styled(format!("{:<5}", a.kind.label()), Style::default().fg(kind_color(a.kind))),
-            Span::styled(format!("{:<6}", truncw(&a.id, 6)), Style::default().fg(C_DIM)),
+    for (kind, node, cnt, us, mu, mt, alive, thr) in &groups {
+        let util = us / (*cnt as f64);
+        let mempct = if *mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
+        let (hi, hc) = if !*alive { ("✗", C_BAD) } else if *thr { ("⚠", C_WARN) } else { ("●", C_OK) };
+        let mut sp = vec![
+            Span::styled(format!("{} ", hi), Style::default().fg(hc)),
+            Span::styled(format!("{:<4}×{} ", kind.label(), cnt), Style::default().fg(kind_color(*kind)).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("@{:<16} ", truncw(node, 16)), Style::default().fg(C_DIM)),
         ];
-        spans.extend(bar_line(a.util, 10, util_color(a.util)).spans);
-        spans.push(Span::styled(format!(" {:>3.0}% ", a.util), Style::default().fg(util_color(a.util))));
-        spans.push(Span::styled(format!("{:.0}/{:.0}G {:.0}°C ", a.mem_used_gb, a.mem_total_gb, a.temp), Style::default().fg(C_DIM)));
-        spans.push(Span::styled(truncw(&a.busy_model, 18), Style::default().fg(C_DIM)));
-        al.push(Line::from(spans));
+        sp.extend(bar_line(util, 10, util_color(util)).spans);
+        sp.push(Span::styled(format!(" {:>3.0}%  ", util), Style::default().fg(util_color(util))));
+        sp.push(Span::styled(format!("mem {:.0}/{:.0} GB", mu, mt), Style::default().fg(mem_color(mempct)))); // 절대값
+        al.push(Line::from(sp));
     }
     if al.is_empty() {
         al.push(Line::from(Span::styled("  (no accelerator metrics)", Style::default().fg(C_DIM))));
     }
-    f.render_widget(Paragraph::new(al).block(block("Accelerators")), rows[0]);
+    f.render_widget(Paragraph::new(al).block(block("Accelerators (종류·노드별)")), rows[0]);
 
+    // Inference: EPP 경로 + 풀 endpoints + scorers + autoscale
     let mut pl: Vec<Line> = Vec::new();
-    for p in &app.snap.pools {
+    pl.push(Line::from(vec![
+        Span::styled("EPP 경로 ", Style::default().fg(C_DIM)),
+        Span::styled(
+            if s.epp_in_path { "InferencePool 경유 ●" } else { "우회 (HTTPRoute→Service 직접) ⚠" },
+            Style::default().fg(if s.epp_in_path { C_OK } else { C_WARN }),
+        ),
+    ]));
+    for p in s.pools.iter().take(2) {
         pl.push(Line::from(vec![
             dot(p.ep_ready > 0),
             Span::styled(format!("{:<16} ", truncw(&p.name, 16)), Style::default().fg(Color::White)),
-            Span::styled(
-                format!("ep {}/{}  queue {}  sat {}", p.ep_ready, p.ep_total, fmt_nan(p.queue, 1), fmt_nan(p.sat, 2)),
-                Style::default().fg(C_DIM),
-            ),
+            Span::styled(format!("endpoints {}/{}  sat {}", p.ep_ready, p.ep_total, fmt_nan(p.sat, 2)), Style::default().fg(C_DIM)),
         ]));
     }
-    if let Some(cfg) = &app.snap.epp {
+    if let Some(cfg) = &s.epp {
         let names: Vec<String> = cfg.scorers.iter().map(|(n, w)| format!("{}·{:.0}", n.replace("-scorer", ""), w)).collect();
-        pl.push(Line::from(Span::styled(format!(" scorers: {}", names.join("  ")), Style::default().fg(C_DIM))));
+        pl.push(Line::from(Span::styled(format!("scorers: {}", names.join("  ")), Style::default().fg(C_DIM))));
     }
-    if pl.is_empty() {
-        pl.push(Line::from(Span::styled("  (no InferencePool)", Style::default().fg(C_DIM))));
-    }
-    f.render_widget(Paragraph::new(pl).block(block("Inference (EPP pools)")), rows[1]);
+    f.render_widget(Paragraph::new(pl).block(block("Inference (EPP / InferencePool)")), rows[1]);
 
     let mut st = TableState::default();
     st.select(Some(app.selected));
     f.render_stateful_widget(models_table(app, "Models"), rows[2], &mut st);
 
-    let (txt, col) = diagnose(&app.snap);
+    let (txt, col) = diagnose(s);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(truncw(&txt, rows[3].width.saturating_sub(2) as usize), Style::default().fg(col))))
             .block(block("Diagnosis")),
@@ -804,7 +820,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Length(3), Constraint::Length(6), Constraint::Min(3)])
+        .constraints([Constraint::Length(6), Constraint::Length(3), Constraint::Min(5)])
         .split(area);
 
     // timeline 스파크라인 (부하/자원/처리량/지연 추이)
@@ -837,58 +853,75 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     ]);
     f.render_widget(Paragraph::new(tl).block(block("Throughput")), rows[1]);
 
-    // latency percentiles per stage
-    let lrows = vec![
-        Row::new(vec![Cell::from("queue (EPP)"), Cell::from("–"), cellw(ms(p.queue_p95), 8), Cell::from("–")]),
-        Row::new(vec![Cell::from("TTFT (prefill)"), Cell::from("–"), cellw(ms(p.ttft_p95), 8), cellw(ms(p.ttft_p99), 8)]),
-        Row::new(vec![Cell::from("TPOT (decode/tok)"), Cell::from("–"), cellw(ms(p.tpot_p95), 8), Cell::from("–")]),
-        Row::new(vec![
-            Cell::from("E2E (전체)"),
-            cellw(ms(p.e2e_p50), 8),
-            cellw(ms(p.e2e_p95), 8),
-            cellw(ms(p.e2e_p99), 8),
-        ]),
-    ];
-    let lt = Table::new(
-        lrows,
-        [Constraint::Length(20), Constraint::Length(10), Constraint::Length(10), Constraint::Length(10)],
-    )
-    .header(hrow(&["STAGE", "p50", "p95", "p99"]))
-    .block(block("Latency percentiles (구간별) · EPP 정책 튜닝용"));
-    f.render_widget(lt, rows[2]);
-
-    // token distribution + per-pod queue
-    let split = Layout::default()
+    // per-model 성능(모델=하드웨어 배치별) + per-pod 큐
+    let bodyc = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(rows[3]);
+        .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
+        .split(rows[2]);
 
-    let toklines = vec![
-        Line::from(vec![
-            Span::styled("input  ", Style::default().fg(C_DIM)),
-            Span::styled(format!("p50 {:<7} p95 {}", tok(p.in_tok_p50), tok(p.in_tok_p95)), Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::styled("output ", Style::default().fg(C_DIM)),
-            Span::styled(format!("p50 {:<7} p95 {}", tok(p.out_tok_p50), tok(p.out_tok_p95)), Style::default().fg(Color::White)),
-        ]),
-    ];
-    f.render_widget(Paragraph::new(toklines).block(block("Token length 분포")), split[0]);
+    if app.snap.perf_rows.is_empty() {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled("모델별 성능 데이터 없음", Style::default().fg(C_DIM))),
+                Line::from(Span::styled(
+                    "EPP 경유 트래픽 + vLLM 메트릭 노출 시 모델별로 표시됩니다.",
+                    Style::default().fg(C_DIM),
+                )),
+            ])
+            .block(block("모델별 성능 (p95) · 구간별 지연·토큰·처리량")),
+            bodyc[0],
+        );
+    } else {
+        let mrows: Vec<Row> = app
+            .snap
+            .perf_rows
+            .iter()
+            .map(|r| {
+                Row::new(vec![
+                    cellw(r.model.clone(), 16),
+                    Cell::from(Span::styled(rate(r.req), Style::default().fg(C_OK))),
+                    Cell::from(Span::styled(rate(r.tps), Style::default().fg(C_OK))),
+                    cellw(ms(r.ttft_p95), 7),
+                    cellw(ms(r.tpot_p95), 7),
+                    Cell::from(Span::styled(ms(r.e2e_p95), Style::default().fg(C_WARN))),
+                    cellw(tok(r.in_tok_p95), 5),
+                    cellw(tok(r.out_tok_p95), 5),
+                ])
+            })
+            .collect();
+        let mt = Table::new(
+            mrows,
+            [
+                Constraint::Min(12),
+                Constraint::Length(6),
+                Constraint::Length(6),
+                Constraint::Length(7),
+                Constraint::Length(7),
+                Constraint::Length(7),
+                Constraint::Length(5),
+                Constraint::Length(5),
+            ],
+        )
+        .header(hrow(&["MODEL", "req/s", "tok/s", "TTFT", "TPOT", "E2E", "inTk", "outTk"]))
+        .column_spacing(1)
+        .block(block("모델별 성능 (p95) · 지연은 ms/s"));
+        f.render_widget(mt, bodyc[0]);
+    }
 
-    // per-pod queue (요청 분배)
+    // per-pod queue (요청 분배 — 절대 큐 깊이)
     let mut ql: Vec<Line> = Vec::new();
     let maxq = app.snap.pod_queues.iter().map(|(_, q)| *q).fold(1.0, f64::max);
     if app.snap.pod_queues.is_empty() {
         ql.push(Line::from(Span::styled("per-pod 큐 데이터 없음", Style::default().fg(C_DIM))));
     } else {
-        for (pod, q) in app.snap.pod_queues.iter().take(6) {
-            let mut sp = vec![Span::styled(format!("{:<24} ", truncw(pod, 24)), Style::default().fg(Color::White))];
-            sp.extend(bar_line(q / maxq * 100.0, 10, C_ACC).spans);
+        for (pod, q) in app.snap.pod_queues.iter().take(8) {
+            let mut sp = vec![Span::styled(format!("{:<20} ", truncw(pod, 20)), Style::default().fg(Color::White))];
+            sp.extend(bar_line(q / maxq * 100.0, 8, C_ACC).spans);
             sp.push(Span::styled(format!(" {:.0}", q), Style::default().fg(C_DIM)));
             ql.push(Line::from(sp));
         }
     }
-    f.render_widget(Paragraph::new(ql).block(block("요청 분배 (per-pod queue)")), split[1]);
+    f.render_widget(Paragraph::new(ql).block(block("요청 분배 (per-pod queue, 절대값)")), bodyc[1]);
 }
 
 // ── 진단 ───────────────────────────────────────────────
