@@ -123,6 +123,7 @@ cargo build --release         # → target/release/lmd-top
 lmd-top                       # launch the TUI (permission mode: observe)
 lmd-top --mode admin          # allow scale/rollout actions (see Permission modes)
 lmd-top --snapshot            # collect once, print text (headless / debug)   [alias: -s]
+lmd-top --json                # collect once, print machine-readable agent state (JSON)
 lmd-top --render              # render every view to text via TestBackend (CI / verification)
 
 # point at a different cluster / namespace
@@ -143,6 +144,14 @@ in a shared cluster.
 | **danger** | + delete / force | *(future)* |
 
 Admin+ mutating actions (e.g. `s` scale) ask for a `y`/`n` confirmation before applying.
+
+### Agent state (JSON)
+
+`lmd-top --json` prints a curated, machine-readable state tree (schema
+`lmd-top/agent-state/v1`) so an AI agent can consume cluster/accelerator/model/pool
+status, `diagnosis`, `alerts`, and the available `actions` (each with a `risk` level and
+`requires_confirmation` flag) without scraping the terminal. `NaN` metrics serialize as
+`null`. This is the machine-readable half of a human-in-the-loop console.
 
 ### Keybindings
 

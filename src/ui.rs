@@ -1807,25 +1807,13 @@ fn view_events(f: &mut Frame, area: Rect, app: &App) {
 }
 
 // ── 진단 ───────────────────────────────────────────────
+// 판정 로직은 app::diagnose(agent JSON 과 공유). 여기선 글리프+색만 입힌다.
 fn diagnose(s: &Snapshot) -> (String, Color) {
-    let serving = s.models.iter().filter(|m| m.ready > 0).count();
-    if s.accel.is_empty() && serving == 0 {
-        return ("⚠ no accelerator metrics + no serving models — check Prometheus / model state".into(), C_BAD());
-    }
-    if serving == 0 {
-        return ("⚠ 0 models serving — press 's' in Models to start one (no backend)".into(), C_WARN());
-    }
-    let warns = s.events.iter().filter(|e| e.typ == "Warning").count();
-    if warns > 0 {
-        let top = s.events.iter().find(|e| e.typ == "Warning").map(|e| e.reason.clone()).unwrap_or_default();
-        return (
-            format!("● {} model(s) serving · ⚠ {} warning event(s) (top: {}) — see Events", serving, warns, top),
-            C_WARN(),
-        );
-    }
-    let busy = s.accel.iter().filter(|a| a.util > 80.0).count();
-    if busy > 0 {
-        return (format!("● {} model(s) serving, {} accelerator(s) hot (>80%)", serving, busy), C_OK());
-    }
-    (format!("● {} model(s) serving, accelerators have headroom", serving), C_OK())
+    let (msg, sev) = crate::app::diagnose(s);
+    let (glyph, col) = match sev {
+        Some(Sev::Bad) => ("⚠", C_BAD()),
+        Some(Sev::Warn) => ("⚠", C_WARN()),
+        None => ("●", C_OK()),
+    };
+    (format!("{} {}", glyph, msg), col)
 }

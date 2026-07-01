@@ -2,6 +2,12 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.6.2]
+### Added — agent JSON state (Control-plane M2)
+- **`lmd-top --json`** (또는 `--snapshot --json`): 화면 파싱 없이 AI agent 가 소비할 **기계가독 상태 트리**를 stdout 으로 출력. 큐레이트된 안정 스키마(`schema: "lmd-top/agent-state/v1"`) — 내부 Snapshot 과 분리:
+  - `cluster`(집계) · `accelerators`(kind+감지모델) · `models` · `pools` · `per_model_perf` · `diagnosis`(message+severity) · `alerts`(snapshot 조건) · **`actions`**(모델별 scale, `risk`/`requires_confirmation` 포함).
+  - NaN → `null` 정규화. 진단·알림 판정 로직은 UI 와 공유(`app::diagnose`/`snapshot_alerts`).
+
 ## [0.6.1]
 ### Fixed — GPU model/VRAM auto-detection (no more hardcoded "A100"/80GB)
 - GPU 계열 라벨이 **하드코딩 "A100"** 이라 실제 장치(예: GB10)가 틀리게 표시되던 문제. 이제 DCGM `modelName` 라벨에서 **실제 모델을 자동 감지**(`"NVIDIA GB10"→"GB10"`, `"NVIDIA A100-SXM4-40GB"→"A100"`) → Accel KIND 열·Overview(Σ/그룹/LED)·상세·`--snapshot` 에 반영. 감지 실패 시 벤더 계열 `GPU` 로 fallback(더는 오답 "A100" 아님).
