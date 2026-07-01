@@ -82,6 +82,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             View::Perf => view_perf(f, body, app),
             View::Launch => view_launch(f, body, app),
             View::Events => view_events(f, body, app),
+            View::Nodes => view_nodes(f, body, app),
         }
     }
     footer(f, chunks[4], app);
@@ -1183,6 +1184,76 @@ fn view_launch(f: &mut Frame, area: Rect, app: &App) {
         pl.push(Line::from(Span::styled("← select a model", Style::default().fg(C_DIM()))));
     }
     f.render_widget(Paragraph::new(pl).block(block("placements × live inventory")), body[1]);
+}
+
+// ── Nodes (node health / placement) ────────────────────
+fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
+    let order = app.order();
+    let rows: Vec<Row> = order
+        .iter()
+        .map(|&i| {
+            let n = &app.snap.nodes[i];
+            let (g, gc) = if n.cordoned {
+                ("⊘ cordon", C_WARN())
+            } else if !n.ready {
+                ("✗ notready", C_BAD())
+            } else if n.pressure {
+                ("⚠ pressure", C_WARN())
+            } else {
+                ("● ready", C_OK())
+            };
+            // accelerators on this node
+            let (mut gpu, mut rbln, mut rngd) = (0, 0, 0);
+            for a in &app.snap.accel {
+                if a.node == n.name {
+                    match a.kind {
+                        AccelKind::Gpu => gpu += 1,
+                        AccelKind::Rbln => rbln += 1,
+                        AccelKind::Rngd => rngd += 1,
+                    }
+                }
+            }
+            let accel = {
+                let mut v = Vec::new();
+                if gpu > 0 { v.push(format!("GPU{}", gpu)); }
+                if rbln > 0 { v.push(format!("RBLN{}", rbln)); }
+                if rngd > 0 { v.push(format!("RNGD{}", rngd)); }
+                if v.is_empty() { "-".into() } else { v.join(" ") }
+            };
+            let mut cpu = bar_line(n.cpu_pct, 8, util_color(n.cpu_pct)).spans;
+            cpu.push(Span::styled(
+                if n.cpu_pct.is_nan() { " -".into() } else { format!(" {:.0}%", n.cpu_pct) },
+                Style::default().fg(C_DIM()),
+            ));
+            Row::new(vec![
+                cellw(n.name.clone(), 22),
+                Cell::from(Span::styled(g, Style::default().fg(gc))),
+                cellw(n.version.clone(), 11),
+                Cell::from(Line::from(cpu)),
+                cellw(if n.load1.is_nan() { "-".into() } else { format!("{:.1}", n.load1) }, 5),
+                cellw(if n.mem_total_gb <= 0.0 { "-".into() } else { format!("{:.0}/{:.0}G", n.mem_used_gb, n.mem_total_gb) }, 10),
+                Cell::from(Span::styled(accel, Style::default().fg(C_ACC()))),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Min(16),
+        Constraint::Length(11),
+        Constraint::Length(11),
+        Constraint::Length(13),
+        Constraint::Length(5),
+        Constraint::Length(10),
+        Constraint::Min(12),
+    ];
+    let t = Table::new(rows, widths)
+        .header(hrow(&["NODE", "STATUS", "VERSION", "CPU", "LOAD", "MEM", "ACCEL"]))
+        .column_spacing(1)
+        .row_highlight_style(hl_style())
+        .highlight_symbol("▎")
+        .block(block("Nodes (health / placement)"));
+    let mut st = TableState::default();
+    st.select(Some(app.selected));
+    f.render_stateful_widget(t, area, &mut st);
 }
 
 // ── Events (k8s + llm-d 이벤트) ─────────────────────────
