@@ -1468,9 +1468,12 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     let p = &app.snap.perf;
     let any = [p.e2e_p95, p.ttft_p95, p.tps, p.req_rate].iter().any(|x| !x.is_nan());
 
+    // 디바이스 패널 높이는 대수에 맞춰 가변(작은 클러스터는 컴팩트, 큰 건 상한). 상한 초과분은 "+N more".
+    let ndev = app.snap.accel.len().max(1) as u16;
+    let dev_h = (ndev + 2).clamp(6, 18);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(16), Constraint::Length(3), Constraint::Min(5)])
+        .constraints([Constraint::Length(dev_h), Constraint::Length(3), Constraint::Min(5)])
         .split(area);
 
     // 상단: 디바이스별 util/VRAM 시계열을 컴팩트 한 줄 스파크라인으로(바로 보이는 개요).
@@ -1499,6 +1502,13 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         sp.extend(spark_colored(&mh, spark_w, 100));
         sp.push(Span::styled(format!(" {:>3.0}%", memp), Style::default().fg(mem_color(memp))));
         dlines.push(Line::from(sp));
+    }
+    // 무언의 잘림 방지: 패널에 안 들어가면 마지막 줄을 "+N more" 로(전체는 Accel 탭).
+    let cap = (rows[0].height as usize).saturating_sub(2);
+    if dlines.len() > cap && cap > 0 {
+        let hidden = dlines.len() - (cap - 1);
+        dlines.truncate(cap - 1);
+        dlines.push(Line::from(Span::styled(format!("  … +{} more (see Accel tab)", hidden), Style::default().fg(C_DIM()))));
     }
     f.render_widget(Paragraph::new(dlines).block(block("Devices · util / VRAM over time (now on right)")), rows[0]);
 
