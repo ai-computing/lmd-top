@@ -327,7 +327,8 @@ fn tabs(f: &mut Frame, area: Rect, app: &App) {
         .map(|(i, v)| format!(" {}:{} ", i, v.title()).len() + 1)
         .sum();
     let compact = full_w > area.width as usize;
-    let mut spans: Vec<Span> = Vec::new();
+    // 앞머리 마커 — Tab/0-9 로 탭 전환됨을 명시(안 그러면 전환 방법이 안 보임).
+    let mut spans: Vec<Span> = vec![Span::styled("⇥ ", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD))];
     for (i, v) in View::ALL.iter().enumerate() {
         let sel = *v == app.view;
         let st = if sel {
@@ -396,6 +397,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     match v {
         Accel | Models | Overview | Pods | Nodes => parts.push("⏎ detail".into()),
         Perf => parts.push("⏎ p50/95/99".into()),
+        Routing => parts.push("⏎ model".into()),
         _ => {}
     }
     if matches!(v, Accel | Models | Overview | Pods | Launch | Epp | Events | Nodes) {
@@ -422,6 +424,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         parts.push("S restart".into());
     }
     // 전역
+    parts.push("⇥/0-9 view".into());
     parts.push("A alerts".into());
     parts.push("t theme".into());
     parts.push("z zoom".into());
@@ -1228,12 +1231,8 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             let mk = mkey.unwrap();
             let split = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(15), Constraint::Min(6)]).split(area);
             f.render_widget(pblk, split[0]);
-            let cols = if split[1].width >= 60 { 2 } else { 1 };
-            let nrows = present.len().div_ceil(cols).max(1);
-            let grows = Layout::default().direction(Direction::Vertical).constraints(vec![Constraint::Ratio(1, nrows as u32); nrows]).split(split[1]);
-            for (i, (s, label, unit)) in present.iter().enumerate() {
-                let cells = Layout::default().direction(Direction::Horizontal).constraints(vec![Constraint::Ratio(1, cols as u32); cols]).split(grows[i / cols]);
-                bar_timeline(f, cells[i % cols], app, &format!("{}:{}", mk, s), label, unit, None);
+            for (t, (s, label, unit)) in tile_rects(split[1], present.len(), 30).iter().zip(present.iter()) {
+                bar_timeline(f, *t, app, &format!("{}:{}", mk, s), label, unit, None);
             }
         }
         return;
@@ -1321,18 +1320,8 @@ fn perf_detail_view(f: &mut Frame, area: Rect, app: &App, d: &PerfDetail) {
             grid_area,
         );
     } else {
-        let cols = if grid_area.width >= 60 { 2 } else { 1 };
-        let nrows = present.len().div_ceil(cols).max(1);
-        let grows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(vec![Constraint::Ratio(1, nrows as u32); nrows])
-            .split(grid_area);
-        for (i, (s, label, unit)) in present.iter().enumerate() {
-            let cells = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(vec![Constraint::Ratio(1, cols as u32); cols])
-                .split(grows[i / cols]);
-            bar_timeline(f, cells[i % cols], app, &format!("{}:{}", mk, s), label, unit, None);
+        for (t, (s, label, unit)) in tile_rects(grid_area, present.len(), 30).iter().zip(present.iter()) {
+            bar_timeline(f, *t, app, &format!("{}:{}", mk, s), label, unit, None);
         }
     }
 
@@ -1370,7 +1359,8 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
     let raw = app.hist_for(key);
     let cur = raw.last().copied().unwrap_or(0);
     let dmax = raw.iter().copied().max().unwrap_or(0);
-    let ymax = ymax_opt.unwrap_or_else(|| nice_ceil((dmax as f64) * 1.1)).max(1.0);
+    // 자동 축: 피크가 높이의 ~80~90% 를 채우도록(살짝 헤드룸). 세밀 계단이라 과도한 여백 없음.
+    let ymax = ymax_opt.unwrap_or_else(|| nice_ceil((dmax as f64) * 1.05)).max(1.0);
     let cur_pct = (cur as f64 / ymax * 100.0).clamp(0.0, 100.0);
     let ttl = Line::from(vec![
         Span::styled(format!(" {} ", label), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
@@ -1433,14 +1423,16 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
     }
 }
 
-/// 1/2/5 ×10^n 로 올림(축 상한을 깔끔하게).
+/// "깔끔한" 축 상한으로 올림 — 세밀한 계단(1·1.5·2·2.5·3·4·5·6·8·10)으로 과도한 여백 방지.
+/// 1/2/5 만 쓰면 231→500 처럼 2배 넘게 튀어 그래프가 납작해짐. 세밀 계단은 231→250(피크 92%).
 fn nice_ceil(v: f64) -> f64 {
     if v <= 1.0 {
         return 1.0;
     }
     let mag = 10f64.powf(v.log10().floor());
     let n = v / mag;
-    let step = if n <= 1.0 { 1.0 } else if n <= 2.0 { 2.0 } else if n <= 5.0 { 5.0 } else { 10.0 };
+    const STEPS: [f64; 10] = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0];
+    let step = STEPS.iter().copied().find(|&s| n <= s + 1e-9).unwrap_or(10.0);
     step * mag
 }
 
@@ -1461,31 +1453,34 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Length(16), Constraint::Length(3), Constraint::Min(5)])
         .split(area);
 
-    // 실제 존재하는 것만 동적으로: 가속기 종류별(이름+수) util/mem + host cpu/mem
-    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    // 상단: 디바이스별 util/VRAM 시계열을 컴팩트 한 줄 스파크라인으로(바로 보이는 개요).
+    let inner_w = (rows[0].width as usize).saturating_sub(2);
+    // 라벨/값 고정폭(≈37) 제외한 나머지를 util·VRAM 스파크 두 개로 균등 분배.
+    let spark_w = (inner_w.saturating_sub(38) / 2).clamp(6, 30);
+    let mut dlines: Vec<Line> = Vec::new();
+    if app.snap.accel.is_empty() {
+        dlines.push(Line::from(Span::styled("(no accelerators)", Style::default().fg(C_DIM()))));
+    }
     for a in &app.snap.accel {
-        *counts.entry(a.kind.label()).or_default() += 1;
+        let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
+        let uh = app.hist_for(&format!("{}:util", k));
+        let mh = app.hist_for(&format!("{}:mem", k));
+        let memp = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
+        let (hg, hc) = if !a.alive { ("✗", C_BAD()) } else if a.throttle > 0.0 { ("⚠", C_WARN()) } else { ("●", C_OK()) };
+        let mut sp = vec![
+            Span::styled(format!("{} ", hg), Style::default().fg(hc)),
+            Span::styled(format!("{:<5}", a.disp()), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:<6} ", truncw(&a.id, 6)), Style::default().fg(C_DIM())),
+            Span::styled("util ", Style::default().fg(C_DIM())),
+        ];
+        sp.extend(spark_colored(&uh, spark_w, 100));
+        sp.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
+        sp.push(Span::styled(if a.unified_mem { "  m∪ " } else { "  vram " }, Style::default().fg(C_DIM())));
+        sp.extend(spark_colored(&mh, spark_w, 100));
+        sp.push(Span::styled(format!(" {:>3.0}%", memp), Style::default().fg(mem_color(memp))));
+        dlines.push(Line::from(sp));
     }
-    let mut charts: Vec<(String, String)> = Vec::new();
-    for (k, n) in &counts {
-        charts.push((format!("sys:{}_util", k), format!("{} util x{}", k, n)));
-        charts.push((format!("sys:{}_mem", k), format!("{} mem x{}", k, n)));
-    }
-    charts.push(("sys:cpu".to_string(), "CPU util (host)".to_string()));
-    charts.push(("sys:host_mem".to_string(), "host mem".to_string()));
-    let cols = if rows[0].width >= 100 { 3 } else { 2 };
-    let nrows = charts.len().div_ceil(cols).max(1);
-    let grid_rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(vec![Constraint::Ratio(1, nrows as u32); nrows])
-        .split(rows[0]);
-    for (i, (key, label)) in charts.iter().enumerate() {
-        let cells = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(vec![Constraint::Ratio(1, cols as u32); cols])
-            .split(grid_rows[i / cols]);
-        bar_timeline(f, cells[i % cols], app, key, label, "%", Some(100.0));
-    }
+    f.render_widget(Paragraph::new(dlines).block(block("Devices · util / VRAM over time (now on right)")), rows[0]);
 
     // throughput 숫자 + 데이터 없음 안내
     let tl = Line::from(vec![
@@ -1510,24 +1505,26 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     // per-model 성능(모델=하드웨어 배치별) + per-pod 큐
     let (bodyc_l, bodyc_r) = two_panes(rows[2], 72);
 
-    if app.snap.perf_rows.is_empty() {
+    let order = app.order(); // Perf: active(서빙 중) 모델만 + 정렬
+    if app.snap.perf_rows.is_empty() || order.is_empty() {
+        let msg = if app.snap.perf_rows.is_empty() {
+            "shows per model once EPP-path traffic + vLLM metrics are present."
+        } else {
+            "no active models right now — rows appear while a model is serving."
+        };
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled("no per-model perf data", Style::default().fg(C_DIM()))),
-                Line::from(Span::styled(
-                    "shows per model once EPP-path traffic + vLLM metrics are present.",
-                    Style::default().fg(C_DIM()),
-                )),
+                Line::from(Span::styled(msg, Style::default().fg(C_DIM()))),
             ])
             .block(block("Per-model perf (p95) · latency / tokens / throughput")),
             bodyc_l,
         );
     } else {
-        let mrows: Vec<Row> = app
-            .snap
-            .perf_rows
+        let mrows: Vec<Row> = order
             .iter()
-            .map(|r| {
+            .map(|&i| {
+                let r = &app.snap.perf_rows[i];
                 let preempt_cell = if r.preempt.is_nan() || r.preempt <= 0.0 {
                     Cell::from(Span::styled("·", Style::default().fg(C_DIM())))
                 } else {
@@ -1566,11 +1563,11 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         .column_spacing(1)
         .row_highlight_style(hl_style())
         .highlight_symbol("▎")
-        .block(block(&format!("Per-model perf (p95) · ⏎ p50/p95/p99 + histogram{}", count_suffix(app.selected, app.snap.perf_rows.len()))));
+        .block(block(&format!("Per-model perf · active · o sort:{} · ⏎ drill{}", app.sort_label(), count_suffix(app.selected, order.len()))));
         let mut st = TableState::default();
         st.select(Some(app.selected));
         f.render_stateful_widget(mt, bodyc_l, &mut st);
-        list_scrollbar(f, bodyc_l, app.snap.perf_rows.len(), app.selected, 1);
+        list_scrollbar(f, bodyc_l, order.len(), app.selected, 1);
     }
 
     // per-pod queue (요청 분배 — 절대 큐 깊이)

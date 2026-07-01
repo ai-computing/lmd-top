@@ -2,6 +2,14 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.15.0]
+### Changed — Perf 개요·정렬, 자연스러운 y축, 타일링
+- **Perf 상단**: 종류별 집계 타임라인 박스 → **디바이스별 컴팩트 한 줄** util/VRAM 컬러 스파크라인(오른쪽=now). 한눈에 장비별 추이.
+- **Per-model 표**: 지금 **서빙 중(active)** 모델만 표시 + **정렬**(o: tok/s·E2E·TTFT·queue·name). 표가 order() 경유로 정렬/선택 일치.
+- **y축 자동 스케일**: nice_ceil 계단을 세밀화(1·1.5·2·2.5·3·4·5·6·8·10)하고 헤드룸 축소 → 피크가 높이의 ~80~90% 를 채워 그래프가 납작하지 않음(특히 상세의 지연 타임라인).
+- **타일링 배치**: 타임라인 그리드(Perf 드릴/Model 상세)를 반응형 `tile_rects` 로 균형 배치.
+- **Tab 표시**: 탭 바 앞에 `⇥` 마커 + 푸터에 `⇥/0-9 view` 힌트(전환 방법 노출). Flow 의 Enter 는 `⏎ model`.
+
 ## [0.14.1]
 ### Fixed — Flow 에서 route Enter 시 네비게이션 잠김
 - Flow(Routing)엔 상세 패널이 없는데 Enter 가 detail=true 로 만들어 ↑↓ 가 스크롤로 빠지며 route 이동이 잠기던(멈춘 것처럼 보이던) 버그 수정.
