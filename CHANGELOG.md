@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.20.0]
+### Changed — 기본 테마를 soft(Catppuccin)로 승격
+- 거친 ANSI-16 대신 **soft(Catppuccin Mocha)를 기본 테마**로 — "기본 화면이 이쁘게". ANSI-16 원하면 `LMD_THEME=default` 또는 실행 중 `t` 로 즉시 복귀(무손실).
+
 ## [0.19.1]
 ### Added — 시작 테마 지정(LMD_THEME)
 - `LMD_THEME`(env) 또는 yaml `theme` 로 시작 테마 영구 지정 — 이름(soft/colorblind/high-contrast/default) 또는 번호(0~3). 예: `LMD_THEME=soft lmd-top`. soft 테마를 매번 `t` 안 누르고 기본으로 쓸 수 있음(기본값은 여전히 default라 무회귀).

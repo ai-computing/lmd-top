@@ -30,7 +30,8 @@ impl Default for Config {
                 .unwrap_or(def)
         };
         // 테마: 이름(soft/colorblind/high-contrast/default) 또는 번호(0~3) 허용.
-        let theme = match s("LMD_THEME", "theme", "default").to_lowercase().as_str() {
+        // 기본은 soft(Catppuccin) — 눈편함·미감. ANSI-16 원하면 LMD_THEME=default 또는 실행 중 `t`.
+        let theme = match s("LMD_THEME", "theme", "soft").to_lowercase().as_str() {
             "1" | "high-contrast" | "hc" => 1,
             "2" | "colorblind" | "cb" => 2,
             "3" | "soft" | "catppuccin" => 3,
