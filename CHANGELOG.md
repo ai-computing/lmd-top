@@ -3,7 +3,9 @@
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
 ## [Unreleased]
-- (다음) PD 뷰, EPP decision score table, events 통합, cache 뷰, ModelService 단위 — [ROADMAP.md](./ROADMAP.md)
+### Added
+- **Events 뷰(8)**: k8s + llm-d 이벤트 통합(Warning/Normal, reason/object/message/count, 최신순). MVP1.
+- (다음) PD 뷰, EPP decision score table, cache 뷰, ModelService 단위 — [ROADMAP.md](./ROADMAP.md)
 
 ## [0.2.0] — 2026-06-30
 llm-d serving 운영 콘솔로 확장. 8개 뷰 + 시각화/상호작용/런처.

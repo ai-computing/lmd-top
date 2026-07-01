@@ -103,6 +103,15 @@ pub struct ModelRow {
 }
 
 #[derive(Clone)]
+pub struct EventRow {
+    pub typ: String,    // Normal | Warning
+    pub reason: String,
+    pub object: String, // kind/name
+    pub message: String,
+    pub count: i64,
+}
+
+#[derive(Clone)]
 pub struct PodRow {
     pub name: String,
     pub phase: String,
@@ -126,6 +135,7 @@ pub struct Snapshot {
     pub pools: Vec<Pool>,
     pub models: Vec<ModelRow>,
     pub pods: Vec<PodRow>,
+    pub events: Vec<EventRow>,
     pub routes: Vec<Route>,
     pub objectives: Vec<Objective>,
     pub decisions: Vec<(String, f64)>, // (pod, 라우팅 픽 횟수) — 트래픽이 EPP 경유 시
@@ -690,6 +700,26 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
         Err(e) => warn.push(format!("kube pods: {}", e)),
     }
     snap.pods.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // events (최근순) — llm-d/k8s 이벤트 통합
+    if let Ok(v) = kube::get_json(&["get", "events", "-n", &cfg.ns, "--sort-by=.lastTimestamp", "-o", "json"]).await {
+        if let Some(items) = v["items"].as_array() {
+            for e in items.iter().rev().take(40) {
+                let obj = format!(
+                    "{}/{}",
+                    e["involvedObject"]["kind"].as_str().unwrap_or(""),
+                    e["involvedObject"]["name"].as_str().unwrap_or("")
+                );
+                snap.events.push(EventRow {
+                    typ: e["type"].as_str().unwrap_or("Normal").to_string(),
+                    reason: e["reason"].as_str().unwrap_or("").to_string(),
+                    object: obj,
+                    message: e["message"].as_str().unwrap_or("").to_string(),
+                    count: e["count"].as_i64().unwrap_or(1),
+                });
+            }
+        }
+    }
 
     // gateway
     if let Ok(v) = kube::get_json(&["get", "gateway", "-n", &cfg.ns, "-o", "json"]).await {

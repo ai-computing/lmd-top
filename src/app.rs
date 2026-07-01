@@ -28,10 +28,11 @@ pub enum View {
     Pods,
     Perf,
     Launch,
+    Events,
 }
 
 impl View {
-    pub const ALL: [View; 8] = [
+    pub const ALL: [View; 9] = [
         View::Overview,
         View::Accel,
         View::Models,
@@ -40,6 +41,7 @@ impl View {
         View::Pods,
         View::Perf,
         View::Launch,
+        View::Events,
     ];
     pub fn idx(&self) -> usize {
         View::ALL.iter().position(|v| v == self).unwrap_or(0)
@@ -54,6 +56,7 @@ impl View {
             View::Pods => "Pods",
             View::Perf => "Perf",
             View::Launch => "Launch",
+            View::Events => "Events",
         }
     }
 }
@@ -181,6 +184,7 @@ impl App {
             View::Pods => self.snap.pods.get(i).map(|p| format!("{} {}", p.name, p.node)).unwrap_or_default(),
             View::Launch => self.catalog.get(i).map(|m| format!("{} {}", m.id, m.display)).unwrap_or_default(),
             View::Epp => self.snap.epp.as_ref().and_then(|e| e.scorers.get(i)).map(|(n, _)| n.clone()).unwrap_or_default(),
+            View::Events => self.snap.events.get(i).map(|e| format!("{} {} {}", e.reason, e.object, e.message)).unwrap_or_default(),
             _ => String::new(),
         }
     }
@@ -347,6 +351,7 @@ impl App {
             }
             View::Launch => (0..self.catalog.len()).collect(),
             View::Epp => (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect(),
+            View::Events => (0..self.snap.events.len()).collect(),
             _ => Vec::new(),
         };
         if !self.filter.is_empty() {

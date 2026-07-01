@@ -81,6 +81,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             View::Pods => view_pods(f, body, app),
             View::Perf => view_perf(f, body, app),
             View::Launch => view_launch(f, body, app),
+            View::Events => view_events(f, body, app),
         }
     }
     footer(f, chunks[4], app);
@@ -107,7 +108,7 @@ fn help_overlay(f: &mut Frame) {
     let sec = |t: &str| Line::from(Span::styled(format!(" {}", t), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD)));
     let lines = vec![
         sec("navigation"),
-        g("0-7 / Tab", "switch view (Overview/Accel/Models/EPP/Topo/Pods/Perf/Launch)"),
+        g("0-8 / Tab", "view (Overview/Accel/Models/EPP/Topo/Pods/Perf/Launch/Events)"),
         g("up/dn j k", "select row (mouse scroll works too)"),
         g("Enter", "detail (drill-down)"),
         g("o", "cycle sort"),
@@ -1177,6 +1178,41 @@ fn view_launch(f: &mut Frame, area: Rect, app: &App) {
         pl.push(Line::from(Span::styled("← select a model", Style::default().fg(C_DIM()))));
     }
     f.render_widget(Paragraph::new(pl).block(block("placements × live inventory")), body[1]);
+}
+
+// ── Events (k8s + llm-d 이벤트) ─────────────────────────
+fn view_events(f: &mut Frame, area: Rect, app: &App) {
+    let order = app.order();
+    let rows: Vec<Row> = order
+        .iter()
+        .map(|&i| {
+            let e = &app.snap.events[i];
+            let tc = if e.typ == "Warning" { C_WARN() } else { C_DIM() };
+            Row::new(vec![
+                Cell::from(Span::styled(e.typ.clone(), Style::default().fg(tc))),
+                cellw(e.reason.clone(), 20),
+                cellw(e.object.clone(), 28),
+                cellw(if e.count > 1 { format!("x{}", e.count) } else { String::new() }, 5),
+                Cell::from(Span::styled(e.message.clone(), Style::default().fg(Color::White))),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(8),
+        Constraint::Length(20),
+        Constraint::Length(28),
+        Constraint::Length(5),
+        Constraint::Min(20),
+    ];
+    let t = Table::new(rows, widths)
+        .header(hrow(&["TYPE", "REASON", "OBJECT", "CNT", "MESSAGE"]))
+        .column_spacing(1)
+        .row_highlight_style(hl_style())
+        .highlight_symbol("▎")
+        .block(block("Events (k8s + llm-d, newest first)"));
+    let mut st = TableState::default();
+    st.select(Some(app.selected));
+    f.render_stateful_widget(t, area, &mut st);
 }
 
 // ── 진단 ───────────────────────────────────────────────
