@@ -8,6 +8,7 @@ mod catalog;
 mod collect;
 mod doctor;
 mod kube;
+mod metrics;
 mod prom;
 mod ui;
 
