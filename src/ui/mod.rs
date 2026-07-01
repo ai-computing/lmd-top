@@ -1303,30 +1303,28 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
         return;
     }
     let draw_h = inner.height as usize;
-    let denom = (draw_h as f64 - 1.0).max(1.0);
-    // 바(1칸) + 세로 edge(1칸) = 2칸/데이터. edge 는 각 바를 감싸는 얕은 경계선(│) → 바 구분.
-    const STEP: u16 = 2;
-    let n = ((inner.width + 1) / STEP) as usize;
-    let data: Vec<u64> = raw.iter().rev().take(n).rev().copied().collect();
+    // 컬럼당 데이터 1개(오른쪽 정렬, 인접). 최근 폭만큼.
+    let w = inner.width as usize;
+    let data: Vec<u64> = raw.iter().rev().take(w).rev().copied().collect();
+    // 가로 그리드라인: 10% 간격(y축 눈금). 값 높이를 눈금으로 읽음. 밝은 회색으로 보이게.
+    let gridrows: std::collections::HashSet<usize> =
+        (1..10).map(|k| k * draw_h / 10).filter(|&r| r > 0 && r < draw_h).collect();
     let buf = f.buffer_mut();
-    // 1) 모든 열에 어두운 세로 edge(│) 를 깔아 각 바를 감싸는 경계 확보(black 에 가까운 라인).
-    for lx in 0..inner.width {
-        for gy in 0..inner.height {
-            buf[(inner.x + lx, inner.y + gy)].set_char('│').set_fg(Color::Indexed(234));
-        }
-    }
-    // 2) 바 열(오른쪽 정렬, 2칸 간격)에 값까지 █(세로 레인보우) 채움 — edge 사이에 바가 들어앉음.
     for (ci, &v) in data.iter().enumerate() {
         let frac = (v as f64 / ymax).clamp(0.0, 1.0);
+        // 바 전체를 하나의 severity 색으로 — threshold 넘으면 색 전체가 바뀜(초록 여유→노랑→빨강 과도).
+        let bar_color = grad_color(frac * 100.0);
         let eighths_total = (frac * (draw_h as f64) * 8.0).round() as usize;
-        let x = inner.x + inner.width - 1 - ((data.len() - 1 - ci) as u16) * STEP;
+        let x = inner.x + inner.width - 1 - (data.len() - 1 - ci) as u16;
         for r in 0..draw_h {
             let filled = eighths_total.saturating_sub(r * 8).min(8);
             let y = inner.y + inner.height - 1 - r as u16;
-            if filled == 0 {
-                buf[(x, y)].set_char(' ').set_fg(C_TRACK()); // 바 열의 값 위쪽은 비움(edge 사이 공간)
+            if filled > 0 {
+                buf[(x, y)].set_char(LV[filled]).set_fg(bar_color);
+            } else if gridrows.contains(&r) {
+                buf[(x, y)].set_char('─').set_fg(Color::Indexed(238)); // 10% 가로 그리드라인
             } else {
-                buf[(x, y)].set_char(LV[filled]).set_fg(grad_color((r as f64 / denom) * 100.0));
+                buf[(x, y)].set_char(' ');
             }
         }
     }
