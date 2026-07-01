@@ -342,7 +342,7 @@ fn print_snapshot(s: &collect::Snapshot, cfg: &Config) {
     for a in &s.accel {
         println!(
             "  {:<5} {:<6} {:<16} util {:>5.1}%  mem {:.0}/{:.0}G  {:.0}°C {:.0}W  {}",
-            a.kind.label(),
+            a.disp(),
             a.id,
             a.node,
             a.util,

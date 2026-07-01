@@ -28,18 +28,34 @@ pub enum AccelKind {
     Rngd,
 }
 impl AccelKind {
+    /// 벤더 계열 라벨(fallback). GPU 는 모델이 다양하므로 generic "GPU" — 실제 모델은 Accel.model.
     pub fn label(&self) -> &'static str {
         match self {
-            AccelKind::Gpu => "A100",
+            AccelKind::Gpu => "GPU",
             AccelKind::Rbln => "RBLN",
             AccelKind::Rngd => "RNGD",
         }
     }
 }
 
+/// DCGM modelName("NVIDIA GB10", "NVIDIA A100-SXM4-40GB" 등) → 짧은 모델 토큰("GB10"/"A100").
+/// 벤더 접두 제거 후 첫 토큰(공백/'-' 기준). 빈 값이면 빈 문자열.
+fn gpu_model(raw: &str) -> String {
+    let s = raw.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    let s = s
+        .strip_prefix("NVIDIA ")
+        .or_else(|| s.strip_prefix("Nvidia "))
+        .unwrap_or(s);
+    s.split([' ', '-']).next().unwrap_or(s).to_string()
+}
+
 #[derive(Clone)]
 pub struct Accel {
     pub kind: AccelKind,
+    pub model: String,     // 실제 모델(예: GB10/A100/H100) — 메트릭 자동 감지, 없으면 ""
     pub id: String,        // rbln0 / npu0 / gpu0
     pub node: String,
     pub util: f64,         // 0..100
@@ -50,6 +66,12 @@ pub struct Accel {
     pub busy_model: String, // exported_pod 등
     pub alive: bool,        // furiosa_npu_alive / RBLN HEALTH
     pub throttle: f64,      // furiosa throttling events (>0 = 스로틀링)
+}
+impl Accel {
+    /// 표시용 계열/모델 라벨 — 감지된 모델이 있으면 그것, 없으면 벤더 라벨.
+    pub fn disp(&self) -> &str {
+        if self.model.is_empty() { self.kind.label() } else { self.model.as_str() }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -320,7 +342,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
     // 모든 프롬 쿼리 + kube nodes 를 동시 실행(순차 대비 대폭 단축)
     let (
         f_util, f_temp, f_pow, f_du, f_dt, f_alive, f_thr, r_util, r_temp, r_pow, r_du, r_dt, r_health, g_util,
-        g_mu, g_temp, g_pow, n_load, n_mt, n_ma, n_cpu, node_res,
+        g_mu, g_mt, g_temp, g_pow, n_load, n_mt, n_ma, n_cpu, node_res,
     ) = tokio::join!(
         prom::query(p, "avg by (uuid,device,hostname) (furiosa_npu_core_utilization)"),
         prom::query(p, "max by (uuid) (furiosa_npu_hw_temperature)"),
@@ -337,6 +359,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
         prom::query(p, "RBLN_DEVICE_STATUS:HEALTH"),
         prom::query(p, "DCGM_FI_DEV_GPU_UTIL"),
         prom::query(p, "DCGM_FI_DEV_FB_USED"),
+        prom::query(p, "DCGM_FI_DEV_FB_TOTAL"),
         prom::query(p, "DCGM_FI_DEV_GPU_TEMP"),
         prom::query(p, "DCGM_FI_DEV_POWER_USAGE"),
         prom::query(p, "node_load1"),
@@ -359,6 +382,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
         let uuid = s.l("uuid");
         accel.push(Accel {
             kind: AccelKind::Rngd,
+            model: String::new(), // 벤더 라벨(RNGD)로 충분
             id: s.l("device").to_string(),
             node: s.l("hostname").to_string(),
             util: norm_pct(s.value),
@@ -382,6 +406,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
         let uuid = s.l("uuid");
         accel.push(Accel {
             kind: AccelKind::Rbln,
+            model: String::new(), // 벤더 라벨(RBLN)로 충분
             id: s.l("name").to_string(),
             node: s.l("node").to_string(),
             util: norm_pct(s.value),
@@ -394,20 +419,24 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
             throttle: 0.0,
         });
     }
-    // NVIDIA DCGM
+    // NVIDIA DCGM — 모델명/총메모리는 하드코딩하지 않고 메트릭에서 자동 감지.
     let g_util = ok(g_util);
     let g_mu = map_by(ok(g_mu), "gpu");
+    let g_mt = map_by(ok(g_mt), "gpu");
     let g_temp = map_by(ok(g_temp), "gpu");
     let g_pow = map_by(ok(g_pow), "gpu");
     for s in &g_util {
         let gpu = s.l("gpu");
+        // 총 VRAM: DCGM_FI_DEV_FB_TOTAL(MiB) → GB. 없으면 0(표시 시 – 처리).
+        let mem_total_gb = g_mt.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0);
         accel.push(Accel {
             kind: AccelKind::Gpu,
+            model: gpu_model(s.l("modelName")), // "NVIDIA GB10" → "GB10"
             id: format!("gpu{}", gpu),
             node: s.l("Hostname").to_string(),
             util: norm_pct(s.value),
             mem_used_gb: g_mu.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
-            mem_total_gb: 80.0,
+            mem_total_gb,
             temp: g_temp.get(gpu).map(|x| x.value).unwrap_or(0.0),
             power: g_pow.get(gpu).map(|x| x.value).unwrap_or(0.0),
             busy_model: String::new(),
