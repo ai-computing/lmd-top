@@ -118,13 +118,29 @@ cargo build --release         # → target/release/lmd-top
 ## Usage
 
 ```bash
-lmd-top                       # launch the TUI
+lmd-top                       # launch the TUI (permission mode: observe)
+lmd-top --mode admin          # allow scale/rollout actions (see Permission modes)
 lmd-top --snapshot            # collect once, print text (headless / debug)   [alias: -s]
 lmd-top --render              # render every view to text via TestBackend (CI / verification)
 
 # point at a different cluster / namespace
 LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top
 ```
+
+### Permission modes
+
+Mutating actions are gated by a startup mode (`--mode observe|debug|admin|danger`,
+default `observe`), shown as a badge in the header. This prevents fat-finger accidents
+in a shared cluster.
+
+| Mode | Allows | Gated keys |
+|---|---|---|
+| **observe** *(default)* | view only | — |
+| **debug** | + logs / dry-run | `l` |
+| **admin** | + scale / rollout | `s` |
+| **danger** | + delete / force | *(future)* |
+
+Admin+ mutating actions (e.g. `s` scale) ask for a `y`/`n` confirmation before applying.
 
 ### Keybindings
 

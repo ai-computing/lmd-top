@@ -11,6 +11,48 @@ pub enum Sev {
     Bad,
 }
 
+/// 권한 모드(운영 사고 방지) — 선언 순서 = 권한 레벨(Observe < … < Danger).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Mode {
+    Observe, // 보기만
+    Debug,   // + logs / dry-run
+    Admin,   // + scale / rollout
+    Danger,  // + delete / force
+}
+impl Mode {
+    pub fn parse(s: &str) -> Option<Mode> {
+        match s.trim().to_lowercase().as_str() {
+            "observe" | "obs" | "ro" => Some(Mode::Observe),
+            "debug" | "dbg" => Some(Mode::Debug),
+            "admin" => Some(Mode::Admin),
+            "danger" => Some(Mode::Danger),
+            _ => None,
+        }
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Mode::Observe => "observe",
+            Mode::Debug => "debug",
+            Mode::Admin => "admin",
+            Mode::Danger => "danger",
+        }
+    }
+}
+
+/// 확인(y/n) 대기 중인 변경 작업. 실행은 이벤트 루프(main)에서.
+#[derive(Clone)]
+pub enum Pending {
+    Scale { name: String, target: i64 },
+}
+impl Pending {
+    /// 확인 프롬프트 문구.
+    pub fn prompt(&self) -> String {
+        match self {
+            Pending::Scale { name, target } => format!("scale {} → {} replica(s)?", name, target),
+        }
+    }
+}
+
 /// 임계치 초과/상태 이상 이벤트 하나. key=중복/엣지검출용 안정 식별자.
 #[derive(Clone)]
 pub struct Alert {
@@ -114,6 +156,9 @@ pub struct App {
     pub toast_until: u64,               // epoch초 — 토스트 만료
     pub toast_bad: bool,                // 토스트 배경색(빨강=심각)
     prev_restarts: HashMap<String, i64>, // pod 재시작 델타 추적
+    // ── 권한 모드 ──
+    pub mode: Mode,                 // observe(기본)/debug/admin/danger — 기동 시 --mode
+    pub confirm: Option<Pending>,   // y/n 확인 대기 중인 변경 작업
 }
 
 /// ~/.config/lmd-top/lmd-top.yaml 의 columns: {view: [col,...]} 로드. 없으면 빈 맵(=기본 전체).
@@ -171,7 +216,14 @@ impl App {
             toast_until: 0,
             toast_bad: false,
             prev_restarts: HashMap::new(),
+            mode: Mode::Observe,
+            confirm: None,
         }
+    }
+
+    /// 현재 모드가 required 이상 권한인가(변경 작업 게이트).
+    pub fn can(&self, required: Mode) -> bool {
+        self.mode >= required
     }
 
     /// 만료(toast_until)를 가진 토스트 알림 설정 — 액션 피드백/알림 공용.
