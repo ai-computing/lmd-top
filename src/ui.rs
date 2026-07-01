@@ -317,8 +317,8 @@ fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
     let p = &s.perf;
     let (mut busy, mut mu, mut mt, mut pw) = (0usize, 0.0f64, 0.0f64, 0.0f64);
     for a in &s.accel {
-        if a.util > 5.0 {
-            busy += 1;
+        if a.util > IDLE_UTIL {
+            busy += 1; // "busy" 기준을 LED/util_color 와 동일(IDLE_UTIL)하게 통일
         }
         mu += a.mem_used_gb;
         mt += a.mem_total_gb;
@@ -329,12 +329,14 @@ fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
     let total = s.models.len();
     let mempct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
     let err = p.err_rate;
-    // 서빙 건강 글리프: 0서빙=✗, 에러>0=⚠, 아니면 ●.
+    // 에러가 "의미있게" 있을 때만 경고: 비율(err/req) > 1% (또는 req 없는데 err 발생).
+    let err_bad = !err.is_nan() && err > 0.0 && (err / p.req_rate.max(err) > 0.01);
+    // 서빙 건강 글리프: 0서빙=✗, 유의미 에러=⚠, 아니면 ●.
     let (sg, sc) = if total == 0 {
         ("○", C_DIM())
     } else if serving == 0 {
         ("✗", C_BAD())
-    } else if !err.is_nan() && err > 0.0 {
+    } else if err_bad {
         ("⚠", C_WARN())
     } else {
         ("●", C_OK())
@@ -342,7 +344,7 @@ fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![
         Span::styled(format!("{} SERVING {}/{}  ", sg, serving, total), Style::default().fg(sc).add_modifier(Modifier::BOLD)),
         Span::styled(format!("req/s {}  ", rate(p.req_rate)), Style::default().fg(C_DIM())),
-        Span::styled(format!("err {}  ", rate(err)), Style::default().fg(if !err.is_nan() && err > 0.0 { C_BAD() } else { C_DIM() })),
+        Span::styled(format!("err {}  ", rate(err)), Style::default().fg(if err_bad { C_BAD() } else { C_DIM() })),
         Span::styled(format!("TTFT {}  ", ms(p.ttft_p95)), Style::default().fg(C_DIM())),
         Span::styled(format!("E2E {}  ", ms(p.e2e_p95)), Style::default().fg(C_DIM())),
         Span::raw("│ "),
@@ -455,7 +457,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         Pods => parts.push("i/m pivot".into()),
         Nodes => parts.push("i pivot".into()),
         Perf => parts.push("p/i/e pivot".into()),
-        Epp => parts.push("+/- what-if".into()),
+        Epp => parts.push("+/- weight".into()),
         _ => {}
     }
     if matches!(v, Pods | Models | Overview | Accel) {
@@ -994,10 +996,12 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                     ])
                 })
                 .collect();
+            // 정직한 문구: +/- 는 가중치를 조정하고 infl=상대 점유율(weight share)을 보여줄 뿐,
+            // 실제 라우팅 결정 재시뮬이 아님(그건 per-endpoint score 필요 → 인프라 대기).
             let title = if simulating {
-                format!("EPP scorers · +/- what-if (sim, not applied){}", count_suffix(app.selected, order.len()))
+                format!("EPP scorers · +/- weight (local, not applied) · infl=share{}", count_suffix(app.selected, order.len()))
             } else {
-                format!("EPP scorers · +/- what-if · select for desc{}", count_suffix(app.selected, order.len()))
+                format!("EPP scorers · +/- adjust weight · infl=weight share{}", count_suffix(app.selected, order.len()))
             };
             let t = Table::new(srows, [Constraint::Min(14), Constraint::Length(3), Constraint::Length(9), Constraint::Length(4)])
                 .header(hrow(&["SCORER", "WT", "WEIGHT", "infl"]))

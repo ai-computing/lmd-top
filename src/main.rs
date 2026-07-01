@@ -149,6 +149,13 @@ async fn run_tui(cfg: Config, mode: Mode) -> Result<()> {
 }
 
 fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String, prom: String, mode: Mode, rt: tokio::runtime::Handle) -> Result<()> {
+    // 패닉 시에도 터미널 복원(raw mode/alt-screen 해제) — 안 하면 셸이 망가짐.
+    let orig_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        orig_hook(info);
+    }));
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
