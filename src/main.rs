@@ -117,15 +117,34 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                     if k.kind != KeyEventKind::Press {
                         continue;
                     }
+                    // 필터 입력 모드: 텍스트 캡처
+                    if app.filtering {
+                        match k.code {
+                            KeyCode::Esc | KeyCode::Enter => app.stop_filter(),
+                            KeyCode::Backspace => app.filter_pop(),
+                            KeyCode::Char(c) => app.filter_push(c),
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    // 도움말 오버레이: 아무 키나 닫기
+                    if app.help {
+                        app.help = false;
+                        continue;
+                    }
                     match k.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Esc => {
                             if app.detail {
                                 app.detail = false;
+                            } else if !app.filter.is_empty() {
+                                app.clear_filter();
                             } else {
                                 break;
                             }
                         }
+                        KeyCode::Char('?') => app.toggle_help(),
+                        KeyCode::Char('/') => app.start_filter(),
                         KeyCode::Enter => app.toggle_detail(),
                         KeyCode::Char('o') => app.cycle_sort(),
                         KeyCode::Tab => app.next_tab(),

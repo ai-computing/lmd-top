@@ -5,7 +5,7 @@
 use crate::app::{App, View};
 use crate::collect::{AccelKind, Snapshot};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Sparkline, Table, TableState, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 // ── 팔레트 ─────────────────────────────────────────────
@@ -51,6 +51,68 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
     footer(f, chunks[4], app);
+    if app.help {
+        help_overlay(f);
+    }
+}
+
+fn centered(area: Rect, w: u16, h: u16) -> Rect {
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect { x, y, width: w.min(area.width), height: h.min(area.height) }
+}
+
+fn help_overlay(f: &mut Frame) {
+    let area = centered(f.area(), 62, 20);
+    f.render_widget(Clear, area);
+    let g = |k: &str, d: &str| {
+        Line::from(vec![
+            Span::styled(format!("  {:<10}", k), Style::default().fg(C_ACC).add_modifier(Modifier::BOLD)),
+            Span::styled(d.to_string(), Style::default().fg(Color::White)),
+        ])
+    };
+    let sec = |t: &str| Line::from(Span::styled(format!(" {}", t), Style::default().fg(C_HEAD).add_modifier(Modifier::BOLD)));
+    let lines = vec![
+        sec("navigation"),
+        g("0–6 / Tab", "뷰 전환 (Overview/Accel/Models/EPP/Topo/Pods/Perf)"),
+        g("↑↓ / j k", "행 선택"),
+        g("⏎", "선택 항목 상세(drill-down)"),
+        g("o", "정렬 순환"),
+        g("/", "필터 (부분일치)"),
+        g("s", "선택 모델 scale up/down"),
+        g("? / Esc", "도움말 / 닫기·뒤로   q 종료"),
+        Line::from(""),
+        sec("color / glyph"),
+        Line::from(vec![
+            Span::styled("  ● ", Style::default().fg(C_OK)), Span::styled("up  ", Style::default().fg(C_DIM)),
+            Span::styled("○ ", Style::default().fg(C_DIM)), Span::styled("idle  ", Style::default().fg(C_DIM)),
+            Span::styled("◐ ", Style::default().fg(C_WARN)), Span::styled("pending  ", Style::default().fg(C_DIM)),
+            Span::styled("⚠ ", Style::default().fg(C_WARN)), Span::styled("throttle  ", Style::default().fg(C_DIM)),
+            Span::styled("✗ ", Style::default().fg(C_BAD)), Span::styled("down", Style::default().fg(C_DIM)),
+        ]),
+        Line::from(vec![
+            Span::styled("  util/mem/temp: ", Style::default().fg(C_DIM)),
+            Span::styled("낮음", Style::default().fg(C_OK)), Span::raw(" "),
+            Span::styled("중간", Style::default().fg(C_WARN)), Span::raw(" "),
+            Span::styled("높음", Style::default().fg(C_BAD)),
+        ]),
+        Line::from(vec![
+            Span::styled("  vendor: ", Style::default().fg(C_DIM)),
+            Span::styled("GPU ", Style::default().fg(Color::Green)),
+            Span::styled("RBLN ", Style::default().fg(Color::Magenta)),
+            Span::styled("RNGD", Style::default().fg(Color::Cyan)),
+        ]),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(C_ACC))
+                .title(Span::styled(" lmd-top · 도움말 (아무 키나 닫기) ", Style::default().fg(C_ACC).add_modifier(Modifier::BOLD))),
+        ),
+        area,
+    );
 }
 
 // ── 헤더 ───────────────────────────────────────────────
@@ -123,6 +185,19 @@ fn tabs(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn footer(f: &mut Frame, area: Rect, app: &App) {
+    // 필터 입력 모드
+    if app.filtering {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" / ", Style::default().fg(Color::Black).bg(C_ACC).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {}", app.filter), Style::default().fg(Color::White)),
+                Span::styled("▏", Style::default().fg(C_ACC)),
+                Span::styled("   Enter/Esc 확정", Style::default().fg(C_DIM)),
+            ])),
+            area,
+        );
+        return;
+    }
     if let Some(t) = &app.toast {
         let msg = truncw(t, area.width.saturating_sub(1) as usize);
         f.render_widget(
@@ -131,16 +206,19 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         );
         return;
     }
+    let mut spans: Vec<Span> = Vec::new();
+    if !app.filter.is_empty() {
+        spans.push(Span::styled(format!("[filter: {}] ", app.filter), Style::default().fg(Color::Black).bg(C_ACC)));
+        spans.push(Span::raw(" "));
+    }
     let sortable = app.sort_modes() > 1;
-    let mut hint = String::from("↑↓ sel  ⏎ detail  ");
+    let mut hint = String::from("↑↓ sel  ⏎ detail  / filter  ");
     if sortable {
         hint.push_str(&format!("o sort:{}  ", app.sort_label()));
     }
-    hint.push_str("s scale  Tab/0-6 view  q quit");
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(truncw(&hint, area.width as usize), Style::default().fg(C_DIM)))),
-        area,
-    );
+    hint.push_str("s scale  Tab/0-6 view  ? help  q quit");
+    spans.push(Span::styled(hint, Style::default().fg(C_DIM)));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ── helpers ────────────────────────────────────────────

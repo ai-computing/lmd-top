@@ -51,6 +51,9 @@ pub struct App {
     pub detail: bool,  // 선택 행 상세(drill-down) 표시 여부
     pub sort: usize,   // 현재 뷰의 정렬 모드(뷰별로 의미 다름, 순환)
     pub tick: u64,     // 렌더 틱(마퀴/스피너 애니메이션용)
+    pub filter: String,   // 행 필터(부분일치)
+    pub filtering: bool,  // 필터 입력 모드
+    pub help: bool,       // 도움말/범례 오버레이
 }
 
 impl App {
@@ -64,6 +67,47 @@ impl App {
             detail: false,
             sort: 0,
             tick: 0,
+            filter: String::new(),
+            filtering: false,
+            help: false,
+        }
+    }
+
+    pub fn toggle_help(&mut self) {
+        self.help = !self.help;
+    }
+    pub fn start_filter(&mut self) {
+        self.filtering = true;
+    }
+    pub fn stop_filter(&mut self) {
+        self.filtering = false;
+    }
+    pub fn filter_push(&mut self, c: char) {
+        self.filter.push(c);
+        self.selected = 0;
+    }
+    pub fn filter_pop(&mut self) {
+        self.filter.pop();
+        self.selected = 0;
+    }
+    pub fn clear_filter(&mut self) {
+        self.filter.clear();
+        self.filtering = false;
+        self.selected = 0;
+    }
+
+    /// 인덱스 i 의 검색 대상 문자열(뷰별).
+    fn search_text(&self, i: usize) -> String {
+        match self.view {
+            View::Accel => self
+                .snap
+                .accel
+                .get(i)
+                .map(|a| format!("{} {} {} {}", a.kind.label(), a.id, a.node, a.busy_model))
+                .unwrap_or_default(),
+            View::Models | View::Overview => self.snap.models.get(i).map(|m| format!("{} {}", m.name, m.accel)).unwrap_or_default(),
+            View::Pods => self.snap.pods.get(i).map(|p| format!("{} {}", p.name, p.node)).unwrap_or_default(),
+            _ => String::new(),
         }
     }
 
@@ -168,14 +212,9 @@ impl App {
         self.set_view_idx((self.view.idx() + 1) % View::ALL.len());
     }
 
-    /// 현재 뷰에서 선택 가능한 행 수.
+    /// 현재 뷰에서 선택 가능한 행 수(필터 반영).
     pub fn list_len(&self) -> usize {
-        match self.view {
-            View::Models | View::Overview => self.snap.models.len(),
-            View::Pods => self.snap.pods.len(),
-            View::Accel => self.snap.accel.len(),
-            _ => 0,
-        }
+        self.order().len()
     }
 
     pub fn move_sel(&mut self, delta: i64) {
@@ -191,7 +230,7 @@ impl App {
     pub fn order(&self) -> Vec<usize> {
         use crate::collect::{Accel, ModelRow, PodRow};
         use std::cmp::Ordering::Equal;
-        match self.view {
+        let mut idx = match self.view {
             View::Accel => {
                 let v = &self.snap.accel;
                 let mut idx: Vec<usize> = (0..v.len()).collect();
@@ -233,7 +272,12 @@ impl App {
                 idx
             }
             _ => Vec::new(),
+        };
+        if !self.filter.is_empty() {
+            let fl = self.filter.to_lowercase();
+            idx.retain(|&i| self.search_text(i).to_lowercase().contains(&fl));
         }
+        idx
     }
 
     /// 표시 순서상 selected 위치 → 원본 인덱스.

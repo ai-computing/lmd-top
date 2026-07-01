@@ -114,6 +114,8 @@ LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top
 | `Tab` | 다음 뷰 |
 | `↑`/`↓` (또는 `k`/`j`) | 행 선택 |
 | `Enter` | 선택 항목 **상세(drill-down)** — 가속기/모델/파드 |
+| `/` | **필터** (이름 부분일치) — 입력 후 Enter/Esc |
+| `?` | **도움말/색 범례** 오버레이 |
 | `o` | **정렬** 순환 (Accel: util/temp/mem/name · Models: name/status/ready · Pods: name/phase/restarts) |
 | `s` | 선택 모델 scale (desired 0↔1 토글) |
 | `Esc` | 상세 닫기 / (상세 아닐 때) 종료 |
