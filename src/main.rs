@@ -6,6 +6,7 @@ mod agent;
 mod app;
 mod catalog;
 mod collect;
+mod config;
 mod doctor;
 mod kube;
 mod metrics;
@@ -14,7 +15,8 @@ mod ui;
 
 use anyhow::Result;
 use app::{App, Mode, Pending, View};
-use collect::{collect, Config};
+use collect::collect;
+use config::Config;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
     event::{
@@ -107,7 +109,7 @@ async fn run_tui(cfg: Config, mode: Mode) -> Result<()> {
         let shared = shared.clone();
         let cfg = cfg.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(3));
+            let mut tick = tokio::time::interval(Duration::from_secs(cfg.interval_full));
             tick.tick().await;
             loop {
                 tick.tick().await;
@@ -123,7 +125,7 @@ async fn run_tui(cfg: Config, mode: Mode) -> Result<()> {
         let shared = shared.clone();
         let cfg = cfg.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            let mut tick = tokio::time::interval(Duration::from_secs(cfg.interval_fast));
             tick.tick().await;
             loop {
                 tick.tick().await;
@@ -142,14 +144,14 @@ async fn run_tui(cfg: Config, mode: Mode) -> Result<()> {
     }
 
     // UI 루프(블로킹)
-    let ns = cfg.ns.clone();
-    let prom = cfg.prom.clone();
     let rt = tokio::runtime::Handle::current(); // Perf 드릴 온디맨드 조회용
-    let res = tokio::task::spawn_blocking(move || ui_loop(shared, ns, prom, mode, rt)).await?;
+    let res = tokio::task::spawn_blocking(move || ui_loop(shared, cfg, mode, rt)).await?;
     res
 }
 
-fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String, prom: String, mode: Mode, rt: tokio::runtime::Handle) -> Result<()> {
+fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: tokio::runtime::Handle) -> Result<()> {
+    let ns = cfg.ns.clone();
+    let prom = cfg.prom.clone();
     // 패닉 시에도 터미널 복원(raw mode/alt-screen 해제) — 안 하면 셸이 망가짐.
     let orig_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -278,8 +280,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String, prom: String, mode
                         KeyCode::Char('z') => app.zoom = !app.zoom,
                         KeyCode::Char(' ') => app.paused = !app.paused,
                         KeyCode::Char('g') => {
-                            let base = std::env::var("LMD_GRAFANA")
-                                .unwrap_or_else(|_| "http://192.0.2.5:30300".to_string());
+                            let base = cfg.grafana.clone();
                             // best-effort 브라우저 오픈 — stdio를 null로(터미널 화면 깨짐 방지)
                             let _ = std::process::Command::new("xdg-open")
                                 .arg(&base)

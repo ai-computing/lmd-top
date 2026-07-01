@@ -3,7 +3,8 @@
 //! 내부 Snapshot 과 분리된 스키마 → 내부 리팩터가 계약을 깨지 않음. schema 버전으로 관리.
 
 use crate::app::{diagnose, snapshot_alerts, Sev};
-use crate::collect::{Config, Snapshot};
+use crate::collect::Snapshot;
+use crate::config::Config;
 use serde::Serialize;
 
 /// NaN → null(None) 로 정규화(agent 가 "값 없음"을 명확히 구분).

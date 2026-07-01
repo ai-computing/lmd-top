@@ -41,17 +41,12 @@ pub const VLLM_REQ_SUCCESS: &str = "vllm:request_success_total";
 pub const VLLM_GEN_TOKENS: &str = "vllm:generation_tokens_total";
 pub const VLLM_TTFT_BUCKET: &str = "vllm:time_to_first_token_seconds_bucket";
 pub const VLLM_E2E_BUCKET: &str = "vllm:e2e_request_latency_seconds_bucket";
-pub const VLLM_TPOT_BUCKET: &str = "vllm:request_time_per_output_token_seconds_bucket";
 pub const VLLM_QUEUE_BUCKET: &str = "vllm:request_queue_time_seconds_bucket";
 pub const VLLM_PREFILL_BUCKET: &str = "vllm:request_prefill_time_seconds_bucket";
 pub const VLLM_DECODE_BUCKET: &str = "vllm:request_decode_time_seconds_bucket";
-pub const VLLM_PROMPT_TOK_BUCKET: &str = "vllm:request_prompt_tokens_bucket";
-pub const VLLM_GEN_TOK_BUCKET: &str = "vllm:request_generation_tokens_bucket";
 pub const VLLM_RUNNING: &str = "vllm:num_requests_running";
 pub const VLLM_WAITING: &str = "vllm:num_requests_waiting";
 pub const VLLM_KV: &str = "vllm:kv_cache_usage_perc";
-pub const VLLM_PREFIX_HITS: &str = "vllm:prefix_cache_hits_total";
-pub const VLLM_PREFIX_QUERIES: &str = "vllm:prefix_cache_queries_total";
 pub const VLLM_PREEMPT: &str = "vllm:num_preemptions_total";
 
 // ── EPP / InferencePool ──────────────────────────────
@@ -63,11 +58,6 @@ pub const POOL_SAT: &str = "inference_extension_flow_control_pool_saturation";
 pub const SCHED_ATTEMPTS: &str = "inference_extension_scheduler_attempts_total";
 pub const PREFIX_IDX: &str = "inference_extension_prefix_indexer_size";
 
-// ── ds4 커스텀 프록시(비-vLLM 엔진 어댑터) ──────────
-pub const DS4_REQ: &str = "ds4_proxy_requests_total";
-pub const DS4_OUT_TOK: &str = "ds4_proxy_output_tokens_total";
-pub const DS4_TTFT_BUCKET: &str = "ds4_proxy_ttft_seconds_bucket";
-pub const DS4_DUR_BUCKET: &str = "ds4_proxy_request_duration_seconds_bucket";
 
 /// doctor 커버리지 대상: (family, metric, 부재 시 영향). collect 가 읽는 메트릭과 동일 상수.
 pub const DEPS: &[(&str, &str, &str)] = &[

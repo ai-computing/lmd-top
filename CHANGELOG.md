@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.9.1]
+### Changed — 리팩토링 R5: 튜닝값 config 외부화
+- 흩어져 하드코딩되던 튜닝값을 **`config.rs` 단일 모듈**로: prom/ns/grafana/수집주기(full·fast). 우선순위 **env > `~/.config/lmd-top/lmd-top.yaml` > 기본값**. main.rs 의 하드코딩 인터벌·Grafana URL 제거, `ui_loop` 는 `Config` 를 받음. `Config` 를 collect→config 로 이관, columns 로더도 `config::load_yaml` 재사용.
+
 ## [0.9.0]
 ### Changed — 리팩토링 R2: 메트릭 이름 단일 출처
 - 모든 프로메테우스 메트릭 이름을 **`metrics.rs` 단일 출처**로 모음(그룹별 `pub const` + doctor 커버리지 `DEPS`). `collect.rs`와 `doctor.rs`가 같은 상수를 참조 → 이름 drift 불가, 메트릭 추가는 한 곳만 수정. collect 의 bare 이름 21개를 상수로 치환. (동작 보존: doctor 33/40 동일, 테스트 통과.)

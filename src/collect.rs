@@ -1,26 +1,11 @@
 //! Snapshot 도메인 타입 + prometheus/kubectl 에서 수집하는 로직.
 //! 각 소스는 독립적으로 실패해도 전체를 막지 않음(warnings 에 누적, 부재 필드는 None/빈값).
 
+use crate::config::Config;
 use crate::kube;
 use crate::metrics;
 use crate::prom::{self, Series};
 use std::collections::BTreeMap;
-
-#[derive(Clone)]
-pub struct Config {
-    pub prom: String,
-    pub ns: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            prom: std::env::var("LMD_PROM")
-                .unwrap_or_else(|_| "192.0.2.5:30090".to_string()),
-            ns: std::env::var("LMD_NS").unwrap_or_else(|_| "llm-serving".to_string()),
-        }
-    }
-}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum AccelKind {
