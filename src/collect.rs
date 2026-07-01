@@ -502,8 +502,8 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         qs1(pp, "sum(rate(vllm:request_success_total{finished_reason=\"abort\"}[1m]))"),
         qs1(pp, "sum(rate(vllm:generation_tokens_total[1m]))"),
         qs1(pp, "sum(rate(vllm:prefix_cache_hits_total[5m])) / sum(rate(vllm:prefix_cache_queries_total[5m]))"),
-        qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(vllm:time_to_first_token_seconds_bucket[5m])))"),
-        qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(vllm:e2e_request_latency_seconds_bucket[5m])))"),
+        qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(vllm:time_to_first_token_seconds_bucket[1m])))"),
+        qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(vllm:e2e_request_latency_seconds_bucket[1m])))"),
     );
     snap.perf = Perf { req_rate, err_rate, tps, prefix_hit, ttft_p95, e2e_p95 };
 
@@ -521,11 +521,11 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     }
     merge!("sum by (model_name)(rate(vllm:request_success_total[1m]))", req);
     merge!("sum by (model_name)(rate(vllm:generation_tokens_total[1m]))", tps);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:time_to_first_token_seconds_bucket[5m])))", ttft_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_time_per_output_token_seconds_bucket[5m])))", tpot_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:e2e_request_latency_seconds_bucket[5m])))", e2e_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_prompt_tokens_bucket[5m])))", in_tok_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_generation_tokens_bucket[5m])))", out_tok_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:time_to_first_token_seconds_bucket[1m])))", ttft_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_time_per_output_token_seconds_bucket[1m])))", tpot_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:e2e_request_latency_seconds_bucket[1m])))", e2e_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_prompt_tokens_bucket[1m])))", in_tok_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_generation_tokens_bucket[1m])))", out_tok_p95);
     snap.perf_rows = pm.into_values().collect();
 
     for s in &p_ready {
@@ -553,7 +553,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         ttft: map_by(
             q(
                 cfg,
-                "histogram_quantile(0.95, sum by (service,le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))",
+                "histogram_quantile(0.95, sum by (service,le) (rate(vllm:time_to_first_token_seconds_bucket[1m])))",
                 &mut warn,
             )
             .await,
