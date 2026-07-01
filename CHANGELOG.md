@@ -9,9 +9,13 @@
 - **Entity drill-down timeline**: 가속기/노드 선택→⏎ → 그 대상의 다중 지표 타임라인(가속기 util/mem/temp · 노드 cpu/mem/load 스파크라인).
 - summary/diagnosis 에 Warning 이벤트 반영.
 
+- **추론 엔진 표시**: Models 뷰/상세에 ENGINE 컬럼(vLLM/SGLang/vLLM-RBLN/Ollama/Furiosa/custom, deploy command 감지).
+- **그래프 개선(all-smi식)**: 타임라인을 축 라벨(X=시간 -Ns~now, Y=값+단위) + 현재/최대값 제목 표기하는 라인차트로. 드릴다운(가속기/노드 ⏎)은 util/mem/temp·cpu/mem/load 각각 라인차트. Perf 메인 타임라인 확대.
+
 ### Changed
-- **성능(경량화)**: 가속기+노드는 fast tier(collect_fast) 1초 갱신, 무거운 나머지는 full collect 3초. util/mem 반응성↑.
+- **성능(경량화)**: 가속기+노드 fast tier(collect_fast, tokio::join! 병렬) 1초 + full collect 3초. Perf 전역쿼리 병렬+축소(15→6). util/mem 반응성↑.
 - **라벨 명확화**: Accel UTIL=compute%, MEM=VRAM. Perf timeline=accel util%/VRAM%(cluster avg). Node=host CPU/mem.
+- Prometheus는 HTTP 전용 → 최적화는 병렬/쿼리수 축소(별도 경량 프로토콜 없음).
 - (다음) PD 뷰, EPP decision score table, cache 뷰, ModelService 단위 — [ROADMAP.md](./ROADMAP.md)
 
 ## [0.2.0] — 2026-06-30

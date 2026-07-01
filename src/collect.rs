@@ -99,6 +99,7 @@ pub struct ModelRow {
     pub desired: i64,
     pub status: String,
     pub route: String,
+    pub engine: String, // 추론 엔진(vLLM/SGLang/vLLM-RBLN/Ollama/Furiosa/custom)
     pub accel: String, // 어떤 가속기/노드에서 도는지(파드 노드/가속기 추정)
     pub running: Option<f64>,
     pub waiting: Option<f64>,
@@ -241,6 +242,38 @@ struct Vllm {
     tps: BTreeMap<String, Series>,
     kv: BTreeMap<String, Series>,
     ttft: BTreeMap<String, Series>,
+}
+
+/// deploy 컨테이너 command/args/image 로 추론 엔진 추정.
+fn detect_engine(d: &serde_json::Value, accel: &str) -> String {
+    let c = &d["spec"]["template"]["spec"]["containers"][0];
+    let mut t = String::new();
+    for key in ["command", "args"] {
+        if let Some(arr) = c[key].as_array() {
+            for x in arr {
+                if let Some(s) = x.as_str() {
+                    t.push_str(s);
+                    t.push(' ');
+                }
+            }
+        }
+    }
+    let t = t.to_lowercase();
+    let img = c["image"].as_str().unwrap_or("").to_lowercase();
+    let rbln = accel.contains("RBLN") || t.contains("rbln");
+    if t.contains("sglang") {
+        "SGLang".into()
+    } else if t.contains("vllm") {
+        if rbln { "vLLM-RBLN".into() } else { "vLLM".into() }
+    } else if t.contains("ollama") || img.contains("ollama") {
+        "Ollama".into()
+    } else if t.contains("furiosa") {
+        "Furiosa-LLM".into()
+    } else if rbln {
+        "custom(RBLN)".into()
+    } else {
+        "custom".into()
+    }
 }
 
 /// 모델 deploy 가 어느 가속기/노드에서 도는지 추정(가속기 busy_model 라벨이 파드명 ⊇ deploy명).
@@ -706,8 +739,10 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                     // vllm 메트릭 fuzzy 매칭 (model_name ⊃/⊂ deploy 토큰)
                     let mn = match_model(name.as_str(), &vllm.run);
                     let accel = accel_for(&snap.accel, &name);
+                    let engine = detect_engine(d, &accel);
                     snap.models.push(ModelRow {
                         route: route_for(&name),
+                        engine,
                         accel,
                         running: mn.as_ref().and_then(|k| vllm.run.get(k)).map(|x| x.value),
                         waiting: mn.as_ref().and_then(|k| vllm.wait.get(k)).map(|x| x.value),
