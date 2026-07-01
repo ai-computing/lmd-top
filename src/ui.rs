@@ -806,23 +806,41 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         format!("llm-d-gateway  {}  {}", s.gw_addr, if s.gw_ok { "●Programmed" } else { "○" })
     };
     lines.push(Line::from(Span::styled(gw, Style::default().fg(C_OK()).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(vec![
+        Span::styled("└─ ", Style::default().fg(C_DIM())),
+        Span::styled("HTTPRoute ", Style::default().fg(C_DIM())),
+        Span::styled("openai-route", Style::default().fg(Color::White)),
+    ]));
+    let n = s.routes.len();
     for (i, r) in s.routes.iter().enumerate() {
-        let branch = if i + 1 == s.routes.len() { "└─" } else { "├─" };
+        let last = i + 1 == n;
+        let rbr = if last { "   └─ " } else { "   ├─ " };
         let m = s.models.iter().find(|m| m.name == r.backend);
         let up = m.map(|m| m.ready > 0).unwrap_or(false);
         let annot = match m {
-            Some(m) => format!("{}/{}  {}", m.ready, m.desired, m.accel),
+            Some(m) => format!("{}/{} {} [{}]", m.ready, m.desired, m.accel, m.engine),
             None => "?".into(),
         };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", branch), Style::default().fg(C_DIM())),
+            Span::styled(rbr, Style::default().fg(C_DIM())),
             dot(up),
-            Span::styled(format!("{:<10}", truncw(&r.path, 10)), Style::default().fg(Color::White)),
+            Span::styled(format!("{:<9}", truncw(&r.path, 9)), Style::default().fg(Color::White)),
             Span::styled("→ ", Style::default().fg(C_DIM())),
-            Span::styled(format!("{}:", r.kind), Style::default().fg(C_DIM())),
-            Span::styled(format!("{:<24}", truncw(&r.backend, 24)), Style::default().fg(if up { C_OK() } else { C_DIM() })),
+            Span::styled(format!("{}:{}  ", r.kind, truncw(&r.backend, 22)), Style::default().fg(if up { C_OK() } else { C_DIM() })),
             Span::styled(annot, Style::default().fg(C_DIM())),
         ]));
+        // 하위: 이 backend 의 파드들(트리 자식)
+        let cont = if last { "      " } else { "   │  " };
+        let pods: Vec<&crate::collect::PodRow> = s.pods.iter().filter(|p| p.name.starts_with(&r.backend)).collect();
+        for (j, p) in pods.iter().enumerate() {
+            let pbr = if j + 1 == pods.len() { "└─ " } else { "├─ " };
+            let pc = if p.phase == "Running" { C_OK() } else { C_DIM() };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}{}", cont, pbr), Style::default().fg(C_TRACK())),
+                Span::styled(format!("{} ", truncw(&p.name, 32)), Style::default().fg(Color::Gray)),
+                Span::styled(format!("{} @{}", p.phase, p.node), Style::default().fg(pc)),
+            ]));
+        }
     }
     // EPP 경유 여부 진단
     if !s.routes.is_empty() {
