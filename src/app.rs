@@ -183,14 +183,9 @@ pub struct App {
 
 /// ~/.config/lmd-top/lmd-top.yaml 의 columns: {view: [col,...]} 로드. 없으면 빈 맵(=기본 전체).
 fn load_columns() -> HashMap<String, Vec<String>> {
-    let path = std::env::var("HOME").map(|h| format!("{}/.config/lmd-top/lmd-top.yaml", h)).unwrap_or_default();
-    let txt = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(_) => return HashMap::new(),
-    };
-    let v: serde_yaml::Value = match serde_yaml::from_str(&txt) {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
+    let v = match crate::config::load_yaml() {
+        Some(v) => v,
+        None => return HashMap::new(),
     };
     let mut out = HashMap::new();
     if let Some(m) = v.get("columns").and_then(|c| c.as_mapping()) {
@@ -769,7 +764,6 @@ impl App {
             View::Nodes => (0..self.snap.nodes.len()).collect(),
             View::Perf => (0..self.snap.perf_rows.len()).collect(),
             View::Routing => (0..self.snap.routes.len()).collect(),
-            _ => Vec::new(),
         };
         if !self.filter.is_empty() {
             let fl = self.filter.to_lowercase();

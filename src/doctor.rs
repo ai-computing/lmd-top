@@ -2,7 +2,7 @@
 //! (1) 감지된 exporter(job) (2) lmd-top 이 읽는 메트릭의 존재/부재 + 부재 시 영향
 //! (3) 미사용 가속기 메트릭(=새 신호 후보). "왜 이 뷰가 비었나"를 한 번에 진단.
 
-use crate::collect::Config;
+use crate::config::Config;
 use crate::metrics::{ACCEL_PREFIXES, DEPS};
 use crate::prom;
 use std::collections::BTreeSet;
