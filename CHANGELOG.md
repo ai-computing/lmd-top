@@ -2,6 +2,11 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.7.0]
+### Added — `--doctor` metric survey (자동 전수조사)
+- **`lmd-top --doctor`**: Prometheus 메트릭을 전수조사해 (1) 감지된 exporter(job), (2) lmd-top 이 읽는 40개 메트릭의 **존재/부재 + 부재 시 영향**(예: `FB_TOTAL` 없음 → unified-mem 은 host 로 fallback / EPP 메트릭 없음 → EPP 뷰 빔), (3) **미사용 가속기 메트릭(=새 신호 후보)** 을 자동 리포트. "왜 이 뷰가 비었나"·"이 클러스터에 새 메트릭이 있나"를 한 번에 진단(수동 PromQL 조사 불필요).
+- `prom::label_values`(`/api/v1/label/<l>/values`) 추가 — 메트릭 이름·job 목록 조회.
+
 ## [0.6.4]
 ### Added — GB10 exporter labels (accel↔model correlation)
 - GB10 전용 `dcgm-exporter-gb10` 가 붙이는 **`exported_pod` 라벨**을 GPU `busy_model` 로 반영(기존 GPU 는 항상 빈 값이었음). → GPU 카드가 점유 모델서버 파드를 표시하고, **모델↔가속기 매칭(Models ACCEL 열)** · Accel 뷰 로그(`l`) 가 GB10 에서도 동작.
