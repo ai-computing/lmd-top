@@ -313,15 +313,19 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
                 format!(" {:.0}/{:.0}G", a.mem_used_gb, a.mem_total_gb),
                 Style::default().fg(C_DIM),
             ));
-            let kc = if !a.alive {
-                C_BAD
+            let (hg, hc) = if !a.alive {
+                ("✗", C_BAD)
             } else if a.throttle > 0.0 {
-                C_WARN
+                ("⚠", C_WARN)
             } else {
-                kind_color(a.kind)
+                ("●", C_OK)
             };
             Row::new(vec![
-                Cell::from(Span::styled(a.kind.label(), Style::default().fg(kc).add_modifier(Modifier::BOLD))),
+                Cell::from(Line::from(vec![
+                    Span::styled(hg, Style::default().fg(hc)),                                  // 상태=글리프
+                    Span::raw(" "),
+                    Span::styled(a.kind.label(), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)), // 정체성=vendor색
+                ])),
                 cellw(a.id.clone(), 6),
                 cellw(a.node.clone(), 16),
                 Cell::from(Line::from(util)),
@@ -333,7 +337,7 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let widths = [
-        Constraint::Length(5),
+        Constraint::Length(8),
         Constraint::Length(6),
         Constraint::Length(16),
         Constraint::Length(15),
