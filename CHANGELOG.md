@@ -2,6 +2,11 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.12.0]
+### Changed — 바 색 통일 + VRAM 5% 눈금 edge
+- 모든 로드 바(util/mem/cpu/게이지)를 **단일 severity 색**으로 통일(값 하나로 색 결정: util→util_color, mem→mem_color). per-cell 그라디언트 폐기, `grad_bar` 제거.
+- **VRAM 구성 바에 5% 눈금 edge(┊)** — 셀 단위 세그먼트(벤더 색) + 5%마다 보이는 tick(회색) → stacked 느낌으로 구성/비율 눈금 읽힘. (좁은 바는 폭 부족으로 tick 생략.)
+
 ## [0.11.1]
 ### Changed — 타임라인: 가로 10% 그리드 + 바 전체 severity 색 + 간격 제거
 - 바 색을 per-cell 그라디언트 → **바 전체 하나의 severity 색**(값이 threshold 넘으면 색 전체가 초록→노랑→빨강으로 바뀜).

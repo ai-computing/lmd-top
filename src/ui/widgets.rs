@@ -32,27 +32,6 @@ pub(crate) fn truncw(s: &str, max: usize) -> String {
 
 
 
-/// 그라디언트 바 — 채워진 길이만큼 초록(여유)→노랑→빨강(과도). 부하가 색으로 바로 읽힘.
-pub(crate) fn grad_bar(pct: f64, width: usize) -> Line<'static> {
-    let p = pct.clamp(0.0, 100.0) / 100.0;
-    let frac = p * width as f64;
-    let full = (frac.floor() as usize).min(width);
-    let denom = (width as f64 - 1.0).max(1.0);
-    let mut spans: Vec<Span> = Vec::new();
-    for i in 0..full {
-        spans.push(Span::styled("█".to_string(), Style::default().fg(grad_color((i as f64 / denom) * 100.0))));
-    }
-    let mut used = full;
-    if used < width {
-        let rem = ((frac - full as f64) * 8.0).round() as usize;
-        if rem > 0 {
-            spans.push(Span::styled(FRAC[rem - 1].to_string(), Style::default().fg(grad_color((full as f64 / denom) * 100.0))));
-            used += 1;
-        }
-    }
-    spans.push(Span::styled("░".repeat(width.saturating_sub(used)), Style::default().fg(C_TRACK())));
-    Line::from(spans)
-}
 
 pub(crate) fn bar_line(pct: f64, width: usize, color: Color) -> Line<'static> {
     let p = pct.clamp(0.0, 100.0) / 100.0;
@@ -77,32 +56,38 @@ pub(crate) fn bar_line(pct: f64, width: usize, color: Color) -> Line<'static> {
 /// all-smi 식 스택형 바: 세그먼트(값,색)를 비율대로 이어 붙이고 나머지는 track.
 /// 이종 가속기 VRAM 구성(GPU|RBLN|RNGD|free) 등 "무엇이 얼마나 차지하나" 표시용.
 pub(crate) fn stacked_bar(segments: &[(f64, Color)], total: f64, width: usize) -> Vec<Span<'static>> {
-    if total <= 0.0 || width == 0 {
-        return vec![Span::styled("░".repeat(width), Style::default().fg(C_TRACK()))];
+    // 셀 단위 세그먼트 바 + 5% 눈금 edge(┊). 5%마다 보이는 tick(width≥20 정도에서).
+    if width == 0 {
+        return Vec::new();
     }
-    let mut spans: Vec<Span> = Vec::new();
-    let mut used = 0usize;
-    for (val, col) in segments {
-        if used >= width {
-            break;
+    let used: f64 = segments.iter().map(|(v, _)| *v).sum();
+    let tick_step = ((width as f64) * 0.05).round() as usize;
+    let mut spans: Vec<Span> = Vec::with_capacity(width);
+    for i in 0..width {
+        if tick_step >= 2 && i > 0 && i % tick_step == 0 {
+            spans.push(Span::styled("┊".to_string(), Style::default().fg(Color::Indexed(240))));
+            continue;
         }
-        let w = (((val / total) * width as f64).round() as usize).min(width - used);
-        if w > 0 {
-            spans.push(Span::styled("█".repeat(w), Style::default().fg(*col)));
-            used += w;
+        let center = (i as f64 + 0.5) / width as f64 * total;
+        if total > 0.0 && center < used {
+            let mut cum = 0.0;
+            let mut col = C_TRACK();
+            for (v, c) in segments {
+                if center < cum + *v { col = *c; break; }
+                cum += *v;
+            }
+            spans.push(Span::styled("█".to_string(), Style::default().fg(col)));
+        } else {
+            spans.push(Span::styled("░".to_string(), Style::default().fg(C_TRACK())));
         }
-    }
-    if used < width {
-        spans.push(Span::styled("░".repeat(width - used), Style::default().fg(C_TRACK())));
     }
     spans
 }
-
 /// all-smi 식 게이지 행: `label  ██████░░░░  value`.
 /// pct=바 채움(0~100), value=우측 현재값 텍스트, color=값 색.
 pub(crate) fn gauge_row(label: &str, pct: f64, value: &str, color: Color, barw: usize) -> Line<'static> {
     let mut sp = vec![Span::styled(format!("{:<8} ", label), Style::default().fg(C_DIM()))];
-    sp.extend(grad_bar(pct, barw).spans);
+    sp.extend(bar_line(pct, barw, color).spans);
     sp.push(Span::styled(format!("  {}", value), Style::default().fg(color).add_modifier(Modifier::BOLD)));
     Line::from(sp)
 }
