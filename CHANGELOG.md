@@ -2,6 +2,11 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.8.8]
+### Changed — Flow(Topo) 인터랙티브화 (IA 리뷰 P1 핵심)
+- **"correlation이 텍스트일 뿐 내비게이션이 아니다"** 해소: Topo→**Flow** 로 개명하고 route 경로를 **선택 가능**(↑↓, 배경 하이라이트)하게 + 선택 route 에서 **`p`/`i`/`m`/`e` pivot**(pods/infra/model/epp)으로 레이어 횡단. 이제 경로 위에서 손으로 상관관계를 넘나듦.
+- *남은 P1(기본화면 Flow 플립·탭 그룹화·Events 오버레이)은 근육기억을 바꾸는 부분이라 실기 반복 후 진행.*
+
 ## [0.8.7]
 ### Added — safe action: rollout restart (Control-plane M3)
 - **`S`**: 선택 모델 **rollout restart**(`kubectl rollout restart`, 롤링 재기동) — admin+ 게이트 + y/n 확인(Pending::Restart). scale 과 동일한 dry-run→confirm 경로. (endpoint drain / traffic·policy weight 는 endpoint/CR 조작이 필요해 후속.)

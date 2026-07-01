@@ -458,6 +458,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         Pods => parts.push("i/m pivot".into()),
         Nodes => parts.push("i pivot".into()),
         Perf => parts.push("p/i/e pivot".into()),
+        Routing => parts.push("p/i/m/e pivot".into()),
         Epp => parts.push("+/- weight".into()),
         _ => {}
     }
@@ -1122,14 +1123,19 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
             Some(m) => format!("{}/{} {} [{}]", m.ready, m.desired, m.accel, m.engine),
             None => "?".into(),
         };
-        lines.push(Line::from(vec![
+        let sel = i == app.selected;
+        let mut rl = Line::from(vec![
             Span::styled(rbr, Style::default().fg(C_DIM())),
             dot(up),
             Span::styled(format!("{:<9}", truncw(&r.path, 9)), Style::default().fg(Color::White)),
             Span::styled("→ ", Style::default().fg(C_DIM())),
             Span::styled(format!("{}:{}  ", r.kind, truncw(&r.backend, 22)), Style::default().fg(if up { C_OK() } else { C_DIM() })),
             Span::styled(annot, Style::default().fg(C_DIM())),
-        ]));
+        ]);
+        if sel {
+            rl = rl.style(Style::default().bg(C_HL()).add_modifier(Modifier::BOLD)); // 선택 route(정렬 유지 위해 배경만)
+        }
+        lines.push(rl);
         // 하위: 이 backend 의 파드들(트리 자식)
         let cont = if last { "      " } else { "   │  " };
         let pods: Vec<&crate::collect::PodRow> = s.pods.iter().filter(|p| p.name.starts_with(&r.backend)).collect();
@@ -1159,7 +1165,13 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(4), Constraint::Length(10)])
         .split(area);
-    f.render_widget(Paragraph::new(lines).block(block("Topology · Gateway → HTTPRoute → backend")), top[0]);
+    f.render_widget(
+        Paragraph::new(lines).block(block(&format!(
+            "Flow · Gateway→EPP→Model→Infra · ↑↓ route · p/i/m/e pivot{}",
+            count_suffix(app.selected, s.routes.len())
+        ))),
+        top[0],
+    );
 
     // InferencePool + EPP + SLO
     let mut pl: Vec<Line> = Vec::new();
