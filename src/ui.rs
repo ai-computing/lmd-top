@@ -752,6 +752,22 @@ fn list_scrollbar(f: &mut Frame, area: Rect, total: usize, pos: usize, header: u
     f.render_stateful_widget(sb, inner, &mut st);
 }
 
+/// 균일한 리스트 테이블 렌더 — Table+헤더+선택 하이라이트+스크롤바+위치카운터 보일러플레이트 1곳.
+/// (Accel/Pods/Events 등 표준 리스트 뷰 공용. 커스텀 레이아웃 뷰는 직접 그림.)
+#[allow(clippy::too_many_arguments)]
+fn render_list_table(f: &mut Frame, area: Rect, rows: Vec<Row<'static>>, widths: &[Constraint], headers: &[&str], title: &str, sel: usize, total: usize) {
+    let t = Table::new(rows, widths.to_vec())
+        .header(hrow(headers))
+        .column_spacing(1)
+        .row_highlight_style(hl_style())
+        .highlight_symbol("▎")
+        .block(block(&format!("{}{}", title, count_suffix(sel, total))));
+    let mut st = TableState::default();
+    st.select(Some(sel));
+    f.render_stateful_widget(t, area, &mut st);
+    list_scrollbar(f, area, total, sel, 1);
+}
+
 /// 블록 타이틀용 위치 카운터 접미사 " · sel/total". total<=0 이면 빈 문자열.
 fn count_suffix(sel: usize, total: usize) -> String {
     if total == 0 {
@@ -798,7 +814,7 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
                 Cell::from(Line::from(vec![
                     Span::styled(hg, Style::default().fg(hc)),                                  // 상태=글리프
                     Span::raw(" "),
-                    Span::styled(a.disp(), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)), // 모델(감지)·vendor색
+                    Span::styled(a.disp().to_string(), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)), // 모델(감지)·vendor색
                 ])),
                 cellw(a.id.clone(), 6),
                 cellw(a.node.clone(), 14),
@@ -822,17 +838,11 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(13),
         Constraint::Min(8),
     ];
-    let total = order.len();
-    let table = Table::new(rows, widths)
-        .header(hrow(&["KIND", "ID", "NODE", "UTIL", "MEM", "TEMP", "PWR", "TREND(util)", "MODEL/POD"]))
-        .column_spacing(1)
-        .row_highlight_style(hl_style())
-        .highlight_symbol("▎")
-        .block(block(&format!("Accelerators · UTIL=compute% MEM=VRAM · ⏎ timeline{}", count_suffix(app.selected, total))));
-    let mut st = TableState::default();
-    st.select(Some(app.selected));
-    f.render_stateful_widget(table, area, &mut st);
-    list_scrollbar(f, area, total, app.selected, 1);
+    render_list_table(
+        f, area, rows, &widths,
+        &["KIND", "ID", "NODE", "UTIL", "MEM", "TEMP", "PWR", "TREND(util)", "MODEL/POD"],
+        "Accelerators · UTIL=compute% MEM=VRAM · ⏎ timeline", app.selected, order.len(),
+    );
 }
 
 // ── Models ─────────────────────────────────────────────
@@ -939,16 +949,11 @@ fn view_pods(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(18),
         Constraint::Length(8),
     ];
-    let table = Table::new(rows, widths)
-        .header(hrow(&["POD", "READY", "PHASE", "NODE", "RESTARTS"]))
-        .column_spacing(1)
-        .row_highlight_style(hl_style())
-        .highlight_symbol("▎")
-        .block(block(&format!("Pods (llm-serving) · ⏎ detail{}", count_suffix(app.selected, order.len()))));
-    let mut st = TableState::default();
-    st.select(Some(app.selected));
-    f.render_stateful_widget(table, area, &mut st);
-    list_scrollbar(f, area, order.len(), app.selected, 1);
+    render_list_table(
+        f, area, rows, &widths,
+        &["POD", "READY", "PHASE", "NODE", "RESTARTS"],
+        "Pods (llm-serving) · ⏎ detail", app.selected, order.len(),
+    );
 }
 
 // ── EPP ────────────────────────────────────────────────
@@ -2027,16 +2032,11 @@ fn view_events(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(5),
         Constraint::Min(20),
     ];
-    let t = Table::new(rows, widths)
-        .header(hrow(&["TYPE", "REASON", "OBJECT", "CNT", "MESSAGE"]))
-        .column_spacing(1)
-        .row_highlight_style(hl_style())
-        .highlight_symbol("▎")
-        .block(block(&format!("Events (k8s + llm-d, newest first){}", count_suffix(app.selected, order.len()))));
-    let mut st = TableState::default();
-    st.select(Some(app.selected));
-    f.render_stateful_widget(t, area, &mut st);
-    list_scrollbar(f, area, order.len(), app.selected, 1);
+    render_list_table(
+        f, area, rows, &widths,
+        &["TYPE", "REASON", "OBJECT", "CNT", "MESSAGE"],
+        "Events (k8s + llm-d, newest first)", app.selected, order.len(),
+    );
 }
 
 // ── 진단 ───────────────────────────────────────────────
