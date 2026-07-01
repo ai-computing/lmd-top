@@ -165,7 +165,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 fn help_overlay(f: &mut Frame) {
-    let area = centered(f.area(), 64, 23);
+    let area = centered(f.area(), 66, 24);
     f.render_widget(Clear, area);
     let g = |k: &str, d: &str| {
         Line::from(vec![
@@ -179,6 +179,7 @@ fn help_overlay(f: &mut Frame) {
         g("0-8 / Tab", "view (Overview/Accel/Models/EPP/Topo/Pods/Perf/Launch/Events)"),
         g("up/dn j k", "select row (mouse scroll works too)"),
         g("Enter", "detail (drill-down)"),
+        g("p i r e m", "cross-layer pivot (model↔pods↔infra↔route↔epp), esc retraces"),
         g("o", "cycle sort"),
         g("/", "filter (substring)"),
         g("l", "logs (selected pod/model, scroll+refresh)"),
@@ -436,6 +437,15 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     if sortable {
         hint.push_str(&format!("o sort:{}  ", app.sort_label()));
     }
+    // 크로스레이어 드릴 pivot(뷰별) — 발견성
+    let pv = match app.view {
+        View::Models | View::Overview => "p/i/r/e pivot  ",
+        View::Accel => "p/m/n pivot  ",
+        View::Pods => "i/m pivot  ",
+        View::Nodes => "i pivot  ",
+        _ => "",
+    };
+    hint.push_str(pv);
     hint.push_str("l logs  s scale  A alerts  t theme  z zoom  g grafana↗  ? help  q quit");
     spans.push(Span::styled(hint, Style::default().fg(C_DIM())));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -1445,6 +1455,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(""));
         let pods: Vec<&str> = app.snap.pods.iter().filter(|p| p.name.starts_with(&m.name)).map(|p| p.name.as_str()).collect();
         lines.push(kv("pods", &if pods.is_empty() { "(none)".to_string() } else { pods.join(", ") }, C_DIM()));
+        lines.push(pivot_line(&[("p", "pods"), ("i", "infra"), ("r", "route"), ("e", "epp")]));
         lines.push(Line::from(Span::styled("  s = scale up/down", Style::default().fg(C_DIM()))));
     } else if let Some(p) = app.selected_pod() {
         title = "Pod";
@@ -1453,6 +1464,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(kv("ready", &p.ready, Color::White));
         lines.push(kv("node", &p.node, Color::White));
         lines.push(kv("restarts", &p.restarts.to_string(), if p.restarts > 0 { C_WARN() } else { Color::White }));
+        lines.push(pivot_line(&[("i", "infra"), ("m", "model")]));
     } else {
         lines.push(Line::from(Span::styled("no item selected", Style::default().fg(C_DIM()))));
     }
@@ -1461,6 +1473,16 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(lines).scroll((app.detail_scroll, 0)).wrap(Wrap { trim: false }).block(block(&format!("{}{}", title, nav))),
         area,
     );
+}
+
+/// 드릴 pivot 안내 줄 — `pivot  [p] pods  [i] infra …`. 상세 패널·크로스레이어 내비 광고.
+fn pivot_line(pivots: &[(&str, &str)]) -> Line<'static> {
+    let mut sp = vec![Span::styled("pivot  ", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))];
+    for (k, label) in pivots {
+        sp.push(Span::styled(format!("[{}]", k), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)));
+        sp.push(Span::styled(format!(" {}  ", label), Style::default().fg(C_DIM())));
+    }
+    Line::from(sp)
 }
 
 fn kv(k: &str, v: &str, color: Color) -> Line<'static> {
