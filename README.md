@@ -239,12 +239,17 @@ src/
 
 ## Roadmap
 
-- **Phase 1 — Monitor** ✅ *(current)* — 10 correlated views, active alerting, scale action
-- **Phase 2 — Launch** — model catalog → placement solver → deploy via **llm-d ModelService** + runbooks
-- **Phase 3 — EPP deep + plugins** — routing-decision heatmaps + declarative TOML collectors
-- **Phase 4 — Advanced** — request lifecycle traces + deeper P/D-disaggregation views + `lmd-top setup`/`doctor`
+- **Phase 1 — Monitor** ✅ *(current)* — 10 correlated views, active alerting, logs, scale action.
+- **Phase 2 — Control plane** *(next)* — permission modes (observe/debug/admin/danger), a
+  machine-readable **agent JSON** state (`--snapshot --json`), and safe actions (endpoint
+  drain / traffic & policy weight / rollout) with dry-run → confirm → audit.
+- **Phase 3 — LLM-native depth** *(infra-gated; skeleton-first)* — PD-aware dashboard, EPP
+  decision debugger with per-endpoint score table, KV/prefix cache locality, SLO/goodput
+  diagnosis. Fills in once traffic goes through the EPP with vLLM/tracing metrics.
+- **ModelService-native** — shift Models/Launch from raw Deployments to llm-d ModelService
+  CRDs, enabling real deploy from the catalog.
 
-See `CHANGELOG.md` for release history.
+See `ROADMAP.md` for the detailed plan and `CHANGELOG.md` for release history.
 
 ## Status
 
