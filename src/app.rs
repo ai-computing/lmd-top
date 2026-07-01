@@ -82,6 +82,12 @@ pub const N_THEMES: usize = 4;
 pub fn theme() -> usize {
     THEME.load(Ordering::Relaxed)
 }
+/// 시작 테마 지정(config 값 반영). 범위 밖은 무시.
+pub fn set_theme(i: usize) {
+    if i < N_THEMES {
+        THEME.store(i, Ordering::Relaxed);
+    }
+}
 pub fn theme_name(i: usize) -> &'static str {
     match i {
         1 => "high-contrast",

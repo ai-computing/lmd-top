@@ -9,6 +9,7 @@ pub struct Config {
     pub grafana: String,       // g 키가 여는 Grafana base URL
     pub interval_full: u64,    // full 수집 주기(초)
     pub interval_fast: u64,    // fast tier(가속기/노드) 수집 주기(초)
+    pub theme: usize,          // 시작 테마: 0 default·1 high-contrast·2 colorblind·3 soft
 }
 
 impl Default for Config {
@@ -28,12 +29,20 @@ impl Default for Config {
                 .or_else(|| y.as_ref().and_then(|v| v.get(key)).and_then(|v| v.as_u64()))
                 .unwrap_or(def)
         };
+        // 테마: 이름(soft/colorblind/high-contrast/default) 또는 번호(0~3) 허용.
+        let theme = match s("LMD_THEME", "theme", "default").to_lowercase().as_str() {
+            "1" | "high-contrast" | "hc" => 1,
+            "2" | "colorblind" | "cb" => 2,
+            "3" | "soft" | "catppuccin" => 3,
+            _ => 0,
+        };
         Config {
             prom: s("LMD_PROM", "prometheus", "192.0.2.5:30090"),
             ns: s("LMD_NS", "namespace", "llm-serving"),
             grafana: s("LMD_GRAFANA", "grafana", "http://192.0.2.5:30300"),
             interval_full: u("LMD_INTERVAL", "interval_full", 3).max(1),
             interval_fast: u("LMD_FAST_INTERVAL", "interval_fast", 1).max(1),
+            theme,
         }
     }
 }
