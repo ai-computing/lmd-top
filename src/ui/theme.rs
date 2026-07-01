@@ -4,30 +4,6 @@
 use crate::collect::AccelKind;
 use ratatui::style::Color;
 
-/// HSL→RGB (h 0..360, s·l 0..1).
-fn hsl_to_rgb(h: f64, s: f64, l: f64) -> Color {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let hp = (h % 360.0) / 60.0;
-    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
-    let (r1, g1, b1) = match hp as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let m = l - c / 2.0;
-    let to = |v: f64| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
-    Color::Rgb(to(r1), to(g1), to(b1))
-}
-
-/// 레인보우 그라디언트(tui-bar-graph 식): t=0 파랑(낮음) → t=1 빨강(높음), cyan/green/yellow 경유.
-/// 타임라인 세로 그라디언트용. (색맹 테마에서도 값-높이 인지는 위치로 보완됨.)
-pub(crate) fn rainbow(t: f64) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    hsl_to_rgb(240.0 * (1.0 - t), 0.85, 0.55)
-}
 
 // ── 팔레트 (테마별) ─────────────────────────────────────
 // 색=심각도/정체성. 테마: 0 default · 1 고대비 · 2 색맹친화(파랑/주황 계열)
