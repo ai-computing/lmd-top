@@ -31,36 +31,7 @@ pub(crate) fn truncw(s: &str, max: usize) -> String {
 
 
 
-/// btop 식 그라디언트 바 — 채워진 길이만큼 초록→노랑→빨강. 사용률(util/mem/cpu)용.
-pub(crate) fn grad_bar(pct: f64, width: usize) -> Line<'static> {
-    let p = pct.clamp(0.0, 100.0) / 100.0;
-    let frac = p * width as f64;
-    let full = (frac.floor() as usize).min(width);
-    let mut spans: Vec<Span> = Vec::new();
-    let mut i = 0;
-    while i < full {
-        let c = grad_color((i as f64 / width as f64) * 100.0);
-        let mut run = 0;
-        while i + run < full && grad_color(((i + run) as f64 / width as f64) * 100.0) == c {
-            run += 1;
-        }
-        spans.push(Span::styled("█".repeat(run), Style::default().fg(c)));
-        i += run;
-    }
-    let mut used = full;
-    if used < width {
-        let rem = ((frac - full as f64) * 8.0).round() as usize;
-        if rem > 0 {
-            let c = grad_color((full as f64 / width as f64) * 100.0);
-            spans.push(Span::styled(FRAC[rem - 1].to_string(), Style::default().fg(c)));
-            used += 1;
-        }
-    }
-    spans.push(Span::styled("░".repeat(width.saturating_sub(used)), Style::default().fg(C_TRACK())));
-    Line::from(spans)
-}
 
-/// 프랙셔널 블록 바 (filled=colored, track=dim).
 /// 레인보우 그라디언트 바(hedzr/progressbar·tui-bar-graph 식) — 채워진 길이만큼 파랑→빨강 스펙트럼.
 /// 값(길이)은 채움 폭으로, 의미(심각도)는 옆 수치 색으로 — 바 자체는 장식적 overview 표현.
 pub(crate) fn rainbow_bar(pct: f64, width: usize) -> Line<'static> {
@@ -132,7 +103,7 @@ pub(crate) fn stacked_bar(segments: &[(f64, Color)], total: f64, width: usize) -
 /// pct=바 채움(0~100), value=우측 현재값 텍스트, color=값 색.
 pub(crate) fn gauge_row(label: &str, pct: f64, value: &str, color: Color, barw: usize) -> Line<'static> {
     let mut sp = vec![Span::styled(format!("{:<8} ", label), Style::default().fg(C_DIM()))];
-    sp.extend(grad_bar(pct, barw).spans);
+    sp.extend(rainbow_bar(pct, barw).spans);
     sp.push(Span::styled(format!("  {}", value), Style::default().fg(color).add_modifier(Modifier::BOLD)));
     Line::from(sp)
 }

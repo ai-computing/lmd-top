@@ -2,6 +2,11 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.10.3]
+### Changed — 레인보우 바 전면 통일 + Overview MEM 바
+- 모든 load 바(Accel UTIL/MEM · Overview util · Nodes cpu · 상세 게이지 compute/VRAM/temp)를 **레인보우 progressbar 로 통일**. 의미(심각도)는 옆 수치 색으로 유지. (사용 안 하게 된 `grad_bar` 제거; `grad_color` 는 mem-bw 색에 잔존.)
+- **Overview 가속기 행에 MEM 레인보우 바 추가** — util 이 0(유휴)이어도 채워진 progressbar 가 보임(예: GB10 `█████████▌ 124/131GB`).
+
 ## [0.10.2]
 ### Changed — 타임라인을 채움+track(████░░░░) 로
 - 타임라인 각 세로 컬럼을 값까지 █(세로 레인보우) 채우고 나머지는 ░ track 으로 → `████░░░░` 느낌. 컬럼 사이 1칸 간격 유지(구분). (점 scatter 시안은 폐기.)

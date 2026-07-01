@@ -446,9 +446,9 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
                 truncw(&a.busy_model, 22)
             };
             let mempct = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
-            let mut util = grad_bar(a.util, 9).spans;
+            let mut util = rainbow_bar(a.util, 9).spans;
             util.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
-            let mut mem = grad_bar(mempct, 7).spans;
+            let mut mem = rainbow_bar(mempct, 7).spans;
             mem.push(Span::styled(
                 format!(" {:.0}/{:.0}GB{}", a.mem_used_gb, a.mem_total_gb, if a.unified_mem { "∪" } else { "" }),
                 Style::default().fg(C_DIM()),
@@ -991,8 +991,10 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!("@{:<16} ", truncw(node, 16)), Style::default().fg(C_DIM())),
         ];
         sp.extend(rainbow_bar(util, 10).spans); // overview 는 레인보우 바(장식) — 수치는 severity 색으로 의미 유지
-        sp.push(Span::styled(format!(" {:>3.0}%  ", util), Style::default().fg(util_color(util))));
-        sp.push(Span::styled(format!("mem {:.0}/{:.0} GB  ", mu, mt), Style::default().fg(mem_color(mempct)))); // 절대값
+        sp.push(Span::styled(format!(" {:>3.0}% ", util), Style::default().fg(util_color(util))));
+        sp.push(Span::styled("mem ", Style::default().fg(C_DIM())));
+        sp.extend(rainbow_bar(mempct, 10).spans); // MEM 도 레인보우 바 — 유휴 때도 채움이 보임
+        sp.push(Span::styled(format!(" {:.0}/{:.0}GB  ", mu, mt), Style::default().fg(mem_color(mempct))));
         let trend = sparkstr(&app.hist_for(&format!("sys:{}_util", kind.label())), 14, 100); // all-smi식 인라인 트렌드
         sp.push(Span::styled(trend, Style::default().fg(util_color(util))));
         al.push(Line::from(sp));
@@ -1579,7 +1581,7 @@ fn accel_brief(a: &crate::collect::Accel, branch: &str, full: bool) -> Line<'sta
         Span::styled(format!("{:<5}", a.disp()), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{:<6} ", a.id), Style::default().fg(C_DIM())),
     ];
-    sp.extend(grad_bar(a.util, 8).spans);
+    sp.extend(rainbow_bar(a.util, 8).spans);
     sp.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
     sp.push(Span::styled(
         format!("  {:.0}/{:.0}GB{}", a.mem_used_gb, a.mem_total_gb, if a.unified_mem { "∪" } else { "" }),
@@ -1617,7 +1619,7 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!("{} ", glyph), Style::default().fg(gc)),
             Span::styled(format!("{:<20} ", truncw(&n.name, 20)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         ];
-        h.extend(grad_bar(if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct }, 8).spans);
+        h.extend(rainbow_bar(if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct }, 8).spans);
         h.push(Span::styled(
             if n.cpu_pct.is_nan() { " cpu   –".into() } else { format!(" cpu{:>3.0}%", n.cpu_pct) },
             Style::default().fg(C_DIM()),
