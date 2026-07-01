@@ -446,9 +446,9 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
                 truncw(&a.busy_model, 22)
             };
             let mempct = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
-            let mut util = rainbow_bar(a.util, 9).spans;
+            let mut util = grad_bar(a.util, 9).spans;
             util.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
-            let mut mem = rainbow_bar(mempct, 7).spans;
+            let mut mem = grad_bar(mempct, 7).spans;
             mem.push(Span::styled(
                 format!(" {:.0}/{:.0}GB{}", a.mem_used_gb, a.mem_total_gb, if a.unified_mem { "∪" } else { "" }),
                 Style::default().fg(C_DIM()),
@@ -945,7 +945,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
                 } else if a.throttle > 0.0 {
                     ("⚠", C_WARN())
                 } else if a.util > IDLE_UTIL {
-                    ("●", rainbow(a.util / 100.0))
+                    ("●", util_color(a.util))
                 } else {
                     ("○", C_DIM())
                 };
@@ -992,10 +992,10 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!("{:<4}×{} ", model, cnt), Style::default().fg(kind_color(*kind)).add_modifier(Modifier::BOLD)),
             Span::styled(format!("@{:<16} ", truncw(node, 16)), Style::default().fg(C_DIM())),
         ];
-        sp.extend(rainbow_bar(util, 10).spans); // overview 는 레인보우 바(장식) — 수치는 severity 색으로 의미 유지
+        sp.extend(grad_bar(util, 10).spans); // overview 는 레인보우 바(장식) — 수치는 severity 색으로 의미 유지
         sp.push(Span::styled(format!(" {:>3.0}% ", util), Style::default().fg(util_color(util))));
         sp.push(Span::styled("mem ", Style::default().fg(C_DIM())));
-        sp.extend(rainbow_bar(mempct, 10).spans); // MEM 도 레인보우 바 — 유휴 때도 채움이 보임
+        sp.extend(grad_bar(mempct, 10).spans); // MEM 도 레인보우 바 — 유휴 때도 채움이 보임
         sp.push(Span::styled(format!(" {:.0}/{:.0}GB  ", mu, mt), Style::default().fg(mem_color(mempct))));
         let trend = sparkstr(&app.hist_for(&format!("sys:{}_util", kind.label())), 14, 100); // all-smi식 인라인 트렌드
         sp.push(Span::styled(trend, Style::default().fg(util_color(util))));
@@ -1289,7 +1289,7 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
     let cur_pct = (cur as f64 / ymax * 100.0).clamp(0.0, 100.0);
     let ttl = Line::from(vec![
         Span::styled(format!(" {} ", label), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("▏ now {}{} ", cur, unit), Style::default().fg(rainbow(cur_pct / 100.0)).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("▏ now {}{} ", cur, unit), Style::default().fg(grad_color(cur_pct)).add_modifier(Modifier::BOLD)),
         Span::styled(format!("▏ max {}{} ", dmax, unit), Style::default().fg(C_DIM())),
     ]);
     let blk = Block::default()
@@ -1302,27 +1302,31 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
     if inner.width == 0 || inner.height == 0 || raw.is_empty() {
         return;
     }
-    let rows_h = inner.height as usize;
-    // 바 사이에 1칸 간격 → 개별 바 구분(bar chart 식). 바(1)+간격(1) = 2칸/데이터.
-    const STEP: u16 = 2;
-    let n = ((inner.width + 1) / STEP) as usize; // 들어갈 바 개수
-    let data: Vec<u64> = raw.iter().rev().take(n).rev().copied().collect();
-    let draw_h = rows_h;
+    let draw_h = inner.height as usize;
     let denom = (draw_h as f64 - 1.0).max(1.0);
+    // 바(1칸) + 세로 edge(1칸) = 2칸/데이터. edge 는 각 바를 감싸는 얕은 경계선(│) → 바 구분.
+    const STEP: u16 = 2;
+    let n = ((inner.width + 1) / STEP) as usize;
+    let data: Vec<u64> = raw.iter().rev().take(n).rev().copied().collect();
     let buf = f.buffer_mut();
+    // 1) 모든 열에 어두운 세로 edge(│) 를 깔아 각 바를 감싸는 경계 확보(black 에 가까운 라인).
+    for lx in 0..inner.width {
+        for gy in 0..inner.height {
+            buf[(inner.x + lx, inner.y + gy)].set_char('│').set_fg(Color::Indexed(234));
+        }
+    }
+    // 2) 바 열(오른쪽 정렬, 2칸 간격)에 값까지 █(세로 레인보우) 채움 — edge 사이에 바가 들어앉음.
     for (ci, &v) in data.iter().enumerate() {
         let frac = (v as f64 / ymax).clamp(0.0, 1.0);
-        let eighths_total = (frac * (draw_h as f64) * 8.0).round() as usize; // 채움(1/8칸 단위)
-        // 오른쪽 정렬(now=맨 오른쪽), 바 사이 1칸 간격.
+        let eighths_total = (frac * (draw_h as f64) * 8.0).round() as usize;
         let x = inner.x + inner.width - 1 - ((data.len() - 1 - ci) as u16) * STEP;
         for r in 0..draw_h {
-            // 값까지 █(세로 위치별 레인보우), 나머지는 ░ track → ████░░░░ 느낌.
             let filled = eighths_total.saturating_sub(r * 8).min(8);
             let y = inner.y + inner.height - 1 - r as u16;
             if filled == 0 {
-                buf[(x, y)].set_char('░').set_fg(C_TRACK());
+                buf[(x, y)].set_char(' ').set_fg(C_TRACK()); // 바 열의 값 위쪽은 비움(edge 사이 공간)
             } else {
-                buf[(x, y)].set_char(LV[filled]).set_fg(rainbow(r as f64 / denom));
+                buf[(x, y)].set_char(LV[filled]).set_fg(grad_color((r as f64 / denom) * 100.0));
             }
         }
     }
@@ -1583,7 +1587,7 @@ fn accel_brief(a: &crate::collect::Accel, branch: &str, full: bool) -> Line<'sta
         Span::styled(format!("{:<5}", a.disp()), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{:<6} ", a.id), Style::default().fg(C_DIM())),
     ];
-    sp.extend(rainbow_bar(a.util, 8).spans);
+    sp.extend(grad_bar(a.util, 8).spans);
     sp.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
     sp.push(Span::styled(
         format!("  {:.0}/{:.0}GB{}", a.mem_used_gb, a.mem_total_gb, if a.unified_mem { "∪" } else { "" }),
@@ -1621,7 +1625,7 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!("{} ", glyph), Style::default().fg(gc)),
             Span::styled(format!("{:<20} ", truncw(&n.name, 20)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         ];
-        h.extend(rainbow_bar(if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct }, 8).spans);
+        h.extend(grad_bar(if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct }, 8).spans);
         h.push(Span::styled(
             if n.cpu_pct.is_nan() { " cpu   –".into() } else { format!(" cpu{:>3.0}%", n.cpu_pct) },
             Style::default().fg(C_DIM()),

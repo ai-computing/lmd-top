@@ -2,6 +2,12 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.11.0]
+### Changed — 레인보우 철회 → severity(여유↔과도) + 바 edge
+- **레인보우 제거**, 전 바/타임라인/LED 를 **초록(여유)→노랑→빨강(과도)** severity 색으로 복귀 — 부하가 색으로 바로 읽힘. (rainbow/hsl_to_rgb 헬퍼 삭제.)
+- **타임라인 바에 세로 edge(│, 어두운 라인)** 추가 → 각 바가 경계로 구분(여백/점 대신). 순수 black 은 다크 터미널에서 배경에 묻혀 near-black(Indexed 234) 사용.
+- (유지) 바 간격, Overview Σ 정리·평균온도·MEM 바.
+
 ## [0.10.4]
 ### Changed — Overview 한눈에 개선 (all-smi 참고)
 - 클러스터 Σ 줄을 **라벨된 그룹**으로 정리: `N accel · 벤더×n │ util·temp │ VRAM·W │ models`. 평균 **온도** 추가, 상단바와 중복인 req/s·TTFT 제거.
