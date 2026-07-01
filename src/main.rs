@@ -156,6 +156,13 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                         }
                         KeyCode::Char('?') => app.toggle_help(),
                         KeyCode::Char('t') => app.cycle_theme(),
+                        KeyCode::Char('g') => {
+                            let base = std::env::var("LMD_GRAFANA")
+                                .unwrap_or_else(|_| "http://192.0.2.5:30300".to_string());
+                            // best-effort 브라우저 오픈(가능한 환경) + URL 토스트
+                            let _ = std::process::Command::new("xdg-open").arg(&base).spawn();
+                            app.toast = Some(format!("Grafana ↗ {}  (llm-models · nvidia-dcgm · furiosa-npu)", base));
+                        }
                         KeyCode::Char('/') => app.start_filter(),
                         KeyCode::Enter => app.toggle_detail(),
                         KeyCode::Char('o') => app.cycle_sort(),

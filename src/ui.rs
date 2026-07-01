@@ -113,6 +113,7 @@ fn help_overlay(f: &mut Frame) {
         g("/", "필터 (부분일치)"),
         g("s", "선택 모델 scale up/down"),
         g("t", "테마 전환 (default/고대비/색맹친화)"),
+        g("g", "Grafana 대시보드 열기 ↗"),
         g("? / Esc", "도움말 / 닫기·뒤로   q 종료"),
         Line::from(""),
         sec("color / glyph"),
@@ -249,7 +250,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     if sortable {
         hint.push_str(&format!("o sort:{}  ", app.sort_label()));
     }
-    hint.push_str("s scale  t theme  Tab/0-6 view  ? help  q quit");
+    hint.push_str("s scale  t theme  g grafana↗  ? help  q quit");
     spans.push(Span::styled(hint, Style::default().fg(C_DIM())));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
