@@ -129,6 +129,8 @@ pub struct Snapshot {
     pub routes: Vec<Route>,
     pub objectives: Vec<Objective>,
     pub decisions: Vec<(String, f64)>, // (pod, 라우팅 픽 횟수) — 트래픽이 EPP 경유 시
+    pub pod_queues: Vec<(String, f64)>, // per-pod 큐 깊이(요청 분배)
+    pub perf: Perf,
     pub autoscalers: Vec<Autoscale>,
     pub epp: Option<EppCfg>,
     pub epp_in_path: bool, // HTTPRoute backend 중 InferencePool 이 있는가(없으면 EPP 우회)
@@ -136,6 +138,36 @@ pub struct Snapshot {
     pub gw_addr: String,
     pub gw_ok: bool,
     pub warnings: Vec<String>,
+}
+
+/// EPP 정책 수립용 성능 지표(구간별 지연 percentile·토큰분포·처리량). 값 없으면 NaN.
+#[derive(Clone)]
+pub struct Perf {
+    pub req_rate: f64,
+    pub err_rate: f64,
+    pub tps: f64,
+    pub prefix_hit: f64,
+    pub queue_p95: f64,
+    pub ttft_p95: f64,
+    pub ttft_p99: f64,
+    pub tpot_p95: f64,
+    pub e2e_p50: f64,
+    pub e2e_p95: f64,
+    pub e2e_p99: f64,
+    pub in_tok_p50: f64,
+    pub in_tok_p95: f64,
+    pub out_tok_p50: f64,
+    pub out_tok_p95: f64,
+}
+impl Default for Perf {
+    fn default() -> Self {
+        let n = f64::NAN;
+        Perf {
+            req_rate: n, err_rate: n, tps: n, prefix_hit: n, queue_p95: n,
+            ttft_p95: n, ttft_p99: n, tpot_p95: n, e2e_p50: n, e2e_p95: n, e2e_p99: n,
+            in_tok_p50: n, in_tok_p95: n, out_tok_p50: n, out_tok_p95: n,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -171,6 +203,11 @@ async fn q(cfg: &Config, promql: &str, warn: &mut Vec<String>) -> Vec<Series> {
 
 fn short(s: &str) -> String {
     s.chars().take(28).collect()
+}
+
+/// 단일 스칼라 결과(첫 값) — 없으면 NaN.
+async fn qs(cfg: &Config, promql: &str, warn: &mut Vec<String>) -> f64 {
+    q(cfg, promql, warn).await.first().map(|s| s.value).unwrap_or(f64::NAN)
 }
 
 /// vLLM 모델 메트릭 묶음 (model_name 키).
@@ -338,6 +375,35 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     snap.decisions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let pidx = q(cfg, "max(inference_extension_prefix_indexer_size)", &mut warn).await;
     snap.prefix_idx = pidx.first().map(|s| s.value).unwrap_or(f64::NAN);
+
+    // per-pod 큐 깊이(요청 분배)
+    for s in &q(cfg, "inference_pool_per_pod_queue_size", &mut warn).await {
+        let pod = s.l("model_server_pod");
+        if !pod.is_empty() {
+            snap.pod_queues.push((pod.to_string(), s.value));
+        }
+    }
+    snap.pod_queues.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Perf: 구간별 지연 percentile·토큰분포·처리량 (EPP 정책용). 전부 graceful(NaN).
+    let mut pf = Perf::default();
+    pf.req_rate = qs(cfg, "sum(rate(inference_objective_request_total[1m]))", &mut warn).await;
+    pf.err_rate = qs(cfg, "sum(rate(inference_objective_request_error_total[1m]))", &mut warn).await;
+    pf.tps = qs(cfg, "sum(rate(vllm:generation_tokens_total[1m]))", &mut warn).await;
+    pf.prefix_hit = qs(cfg, "avg(vllm:gpu_prefix_cache_hit_rate)", &mut warn).await;
+    pf.queue_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(inference_extension_flow_control_request_queue_duration_seconds_bucket[5m])))", &mut warn).await;
+    pf.ttft_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(vllm:time_to_first_token_seconds_bucket[5m])))", &mut warn).await;
+    pf.ttft_p99 = qs(cfg, "histogram_quantile(0.99, sum by (le)(rate(vllm:time_to_first_token_seconds_bucket[5m])))", &mut warn).await;
+    pf.tpot_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(inference_objective_normalized_time_per_output_token_seconds_bucket[5m])))", &mut warn).await;
+    pf.e2e_p50 = qs(cfg, "histogram_quantile(0.50, sum by (le)(rate(inference_objective_request_duration_seconds_bucket[5m])))", &mut warn).await;
+    pf.e2e_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(inference_objective_request_duration_seconds_bucket[5m])))", &mut warn).await;
+    pf.e2e_p99 = qs(cfg, "histogram_quantile(0.99, sum by (le)(rate(inference_objective_request_duration_seconds_bucket[5m])))", &mut warn).await;
+    pf.in_tok_p50 = qs(cfg, "histogram_quantile(0.50, sum by (le)(rate(inference_objective_input_tokens_bucket[5m])))", &mut warn).await;
+    pf.in_tok_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(inference_objective_input_tokens_bucket[5m])))", &mut warn).await;
+    pf.out_tok_p50 = qs(cfg, "histogram_quantile(0.50, sum by (le)(rate(inference_objective_output_tokens_bucket[5m])))", &mut warn).await;
+    pf.out_tok_p95 = qs(cfg, "histogram_quantile(0.95, sum by (le)(rate(inference_objective_output_tokens_bucket[5m])))", &mut warn).await;
+    snap.perf = pf;
+
     for s in &p_ready {
         let name = s.l("name");
         snap.pools.push(Pool {

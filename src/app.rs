@@ -11,16 +11,18 @@ pub enum View {
     Epp,
     Routing,
     Pods,
+    Perf,
 }
 
 impl View {
-    pub const ALL: [View; 6] = [
+    pub const ALL: [View; 7] = [
         View::Overview,
         View::Accel,
         View::Models,
         View::Epp,
         View::Routing,
         View::Pods,
+        View::Perf,
     ];
     pub fn idx(&self) -> usize {
         View::ALL.iter().position(|v| v == self).unwrap_or(0)
@@ -33,6 +35,7 @@ impl View {
             View::Epp => "EPP",
             View::Routing => "Topo",
             View::Pods => "Pods",
+            View::Perf => "Perf",
         }
     }
 }
@@ -47,6 +50,7 @@ pub struct App {
     pub toast: Option<String>,
     pub detail: bool,  // 선택 행 상세(drill-down) 표시 여부
     pub sort: usize,   // 현재 뷰의 정렬 모드(뷰별로 의미 다름, 순환)
+    pub tick: u64,     // 렌더 틱(마퀴/스피너 애니메이션용)
 }
 
 impl App {
@@ -59,6 +63,7 @@ impl App {
             toast: None,
             detail: false,
             sort: 0,
+            tick: 0,
         }
     }
 
@@ -97,6 +102,14 @@ impl App {
         }
     }
 
+    fn push_hist(&mut self, key: &str, val: u64) {
+        let buf = self.hist.entry(key.to_string()).or_default();
+        buf.push_back(val);
+        while buf.len() > HIST {
+            buf.pop_front();
+        }
+    }
+
     /// 새 스냅샷 반영 + ts 가 바뀌었으면 히스토리 append.
     pub fn apply(&mut self, snap: Snapshot) {
         if snap.ts != self.snap.ts {
@@ -107,6 +120,25 @@ impl App {
                 while buf.len() > HIST {
                     buf.pop_front();
                 }
+            }
+            // 클러스터 레벨 추이(timeline)
+            let n = snap.accel.len().max(1);
+            let util_avg = snap.accel.iter().map(|a| a.util).sum::<f64>() / n as f64;
+            let (mu, mt): (f64, f64) = snap.accel.iter().fold((0.0, 0.0), |(u, t), a| (u + a.mem_used_gb, t + a.mem_total_gb));
+            let vram_pct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
+            self.push_hist("sys:util", util_avg.round().clamp(0.0, 100.0) as u64);
+            self.push_hist("sys:vram", vram_pct.round().clamp(0.0, 100.0) as u64);
+            let tps = snap.perf.tps;
+            if !tps.is_nan() {
+                self.push_hist("sys:tps", tps.round().max(0.0) as u64);
+            }
+            let lat = snap.perf.e2e_p95;
+            if !lat.is_nan() {
+                self.push_hist("sys:lat", (lat * 1000.0).round().max(0.0) as u64);
+            }
+            let rq = snap.perf.req_rate;
+            if !rq.is_nan() {
+                self.push_hist("sys:reqs", (rq * 100.0).round().max(0.0) as u64);
             }
         }
         self.snap = snap;

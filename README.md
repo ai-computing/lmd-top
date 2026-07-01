@@ -52,9 +52,14 @@ lmd-top 은 그 빈자리를 채우며, 특히 **EPP 라우팅 의사결정**을
 | 3 | **EPP** | 활성 scorer·가중치(ConfigMap introspect) + picker + InferencePool endpoints + **요청 분배**(라우팅 결정) |
 | 4 | **Topo** | **전체 구성 한눈에** — Gateway → HTTPRoute → backend(모델 상태/가속기/노드) + InferencePool/EPP/**SLO**(InferenceObjective) + *EPP 우회 진단* |
 | 5 | **Pods** | llm-serving 파드 상태 |
+| **6** | **Perf** | **EPP 정책용** — 구간별 지연 p50/p95/p99(queue/TTFT/TPOT/E2E) · 토큰 길이 분포 · tok/s · 요청 분배 + **timeline 스파크라인**(util/vram/tok·s/지연 추이) |
 
-> **Topo 뷰**가 "어느 모델이 어디서 돌고, 어디로 라우팅되며, 요청이 어떻게 분배되는가"를 답합니다.
-> 특히 HTTPRoute 가 InferencePool(EPP) 을 경유하는지/우회하는지 자동 진단합니다.
+> **Topo 뷰**가 "어느 모델이 어디서 돌고, 어디로 라우팅되며, 요청이 어떻게 분배되는가"를 답하고,
+> HTTPRoute 가 InferencePool(EPP) 을 경유하는지/우회하는지 자동 진단합니다.
+> **Perf 뷰**는 EPP scorer 정책을 짜는 데 필요한 지연/토큰/분배 지표를 모읍니다(EPP 경유 트래픽 시 채워짐).
+
+**디자인**: 둥근 테두리 · 라이브 스피너 · 상태 아이콘(●○◐⚠) · util/메모리 프랙셔널 바 ·
+긴 이름은 선택 시 **가로 스크롤(마퀴) 애니메이션** · 폭(unicode-width) 안전 렌더.
 
 - **2초 자동 갱신**, 가속기 util 히스토리 스파크라인
 - **액션**: `s` = 선택 모델 scale up/down (꺼진 모델 켜기)
@@ -91,7 +96,7 @@ LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top
 
 | 키 | 동작 |
 |---|---|
-| `0`–`5` | 뷰 전환 |
+| `0`–`6` | 뷰 전환 |
 | `Tab` | 다음 뷰 |
 | `↑`/`↓` (또는 `k`/`j`) | 행 선택 |
 | `Enter` | 선택 항목 **상세(drill-down)** — 가속기/모델/파드 |
