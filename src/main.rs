@@ -22,6 +22,7 @@ use ratatui::crossterm::{
 };
 use ratatui::Terminal;
 use std::io;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -160,9 +161,15 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                         KeyCode::Char('g') => {
                             let base = std::env::var("LMD_GRAFANA")
                                 .unwrap_or_else(|_| "http://192.0.2.5:30300".to_string());
-                            // best-effort 브라우저 오픈(가능한 환경) + URL 토스트
-                            let _ = std::process::Command::new("xdg-open").arg(&base).spawn();
-                            app.toast = Some(format!("Grafana ↗ {}  (llm-models · nvidia-dcgm · furiosa-npu)", base));
+                            // best-effort 브라우저 오픈 — stdio를 null로(터미널 화면 깨짐 방지)
+                            let _ = std::process::Command::new("xdg-open")
+                                .arg(&base)
+                                .stdin(Stdio::null())
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .spawn();
+                            app.toast = Some(format!("Grafana: {}  (브라우저에서 열기 · llm-models 대시보드)", base));
+                            terminal.clear().ok(); // 혹시 모를 잔상 제거 → 전체 재그리기
                         }
                         KeyCode::Char('/') => app.start_filter(),
                         KeyCode::Enter => app.toggle_detail(),
