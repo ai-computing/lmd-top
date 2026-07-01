@@ -114,3 +114,32 @@ Human UI: terminal layout   Agent UI: JSON state tree   Control API: typed actio
 
 > 대부분의 LLM-native 지표는 인프라 조건(EPP-in-path·vLLM 메트릭·disaggregation·tracing) 충족 시 채워지므로,
 > 뷰/스켈레톤을 먼저 만들고 데이터가 흐르면 자동 표시되는 방식으로 진행(현재 Perf/EPP 와 동일 패턴).
+
+---
+
+## 참고 TUI 분석 → UI/기능 패턴 (awesome-tuis / talos-pilot / k8s-tui / btop / all-smi / AdGuardian)
+
+| 레퍼런스(스택) | 차용할 패턴 | lmd-top 상태 |
+|---|---|---|
+| **talos-pilot** (Rust/ratatui/tokio — 동일 스택) | 니모닉 단일키 화면(`c/s/l/p/n`…), `Esc`=뒤로, `a` auto-refresh 토글, 멀티서비스 로그(Stern식), **진단+실행가능한 fix**, PDB-aware drain | Esc back ✅ · 진단 부분 ✅ · 로그/drain/`a` ⬜ |
+| **k8s-tui** (Go/bubbletea) | tab→list→detail→**edit(외부 $EDITOR)** cascade, **Lua 플러그인**, JSON 테마/config, **멀티클러스터 전환(Ctrl+←→)** | list/detail ✅ · edit/멀티클러스터/플러그인 ⬜ |
+| **btop** | 그라디언트 그래프, 적응형 레이아웃, per-core 미터 그리드 | 그라디언트바 ✅ · 반응형 two_panes ✅ · 종류별 지표 그리드 ✅ |
+| **all-smi / nvtop** | per-device 스택 그래프, 축+현재값, 프로세스/pod per-device | 드릴다운 라인차트 ✅ · Accel per-device ✅ |
+| **AdGuardian** | 명확한 테두리 + 균형 비율 그리드 | 둥근테두리·two_panes·nice_ceil ✅ |
+| **grafterm** | singlestat 대형 숫자, 게이지 | ⬜ |
+
+### UI 제작 원칙(정립)
+- **collectors(IN, 단방향) → Snapshot bus → panels(OUT)**. fast tier(가속기+노드 1s, join! 병렬) + full(3s).
+- **뷰별 order()/list_len()** 로 선택·정렬·필터 일원화. detail_panel 은 선택 엔티티의 다중지표 라인차트.
+- **반응형**: two_panes(폭<100 세로 스택), nice_ceil(축 상한), zoom(포커스). **semantic colors**(색=심각도/vendor, 상태=글리프).
+- **지표 분리**: host cpu/mem · GPU util/mem · NPU util/mem 을 종류별 + per-device(드릴다운).
+
+### 향후 기능 백로그(우선순위)
+1. **Logs 뷰(`l`)** — 선택 pod의 kubectl logs + `/`검색(talos/k8s-tui 공통 핵심). 실데이터 지금 가능.
+2. **외부 편집(`e`)** — EPP ConfigMap/deploy를 `$EDITOR`로(k8s-tui). safe-action.
+3. **auto-refresh 토글(`a`) / 간격 조절** (talos). (space 일시정지는 구현됨)
+4. **멀티클러스터 컨텍스트 전환**(Ctrl+←→, k8s-tui).
+5. **singlestat 대형 숫자 패널**(grafterm) — QPS/TTFT/goodput.
+6. **니모닉 단일키 네비**(talos) — 숫자키 외 첫글자.
+7. **권한 모드**(observe/admin/danger) + **agent JSON**(DESIGN §11 방향).
+8. 인프라 켜지면: PD 뷰 · EPP decision trace · cache locality.
