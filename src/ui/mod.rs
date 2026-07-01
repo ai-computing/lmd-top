@@ -1310,21 +1310,24 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
     let gridrows: std::collections::HashSet<usize> =
         (1..10).map(|k| k * draw_h / 10).filter(|&r| r > 0 && r < draw_h).collect();
     let buf = f.buffer_mut();
+    // 1) 전체 폭에 10% 가로 눈금(스케일 항상 보임, 데이터 없는 왼쪽도).
+    for &gr in &gridrows {
+        let y = inner.y + inner.height - 1 - gr as u16;
+        for lx in 0..inner.width {
+            buf[(inner.x + lx, y)].set_char('─').set_fg(Color::Indexed(244));
+        }
+    }
+    // 2) 시간 바 — 열마다 "그 시점 값"에 따른 severity 색(높으면 빨강, 낮으면 초록). 눈금 위에 얹음.
     for (ci, &v) in data.iter().enumerate() {
         let frac = (v as f64 / ymax).clamp(0.0, 1.0);
-        // 바 전체를 하나의 severity 색으로 — threshold 넘으면 색 전체가 바뀜(초록 여유→노랑→빨강 과도).
         let bar_color = grad_color(frac * 100.0);
         let eighths_total = (frac * (draw_h as f64) * 8.0).round() as usize;
         let x = inner.x + inner.width - 1 - (data.len() - 1 - ci) as u16;
         for r in 0..draw_h {
             let filled = eighths_total.saturating_sub(r * 8).min(8);
-            let y = inner.y + inner.height - 1 - r as u16;
             if filled > 0 {
+                let y = inner.y + inner.height - 1 - r as u16;
                 buf[(x, y)].set_char(LV[filled]).set_fg(bar_color);
-            } else if gridrows.contains(&r) {
-                buf[(x, y)].set_char('─').set_fg(Color::Indexed(238)); // 10% 가로 그리드라인
-            } else {
-                buf[(x, y)].set_char(' ');
             }
         }
     }
@@ -1355,7 +1358,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(12), Constraint::Length(3), Constraint::Min(5)])
+        .constraints([Constraint::Length(16), Constraint::Length(3), Constraint::Min(5)])
         .split(area);
 
     // 실제 존재하는 것만 동적으로: 가속기 종류별(이름+수) util/mem + host cpu/mem
