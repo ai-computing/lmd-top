@@ -12,7 +12,7 @@ mod prom;
 mod ui;
 
 use anyhow::Result;
-use app::{App, Mode, Pending};
+use app::{App, Mode, Pending, View};
 use collect::{collect, Config};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
@@ -142,11 +142,13 @@ async fn run_tui(cfg: Config, mode: Mode) -> Result<()> {
 
     // UI 루프(블로킹)
     let ns = cfg.ns.clone();
-    let res = tokio::task::spawn_blocking(move || ui_loop(shared, ns, mode)).await?;
+    let prom = cfg.prom.clone();
+    let rt = tokio::runtime::Handle::current(); // Perf 드릴 온디맨드 조회용
+    let res = tokio::task::spawn_blocking(move || ui_loop(shared, ns, prom, mode, rt)).await?;
     res
 }
 
-fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String, mode: Mode) -> Result<()> {
+fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String, prom: String, mode: Mode, rt: tokio::runtime::Handle) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -272,7 +274,18 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String, mode: Mode) -> Res
                             terminal.clear().ok(); // 혹시 모를 잔상 제거 → 전체 재그리기
                         }
                         KeyCode::Char('/') => app.start_filter(),
-                        KeyCode::Enter => app.toggle_detail(),
+                        KeyCode::Enter => {
+                            if app.view == View::Perf {
+                                // 선택 모델 지연 분포 온디맨드 조회 → 히스토그램 드릴
+                                if let Some(model) = app.selected_perf_model() {
+                                    let d = rt.block_on(collect::perf_detail(&prom, &model));
+                                    app.perf_detail = Some(d);
+                                    app.detail = true;
+                                }
+                            } else {
+                                app.toggle_detail();
+                            }
+                        }
                         KeyCode::Char('o') => app.cycle_sort(),
                         KeyCode::Tab => app.next_tab(),
                         KeyCode::Char(c @ '0'..='9') => {

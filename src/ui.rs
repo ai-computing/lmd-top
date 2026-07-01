@@ -3,7 +3,7 @@
 //! 선택 하이라이트는 REVERSED 대신 은은한 배경색(htop/all-smi 스타일).
 
 use crate::app::{App, Mode, Sev, View};
-use crate::collect::{AccelKind, Snapshot};
+use crate::collect::{AccelKind, PerfDetail, Snapshot};
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation,
@@ -1492,6 +1492,52 @@ fn kv(k: &str, v: &str, color: Color) -> Line<'static> {
     ])
 }
 
+/// Perf 드릴다운 — 선택 모델 구간별 p50/p95/p99 + E2E 지연 버킷 히스토그램(온디맨드).
+fn perf_detail_view(f: &mut Frame, area: Rect, d: &PerfDetail) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Min(4)])
+        .split(area);
+    // 구간별 percentile 테이블
+    let qrow = |label: &str, a: &[f64; 3], col: Color| {
+        Row::new(vec![
+            Cell::from(Span::styled(label.to_string(), Style::default().fg(C_DIM()))),
+            Cell::from(Span::styled(ms(a[0]), Style::default().fg(col))),
+            Cell::from(Span::styled(ms(a[1]), Style::default().fg(col))),
+            Cell::from(Span::styled(ms(a[2]), Style::default().fg(col).add_modifier(Modifier::BOLD))),
+        ])
+    };
+    let qt = Table::new(
+        vec![qrow("TTFT", &d.ttft, C_ACC()), qrow("TPOT", &d.tpot, C_DECODE()), qrow("E2E", &d.e2e, C_WARN())],
+        [Constraint::Length(8), Constraint::Length(10), Constraint::Length(10), Constraint::Length(10)],
+    )
+    .header(hrow(&["METRIC", "p50", "p95", "p99"]))
+    .column_spacing(2)
+    .block(block(&format!("latency percentiles · {} · esc back", truncw(&d.model, 30))));
+    f.render_widget(qt, rows[0]);
+
+    // E2E 지연 버킷 분포(히스토그램) — 누적차 rate, 바 길이 = 상대 빈도.
+    let maxc = d.buckets.iter().map(|(_, c)| *c).fold(0.0f64, f64::max).max(1e-9);
+    let mut hl: Vec<Line> = Vec::new();
+    if d.buckets.iter().all(|(_, c)| *c <= 0.0) {
+        hl.push(Line::from(Span::styled("no request samples in the window (idle) — populates under traffic", Style::default().fg(C_DIM()))));
+    } else {
+        for (le, c) in &d.buckets {
+            if *c <= 0.0 {
+                continue;
+            }
+            let lbl = if le.is_infinite() { "  ∞".to_string() } else { format!("≤{}", ms(*le)) };
+            let barw = ((c / maxc) * 34.0).round() as usize;
+            hl.push(Line::from(vec![
+                Span::styled(format!("{:>9} ", lbl), Style::default().fg(C_DIM())),
+                Span::styled("█".repeat(barw), Style::default().fg(C_ACC())),
+                Span::styled(format!(" {:.2}/s", c), Style::default().fg(C_DIM())),
+            ]));
+        }
+    }
+    f.render_widget(Paragraph::new(hl).block(block("E2E latency distribution · rate by bucket")), rows[1]);
+}
+
 // ── Perf (EPP 정책용 성능/분배) ─────────────────────────
 fn ms(v: f64) -> String {
     if v.is_nan() { "–".into() } else if v >= 1.0 { format!("{:.2}s", v) } else { format!("{:.0}ms", v * 1000.0) }
@@ -1560,6 +1606,13 @@ fn nice_ceil(v: f64) -> f64 {
 
 
 fn view_perf(f: &mut Frame, area: Rect, app: &App) {
+    // 드릴: 선택 모델 지연 분포(Enter). perf_detail 이 채워져 있으면 그것부터.
+    if app.detail {
+        if let Some(d) = &app.perf_detail {
+            perf_detail_view(f, area, d);
+            return;
+        }
+    }
     let p = &app.snap.perf;
     let any = [p.e2e_p95, p.ttft_p95, p.tps, p.req_rate].iter().any(|x| !x.is_nan());
 
@@ -1671,8 +1724,13 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         )
         .header(hrow(&["MODEL", "req/s", "tok/s", "TTFT", "QUEUE", "PFILL", "DECODE", "TPOT", "E2E", "premt"]))
         .column_spacing(1)
-        .block(block("Per-model perf (p95) · QUEUE→PFILL(P)→DECODE(D) · latency ms/s"));
-        f.render_widget(mt, bodyc_l);
+        .row_highlight_style(hl_style())
+        .highlight_symbol("▎")
+        .block(block(&format!("Per-model perf (p95) · ⏎ p50/p95/p99 + histogram{}", count_suffix(app.selected, app.snap.perf_rows.len()))));
+        let mut st = TableState::default();
+        st.select(Some(app.selected));
+        f.render_stateful_widget(mt, bodyc_l, &mut st);
+        list_scrollbar(f, bodyc_l, app.snap.perf_rows.len(), app.selected, 1);
     }
 
     // per-pod queue (요청 분배 — 절대 큐 깊이)

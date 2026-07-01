@@ -170,6 +170,8 @@ pub struct App {
     pub confirm: Option<Pending>,   // y/n 확인 대기 중인 변경 작업
     // ── 크로스레이어 드릴 ──
     pub nav_stack: Vec<NavState>,   // pivot 브레드크럼(esc 로 되짚음)
+    // ── Perf 드릴 ──
+    pub perf_detail: Option<crate::collect::PerfDetail>, // 선택 모델 지연 분포(Enter 시 온디맨드)
 }
 
 /// ~/.config/lmd-top/lmd-top.yaml 의 columns: {view: [col,...]} 로드. 없으면 빈 맵(=기본 전체).
@@ -230,6 +232,16 @@ impl App {
             mode: Mode::Observe,
             confirm: None,
             nav_stack: Vec::new(),
+            perf_detail: None,
+        }
+    }
+
+    /// 선택된 per-model perf 행의 모델(서비스)명 — Perf 드릴용.
+    pub fn selected_perf_model(&self) -> Option<String> {
+        if self.view == View::Perf {
+            self.snap.perf_rows.get(self.selected).map(|r| r.model.clone())
+        } else {
+            None
         }
     }
 
@@ -642,6 +654,7 @@ impl App {
             View::Epp => (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect(),
             View::Events => (0..self.snap.events.len()).collect(),
             View::Nodes => (0..self.snap.nodes.len()).collect(),
+            View::Perf => (0..self.snap.perf_rows.len()).collect(),
             _ => Vec::new(),
         };
         if !self.filter.is_empty() {

@@ -275,6 +275,77 @@ async fn qs1(prom_base: &str, promql: &str) -> f64 {
     prom::query(prom_base, promql).await.ok().and_then(|v| v.first().map(|s| s.value)).unwrap_or(f64::NAN)
 }
 
+/// Perf 드릴다운(선택 모델) 온디맨드 상세 — 구간별 p50/p95/p99 + E2E 지연 버킷 분포(히스토그램).
+#[derive(Clone, Default)]
+pub struct PerfDetail {
+    pub model: String,
+    pub e2e: [f64; 3],   // p50/p95/p99 (s)
+    pub ttft: [f64; 3],
+    pub tpot: [f64; 3],
+    pub buckets: Vec<(f64, f64)>, // (le 상한 s, 해당 구간 rate) — 누적차 분포
+}
+
+/// 선택 모델의 지연 분포를 프로메테우스에서 즉석 조회(Enter 시). vLLM/ds4-proxy 엔진 구분.
+pub async fn perf_detail(prom: &str, model: &str) -> PerfDetail {
+    // (E2E metric, TTFT metric, TPOT metric, selector)
+    let (e2e_m, ttft_m, tpot_m, sel) = if model == "ds4-proxy" {
+        ("ds4_proxy_request_duration_seconds", "ds4_proxy_ttft_seconds", "", String::new())
+    } else {
+        (
+            "vllm:e2e_request_latency_seconds",
+            "vllm:time_to_first_token_seconds",
+            "vllm:request_time_per_output_token_seconds",
+            format!("{{service=\"{}\"}}", model),
+        )
+    };
+    let q = |base: &str, quant: f64| {
+        format!("histogram_quantile({}, sum by (le)(rate({}_bucket{}[5m])))", quant, base, sel)
+    };
+    let has_tpot = !tpot_m.is_empty();
+    // 쿼리 문자열을 먼저 바인딩(참조가 join 전체에서 살아있도록).
+    let (qe50, qe95, qe99) = (q(e2e_m, 0.5), q(e2e_m, 0.95), q(e2e_m, 0.99));
+    let (qt50, qt95, qt99) = (q(ttft_m, 0.5), q(ttft_m, 0.95), q(ttft_m, 0.99));
+    let (qp50, qp95, qp99) = (q(tpot_m, 0.5), q(tpot_m, 0.95), q(tpot_m, 0.99));
+    let qbuckets = format!("sum by (le)(rate({}_bucket{}[5m]))", e2e_m, sel);
+    let (e50, e95, e99, t50, t95, t99, p50, p95, p99, buckets) = tokio::join!(
+        qs1(prom, &qe50),
+        qs1(prom, &qe95),
+        qs1(prom, &qe99),
+        qs1(prom, &qt50),
+        qs1(prom, &qt95),
+        qs1(prom, &qt99),
+        async { if has_tpot { qs1(prom, &qp50).await } else { f64::NAN } },
+        async { if has_tpot { qs1(prom, &qp95).await } else { f64::NAN } },
+        async { if has_tpot { qs1(prom, &qp99).await } else { f64::NAN } },
+        prom::query(prom, &qbuckets),
+    );
+    // 누적 버킷 → 구간별 분포(le 오름차순, 인접 차분).
+    let mut cum: Vec<(f64, f64)> = buckets
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| {
+            let le = s.l("le");
+            let up = if le == "+Inf" { f64::INFINITY } else { le.parse::<f64>().ok()? };
+            Some((up, s.value))
+        })
+        .collect();
+    cum.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut dist = Vec::new();
+    let mut prev = 0.0;
+    for (le, c) in &cum {
+        let cnt = (c - prev).max(0.0);
+        dist.push((*le, cnt));
+        prev = *c;
+    }
+    PerfDetail {
+        model: model.to_string(),
+        e2e: [e50, e95, e99],
+        ttft: [t50, t95, t99],
+        tpot: [p50, p95, p99],
+        buckets: dist,
+    }
+}
+
 /// vLLM 모델 메트릭 묶음 (model_name 키).
 struct Vllm {
     run: BTreeMap<String, Series>,
