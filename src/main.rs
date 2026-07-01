@@ -169,6 +169,21 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                         app.help = false;
                         continue;
                     }
+                    // 로그 오버레이 모드
+                    if app.logs_mode {
+                        match k.code {
+                            KeyCode::Esc | KeyCode::Char('q') => app.logs_mode = false,
+                            KeyCode::Up | KeyCode::Char('k') => app.logs_scroll = app.logs_scroll.saturating_sub(1),
+                            KeyCode::Down | KeyCode::Char('j') => app.logs_scroll = app.logs_scroll.saturating_add(3),
+                            KeyCode::Char('r') => {
+                                if let Ok(l) = kube::logs(&ns, &app.logs_target, 400) {
+                                    app.logs = l;
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     match k.code {
                         KeyCode::Char('q') => break, // 종료는 q 만
                         KeyCode::Esc => {
@@ -219,8 +234,24 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                                 app.move_sel(1)
                             }
                         }
-                        KeyCode::Left | KeyCode::Char('h') => app.move_sel(-1), // 이전 항목
-                        KeyCode::Right | KeyCode::Char('l') => app.move_sel(1), // 다음 항목
+                        KeyCode::Left => app.move_sel(-1), // 이전 항목
+                        KeyCode::Right => app.move_sel(1),  // 다음 항목
+                        KeyCode::Char('l') => {
+                            // 선택 pod/모델의 로그 오버레이
+                            if let Some(pod) = app.logs_target_pod() {
+                                match kube::logs(&ns, &pod, 400) {
+                                    Ok(l) => {
+                                        app.logs_scroll = l.len().saturating_sub(30) as u16;
+                                        app.logs = l;
+                                        app.logs_target = pod;
+                                        app.logs_mode = true;
+                                    }
+                                    Err(e) => app.toast = Some(format!("logs: {}", e)),
+                                }
+                            } else {
+                                app.toast = Some("logs: Pods/Models 뷰에서 pod/model 선택".into());
+                            }
+                        }
                         KeyCode::Char('s') => {
                             if let Some(m) = app.selected_model() {
                                 let (name, target) =

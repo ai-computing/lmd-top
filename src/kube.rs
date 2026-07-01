@@ -23,6 +23,25 @@ pub fn cm_data<'a>(cm: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     cm["data"][key].as_str()
 }
 
+/// pod 로그 tail (동기, UI 스레드에서 호출). --all-containers, 최근 tail 줄.
+pub fn logs(ns: &str, pod: &str, tail: u32) -> Result<Vec<String>> {
+    let out = std::process::Command::new("kubectl")
+        .args([
+            "logs",
+            pod,
+            "-n",
+            ns,
+            "--all-containers=true",
+            "--prefix=false",
+            &format!("--tail={}", tail),
+        ])
+        .output()?;
+    if !out.status.success() {
+        return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim().to_string()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).lines().map(|l| l.to_string()).collect())
+}
+
 /// 변경 액션: deploy scale. (M5) — 동기 std 사용(블로킹 UI 스레드에서 호출).
 pub fn scale_deploy(ns: &str, name: &str, replicas: i64) -> Result<()> {
     let out = std::process::Command::new("kubectl")

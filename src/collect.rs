@@ -496,13 +496,14 @@ pub async fn collect(cfg: &Config) -> Snapshot {
 
     // Perf: 구간별 지연 percentile·토큰분포·처리량 (EPP 정책용). 전부 graceful(NaN).
     let pp = &cfg.prom;
+    // 전부 vLLM 네이티브 메트릭(EPP 우회 여부와 무관하게 model-server 에서 export).
     let (req_rate, err_rate, tps, prefix_hit, ttft_p95, e2e_p95) = tokio::join!(
-        qs1(pp, "sum(rate(inference_objective_request_total[1m]))"),
-        qs1(pp, "sum(rate(inference_objective_request_error_total[1m]))"),
+        qs1(pp, "sum(rate(vllm:request_success_total[1m]))"),
+        qs1(pp, "sum(rate(vllm:request_success_total{finished_reason=\"abort\"}[1m]))"),
         qs1(pp, "sum(rate(vllm:generation_tokens_total[1m]))"),
-        qs1(pp, "avg(vllm:gpu_prefix_cache_hit_rate)"),
+        qs1(pp, "sum(rate(vllm:prefix_cache_hits_total[5m])) / sum(rate(vllm:prefix_cache_queries_total[5m]))"),
         qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(vllm:time_to_first_token_seconds_bucket[5m])))"),
-        qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(inference_objective_request_duration_seconds_bucket[5m])))"),
+        qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(vllm:e2e_request_latency_seconds_bucket[5m])))"),
     );
     snap.perf = Perf { req_rate, err_rate, tps, prefix_hit, ttft_p95, e2e_p95 };
 
@@ -518,13 +519,13 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             }
         };
     }
-    merge!("sum by (model_name)(rate(inference_objective_request_total[1m]))", req);
+    merge!("sum by (model_name)(rate(vllm:request_success_total[1m]))", req);
     merge!("sum by (model_name)(rate(vllm:generation_tokens_total[1m]))", tps);
     merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:time_to_first_token_seconds_bucket[5m])))", ttft_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(inference_objective_normalized_time_per_output_token_seconds_bucket[5m])))", tpot_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(inference_objective_request_duration_seconds_bucket[5m])))", e2e_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(inference_objective_input_tokens_bucket[5m])))", in_tok_p95);
-    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(inference_objective_output_tokens_bucket[5m])))", out_tok_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_time_per_output_token_seconds_bucket[5m])))", tpot_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:e2e_request_latency_seconds_bucket[5m])))", e2e_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_prompt_tokens_bucket[5m])))", in_tok_p95);
+    merge!("histogram_quantile(0.95, sum by (model_name,le)(rate(vllm:request_generation_tokens_bucket[5m])))", out_tok_p95);
     snap.perf_rows = pm.into_values().collect();
 
     for s in &p_ready {
@@ -541,21 +542,22 @@ pub async fn collect(cfg: &Config) -> Snapshot {
 
     // vLLM model metrics (모델 서버에 vLLM ServiceMonitor + 트래픽 있을 때 채워짐)
     let vllm = Vllm {
-        run: map_by(q(cfg, "vllm:num_requests_running", &mut warn).await, "model_name"),
-        wait: map_by(q(cfg, "vllm:num_requests_waiting", &mut warn).await, "model_name"),
+        // service 라벨 = Deployment 이름(예: gemma4-rbln) → deploy 와 정확히 join.
+        run: map_by(q(cfg, "sum by (service) (vllm:num_requests_running)", &mut warn).await, "service"),
+        wait: map_by(q(cfg, "sum by (service) (vllm:num_requests_waiting)", &mut warn).await, "service"),
         tps: map_by(
-            q(cfg, "sum by (model_name) (rate(vllm:generation_tokens_total[1m]))", &mut warn).await,
-            "model_name",
+            q(cfg, "sum by (service) (rate(vllm:generation_tokens_total[1m]))", &mut warn).await,
+            "service",
         ),
-        kv: map_by(q(cfg, "vllm:gpu_cache_usage_perc", &mut warn).await, "model_name"),
+        kv: map_by(q(cfg, "max by (service) (vllm:kv_cache_usage_perc)", &mut warn).await, "service"),
         ttft: map_by(
             q(
                 cfg,
-                "histogram_quantile(0.95, sum by (model_name,le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))",
+                "histogram_quantile(0.95, sum by (service,le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))",
                 &mut warn,
             )
             .await,
-            "model_name",
+            "service",
         ),
     };
 

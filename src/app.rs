@@ -81,6 +81,10 @@ pub struct App {
     pub zoom: bool,       // 포커스(줌) — 헤더/탭 숨기고 본문 최대화
     pub paused: bool,     // 화면 갱신 일시정지(데이터 고정, 읽기용)
     pub detail_scroll: u16, // detail 내부 세로 스크롤
+    pub logs_mode: bool,      // 로그 오버레이
+    pub logs_target: String,  // 로그 대상 pod
+    pub logs: Vec<String>,    // 로그 줄
+    pub logs_scroll: u16,
     pub cols: HashMap<String, Vec<String>>, // 뷰별 표시 컬럼(순서) — 설정파일
     pub catalog: Vec<crate::catalog::CatModel>, // 모델 카탈로그(런처)
 }
@@ -127,6 +131,10 @@ impl App {
             zoom: false,
             paused: false,
             detail_scroll: 0,
+            logs_mode: false,
+            logs_target: String::new(),
+            logs: Vec::new(),
+            logs_scroll: 0,
             cols: load_columns(),
             catalog: crate::catalog::load(),
         }
@@ -339,6 +347,28 @@ impl App {
         (self.selected + 1, self.list_len())
     }
 
+    fn entity_name(&self, i: usize) -> String {
+        match self.view {
+            View::Accel => self.snap.accel.get(i).map(|a| format!("{} {}", a.kind.label(), a.id)).unwrap_or_default(),
+            View::Models | View::Overview => self.snap.models.get(i).map(|m| m.name.clone()).unwrap_or_default(),
+            View::Pods => self.snap.pods.get(i).map(|p| p.name.clone()).unwrap_or_default(),
+            View::Nodes => self.snap.nodes.get(i).map(|n| n.name.clone()).unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    /// 이전/다음 항목 이름(detail 네비 힌트용).
+    pub fn neighbor_names(&self) -> (String, String) {
+        let ord = self.order();
+        let n = ord.len();
+        if n <= 1 {
+            return (String::new(), String::new());
+        }
+        let prev = self.entity_name(ord[(self.selected + n - 1) % n]);
+        let next = self.entity_name(ord[(self.selected + 1) % n]);
+        (prev, next)
+    }
+
     /// 현재 뷰의 표시 순서(정렬 적용된 원본 인덱스 목록). 렌더와 액션이 공유.
     pub fn order(&self) -> Vec<usize> {
         use crate::collect::{Accel, ModelRow, PodRow};
@@ -423,6 +453,18 @@ impl App {
     pub fn selected_node(&self) -> Option<&crate::collect::NodeInfo> {
         match self.view {
             View::Nodes => self.sel_orig().and_then(|i| self.snap.nodes.get(i)),
+            _ => None,
+        }
+    }
+
+    /// 로그 대상 pod 이름(현재 선택 기준).
+    pub fn logs_target_pod(&self) -> Option<String> {
+        match self.view {
+            View::Pods => self.selected_pod().map(|p| p.name.clone()),
+            View::Models | View::Overview => self
+                .selected_model()
+                .and_then(|m| self.snap.pods.iter().find(|p| p.name.starts_with(&m.name)).map(|p| p.name.clone())),
+            View::Accel => self.selected_accel().filter(|a| !a.busy_model.is_empty()).map(|a| a.busy_model.clone()),
             _ => None,
         }
     }
