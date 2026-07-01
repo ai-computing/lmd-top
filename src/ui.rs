@@ -1115,16 +1115,32 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Length(12), Constraint::Length(3), Constraint::Min(5)])
         .split(area);
 
-    // 종류별 분리 타임라인 그리드: [CPU util · GPU util · NPU util] / [host mem · GPU mem · NPU mem]
-    let g = Layout::default().direction(Direction::Vertical).constraints([Constraint::Ratio(1, 2); 2]).split(rows[0]);
-    let r0 = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 3); 3]).split(g[0]);
-    let r1 = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 3); 3]).split(g[1]);
-    line_chart(f, r0[0], app, "sys:cpu", "CPU util", "%", Some(100.0), C_OK());
-    line_chart(f, r0[1], app, "sys:gpu_util", "GPU util", "%", Some(100.0), C_OK());
-    line_chart(f, r0[2], app, "sys:npu_util", "NPU util", "%", Some(100.0), C_OK());
-    line_chart(f, r1[0], app, "sys:host_mem", "host mem", "%", Some(100.0), C_ACC());
-    line_chart(f, r1[1], app, "sys:gpu_mem", "GPU mem", "%", Some(100.0), C_ACC());
-    line_chart(f, r1[2], app, "sys:npu_mem", "NPU mem", "%", Some(100.0), C_ACC());
+    // 실제 존재하는 것만 동적으로: 가속기 종류별(이름+수) util/mem + host cpu/mem
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for a in &app.snap.accel {
+        *counts.entry(a.kind.label()).or_default() += 1;
+    }
+    let mut charts: Vec<(String, String)> = Vec::new();
+    for (k, n) in &counts {
+        charts.push((format!("sys:{}_util", k), format!("{} util x{}", k, n)));
+        charts.push((format!("sys:{}_mem", k), format!("{} mem x{}", k, n)));
+    }
+    charts.push(("sys:cpu".to_string(), "CPU util (host)".to_string()));
+    charts.push(("sys:host_mem".to_string(), "host mem".to_string()));
+    let cols = if rows[0].width >= 100 { 3 } else { 2 };
+    let nrows = charts.len().div_ceil(cols).max(1);
+    let grid_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Ratio(1, nrows as u32); nrows])
+        .split(rows[0]);
+    for (i, (key, label)) in charts.iter().enumerate() {
+        let cells = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Ratio(1, cols as u32); cols])
+            .split(grid_rows[i / cols]);
+        let color = if label.contains("mem") { C_ACC() } else { C_OK() };
+        line_chart(f, cells[i % cols], app, key, label, "%", Some(100.0), color);
+    }
 
     // throughput 숫자 + 데이터 없음 안내
     let tl = Line::from(vec![

@@ -263,33 +263,19 @@ impl App {
                     self.push_hist(&format!("{}:load", k), (n.load1 * 10.0).round().max(0.0) as u64);
                 }
             }
-            // 클러스터 추이 — 종류별 분리(GPU util/mem · NPU util/mem · host cpu/mem)
-            use crate::collect::AccelKind;
+            // 클러스터 추이 — 실제 존재하는 가속기 종류만 집계(GPU/RBLN/RNGD 각각)
             let mean = |v: &[f64]| if v.is_empty() { f64::NAN } else { v.iter().sum::<f64>() / v.len() as f64 };
             let pct = |u: f64, t: f64| if t > 0.0 { u / t * 100.0 } else { 0.0 };
-            let (mut gu, mut gmu, mut gmt) = (Vec::new(), 0.0, 0.0);
-            let (mut nu, mut nmu, mut nmt) = (Vec::new(), 0.0, 0.0);
+            let mut byk: std::collections::BTreeMap<&str, (Vec<f64>, f64, f64)> = std::collections::BTreeMap::new();
             for a in &snap.accel {
-                match a.kind {
-                    AccelKind::Gpu => {
-                        gu.push(a.util);
-                        gmu += a.mem_used_gb;
-                        gmt += a.mem_total_gb;
-                    }
-                    _ => {
-                        nu.push(a.util);
-                        nmu += a.mem_used_gb;
-                        nmt += a.mem_total_gb;
-                    }
-                }
+                let e = byk.entry(a.kind.label()).or_default();
+                e.0.push(a.util);
+                e.1 += a.mem_used_gb;
+                e.2 += a.mem_total_gb;
             }
-            if !gu.is_empty() {
-                self.push_hist("sys:gpu_util", mean(&gu).round().clamp(0.0, 100.0) as u64);
-                self.push_hist("sys:gpu_mem", pct(gmu, gmt).round() as u64);
-            }
-            if !nu.is_empty() {
-                self.push_hist("sys:npu_util", mean(&nu).round().clamp(0.0, 100.0) as u64);
-                self.push_hist("sys:npu_mem", pct(nmu, nmt).round() as u64);
+            for (k, (u, mu, mt)) in &byk {
+                self.push_hist(&format!("sys:{}_util", k), mean(u).round().clamp(0.0, 100.0) as u64);
+                self.push_hist(&format!("sys:{}_mem", k), pct(*mu, *mt).round().clamp(0.0, 100.0) as u64);
             }
             let cpus: Vec<f64> = snap.nodes.iter().filter(|n| !n.cpu_pct.is_nan()).map(|n| n.cpu_pct).collect();
             if !cpus.is_empty() {
