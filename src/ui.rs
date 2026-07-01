@@ -12,15 +12,43 @@ use ratatui::widgets::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-// ── 팔레트 ─────────────────────────────────────────────
-const C_OK: Color = Color::Green;
-const C_WARN: Color = Color::Yellow;
-const C_BAD: Color = Color::Red;
-const C_DIM: Color = Color::DarkGray;
-const C_TRACK: Color = Color::Indexed(236); // 바 빈 트랙
-const C_HEAD: Color = Color::Indexed(244); // 헤더 글자
-const C_ACC: Color = Color::Cyan;
-const C_HL: Color = Color::Indexed(238); // 선택 배경
+// ── 팔레트 (테마별) ─────────────────────────────────────
+// 색=심각도/정체성. 테마: 0 default · 1 고대비 · 2 색맹친화(파랑/주황 계열)
+fn th() -> usize {
+    crate::app::theme()
+}
+#[allow(non_snake_case)]
+fn C_OK() -> Color {
+    match th() { 1 => Color::LightGreen, 2 => Color::Rgb(0, 114, 178), _ => Color::Green }
+}
+#[allow(non_snake_case)]
+fn C_WARN() -> Color {
+    match th() { 1 => Color::LightYellow, 2 => Color::Rgb(230, 159, 0), _ => Color::Yellow }
+}
+#[allow(non_snake_case)]
+fn C_BAD() -> Color {
+    match th() { 1 => Color::LightRed, 2 => Color::Rgb(213, 94, 0), _ => Color::Red }
+}
+#[allow(non_snake_case)]
+fn C_DIM() -> Color {
+    match th() { 1 => Color::Gray, _ => Color::DarkGray }
+}
+#[allow(non_snake_case)]
+fn C_TRACK() -> Color {
+    Color::Indexed(236)
+}
+#[allow(non_snake_case)]
+fn C_HEAD() -> Color {
+    match th() { 1 => Color::White, _ => Color::Indexed(244) }
+}
+#[allow(non_snake_case)]
+fn C_ACC() -> Color {
+    match th() { 1 => Color::LightCyan, 2 => Color::Rgb(86, 180, 233), _ => Color::Cyan }
+}
+#[allow(non_snake_case)]
+fn C_HL() -> Color {
+    Color::Indexed(238)
+}
 
 const FRAC: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 
@@ -71,11 +99,11 @@ fn help_overlay(f: &mut Frame) {
     f.render_widget(Clear, area);
     let g = |k: &str, d: &str| {
         Line::from(vec![
-            Span::styled(format!("  {:<10}", k), Style::default().fg(C_ACC).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {:<10}", k), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
             Span::styled(d.to_string(), Style::default().fg(Color::White)),
         ])
     };
-    let sec = |t: &str| Line::from(Span::styled(format!(" {}", t), Style::default().fg(C_HEAD).add_modifier(Modifier::BOLD)));
+    let sec = |t: &str| Line::from(Span::styled(format!(" {}", t), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD)));
     let lines = vec![
         sec("navigation"),
         g("0–6 / Tab", "뷰 전환 (Overview/Accel/Models/EPP/Topo/Pods/Perf)"),
@@ -84,24 +112,25 @@ fn help_overlay(f: &mut Frame) {
         g("o", "정렬 순환"),
         g("/", "필터 (부분일치)"),
         g("s", "선택 모델 scale up/down"),
+        g("t", "테마 전환 (default/고대비/색맹친화)"),
         g("? / Esc", "도움말 / 닫기·뒤로   q 종료"),
         Line::from(""),
         sec("color / glyph"),
         Line::from(vec![
-            Span::styled("  ● ", Style::default().fg(C_OK)), Span::styled("up  ", Style::default().fg(C_DIM)),
-            Span::styled("○ ", Style::default().fg(C_DIM)), Span::styled("idle  ", Style::default().fg(C_DIM)),
-            Span::styled("◐ ", Style::default().fg(C_WARN)), Span::styled("pending  ", Style::default().fg(C_DIM)),
-            Span::styled("⚠ ", Style::default().fg(C_WARN)), Span::styled("throttle  ", Style::default().fg(C_DIM)),
-            Span::styled("✗ ", Style::default().fg(C_BAD)), Span::styled("down", Style::default().fg(C_DIM)),
+            Span::styled("  ● ", Style::default().fg(C_OK())), Span::styled("up  ", Style::default().fg(C_DIM())),
+            Span::styled("○ ", Style::default().fg(C_DIM())), Span::styled("idle  ", Style::default().fg(C_DIM())),
+            Span::styled("◐ ", Style::default().fg(C_WARN())), Span::styled("pending  ", Style::default().fg(C_DIM())),
+            Span::styled("⚠ ", Style::default().fg(C_WARN())), Span::styled("throttle  ", Style::default().fg(C_DIM())),
+            Span::styled("✗ ", Style::default().fg(C_BAD())), Span::styled("down", Style::default().fg(C_DIM())),
         ]),
         Line::from(vec![
-            Span::styled("  util/mem/temp: ", Style::default().fg(C_DIM)),
-            Span::styled("낮음", Style::default().fg(C_OK)), Span::raw(" "),
-            Span::styled("중간", Style::default().fg(C_WARN)), Span::raw(" "),
-            Span::styled("높음", Style::default().fg(C_BAD)),
+            Span::styled("  util/mem/temp: ", Style::default().fg(C_DIM())),
+            Span::styled("낮음", Style::default().fg(C_OK())), Span::raw(" "),
+            Span::styled("중간", Style::default().fg(C_WARN())), Span::raw(" "),
+            Span::styled("높음", Style::default().fg(C_BAD())),
         ]),
         Line::from(vec![
-            Span::styled("  vendor: ", Style::default().fg(C_DIM)),
+            Span::styled("  vendor: ", Style::default().fg(C_DIM())),
             Span::styled("GPU ", Style::default().fg(Color::Green)),
             Span::styled("RBLN ", Style::default().fg(Color::Magenta)),
             Span::styled("RNGD", Style::default().fg(Color::Cyan)),
@@ -112,8 +141,8 @@ fn help_overlay(f: &mut Frame) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(C_ACC))
-                .title(Span::styled(" lmd-top · 도움말 (아무 키나 닫기) ", Style::default().fg(C_ACC).add_modifier(Modifier::BOLD))),
+                .border_style(Style::default().fg(C_ACC()))
+                .title(Span::styled(" lmd-top · 도움말 (아무 키나 닫기) ", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD))),
         ),
         area,
     );
@@ -123,16 +152,16 @@ fn help_overlay(f: &mut Frame) {
 fn title_bar(f: &mut Frame, area: Rect, s: &Snapshot, tick: u64) {
     let spin = SPINNER[(tick as usize / 2) % SPINNER.len()];
     let gw = if s.gw_addr.is_empty() {
-        Span::styled("⌂ gw —", Style::default().fg(C_DIM))
+        Span::styled("⌂ gw —", Style::default().fg(C_DIM()))
     } else if s.gw_ok {
-        Span::styled(format!("⌂ gw {} ●", s.gw_addr), Style::default().fg(C_OK))
+        Span::styled(format!("⌂ gw {} ●", s.gw_addr), Style::default().fg(C_OK()))
     } else {
-        Span::styled(format!("⌂ gw {} ○", s.gw_addr), Style::default().fg(C_WARN))
+        Span::styled(format!("⌂ gw {} ○", s.gw_addr), Style::default().fg(C_WARN()))
     };
     let line = Line::from(vec![
-        Span::styled(format!("{} ", spin), Style::default().fg(C_ACC)),
-        Span::styled("lmd-top", Style::default().fg(C_ACC).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("  llm-d · {} nodes  ", s.nodes.len()), Style::default().fg(C_DIM)),
+        Span::styled(format!("{} ", spin), Style::default().fg(C_ACC())),
+        Span::styled("lmd-top", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  llm-d · {} nodes  ", s.nodes.len()), Style::default().fg(C_DIM())),
         gw,
     ]);
     f.render_widget(Paragraph::new(line), area);
@@ -157,18 +186,18 @@ fn summary_bar(f: &mut Frame, area: Rect, s: &Snapshot) {
     let power: f64 = s.accel.iter().map(|a| a.power).sum();
     let mempct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
     let line = Line::from(vec![
-        Span::styled(format!("GPU {} ", gpu), Style::default().fg(if gpu == 0 { C_DIM } else { kind_color(AccelKind::Gpu) })),
+        Span::styled(format!("GPU {} ", gpu), Style::default().fg(if gpu == 0 { C_DIM() } else { kind_color(AccelKind::Gpu) })),
         Span::styled(format!("RBLN {} ", rbln), Style::default().fg(kind_color(AccelKind::Rbln))),
         Span::styled(format!("RNGD {} ", rngd), Style::default().fg(kind_color(AccelKind::Rngd))),
-        Span::styled(format!("· {} busy ", busy), Style::default().fg(C_DIM)),
+        Span::styled(format!("· {} busy ", busy), Style::default().fg(C_DIM())),
         Span::raw("│ "),
         Span::styled(format!("vram {:.0}/{:.0}G ", mu, mt), Style::default().fg(mem_color(mempct))),
         Span::raw("│ "),
         Span::styled(
             format!("models {}/{} ", serving, s.models.len()),
-            Style::default().fg(if serving == 0 { C_WARN } else { C_OK }),
+            Style::default().fg(if serving == 0 { C_WARN() } else { C_OK() }),
         ),
-        Span::styled(format!("│ ⚡{:.0}W", power), Style::default().fg(C_DIM)),
+        Span::styled(format!("│ ⚡{:.0}W", power), Style::default().fg(C_DIM())),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -178,9 +207,9 @@ fn tabs(f: &mut Frame, area: Rect, app: &App) {
     for (i, v) in View::ALL.iter().enumerate() {
         let sel = *v == app.view;
         let st = if sel {
-            Style::default().fg(Color::Black).bg(C_ACC).add_modifier(Modifier::BOLD)
+            Style::default().fg(Color::Black).bg(C_ACC()).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(C_DIM)
+            Style::default().fg(C_DIM())
         };
         spans.push(Span::styled(format!(" {}:{} ", i, v.title()), st));
         spans.push(Span::raw(" "));
@@ -193,10 +222,10 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     if app.filtering {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(" / ", Style::default().fg(Color::Black).bg(C_ACC).add_modifier(Modifier::BOLD)),
+                Span::styled(" / ", Style::default().fg(Color::Black).bg(C_ACC()).add_modifier(Modifier::BOLD)),
                 Span::styled(format!(" {}", app.filter), Style::default().fg(Color::White)),
-                Span::styled("▏", Style::default().fg(C_ACC)),
-                Span::styled("   Enter/Esc 확정", Style::default().fg(C_DIM)),
+                Span::styled("▏", Style::default().fg(C_ACC())),
+                Span::styled("   Enter/Esc 확정", Style::default().fg(C_DIM())),
             ])),
             area,
         );
@@ -205,14 +234,14 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     if let Some(t) = &app.toast {
         let msg = truncw(t, area.width.saturating_sub(1) as usize);
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(format!(" {} ", msg), Style::default().fg(Color::Black).bg(C_WARN)))),
+            Paragraph::new(Line::from(Span::styled(format!(" {} ", msg), Style::default().fg(Color::Black).bg(C_WARN())))),
             area,
         );
         return;
     }
     let mut spans: Vec<Span> = Vec::new();
     if !app.filter.is_empty() {
-        spans.push(Span::styled(format!("[filter: {}] ", app.filter), Style::default().fg(Color::Black).bg(C_ACC)));
+        spans.push(Span::styled(format!("[filter: {}] ", app.filter), Style::default().fg(Color::Black).bg(C_ACC())));
         spans.push(Span::raw(" "));
     }
     let sortable = app.sort_modes() > 1;
@@ -220,8 +249,8 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     if sortable {
         hint.push_str(&format!("o sort:{}  ", app.sort_label()));
     }
-    hint.push_str("s scale  Tab/0-6 view  ? help  q quit");
-    spans.push(Span::styled(hint, Style::default().fg(C_DIM)));
+    hint.push_str("s scale  t theme  Tab/0-6 view  ? help  q quit");
+    spans.push(Span::styled(hint, Style::default().fg(C_DIM())));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -267,41 +296,41 @@ fn bar_line(pct: f64, width: usize, color: Color) -> Line<'static> {
     let track = "░".repeat(width.saturating_sub(used));
     Line::from(vec![
         Span::styled(filled, Style::default().fg(color)),
-        Span::styled(track, Style::default().fg(C_TRACK)),
+        Span::styled(track, Style::default().fg(C_TRACK())),
     ])
 }
 
 fn util_color(p: f64) -> Color {
     if p > 85.0 {
-        C_BAD
+        C_BAD()
     } else if p > 60.0 {
-        C_WARN
+        C_WARN()
     } else if p > 10.0 {
-        C_OK
+        C_OK()
     } else {
-        C_DIM
+        C_DIM()
     }
 }
 fn mem_color(p: f64) -> Color {
     if p > 90.0 {
-        C_BAD
+        C_BAD()
     } else if p > 70.0 {
-        C_WARN
+        C_WARN()
     } else if p > 1.0 {
-        C_OK
+        C_OK()
     } else {
-        C_DIM
+        C_DIM()
     }
 }
 fn temp_color(t: f64) -> Color {
     if t > 75.0 {
-        C_BAD
+        C_BAD()
     } else if t > 60.0 {
-        C_WARN
+        C_WARN()
     } else if t > 0.0 {
         Color::Gray
     } else {
-        C_DIM
+        C_DIM()
     }
 }
 fn kind_color(k: AccelKind) -> Color {
@@ -330,8 +359,8 @@ fn block(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(C_TRACK))
-        .title(Span::styled(format!(" {} ", title), Style::default().fg(C_ACC).add_modifier(Modifier::BOLD)))
+        .border_style(Style::default().fg(C_TRACK()))
+        .title(Span::styled(format!(" {} ", title), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)))
 }
 
 /// 애니메이션 마퀴 — 폭 초과 시 tick 에 따라 가로 스크롤(선택 행 강조용). 이름은 대개 ASCII.
@@ -350,9 +379,9 @@ fn marquee(s: &str, width: usize, tick: u64) -> String {
 /// 상태 아이콘(폭1 BMP — 이모지 회피).
 fn dot(up: bool) -> Span<'static> {
     if up {
-        Span::styled("● ", Style::default().fg(C_OK))
+        Span::styled("● ", Style::default().fg(C_OK()))
     } else {
-        Span::styled("○ ", Style::default().fg(C_DIM))
+        Span::styled("○ ", Style::default().fg(C_DIM()))
     }
 }
 
@@ -361,13 +390,13 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 fn hrow(cols: &[&str]) -> Row<'static> {
     Row::new(
         cols.iter()
-            .map(|c| Cell::from(Span::styled(c.to_string(), Style::default().fg(C_HEAD).add_modifier(Modifier::BOLD))))
+            .map(|c| Cell::from(Span::styled(c.to_string(), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))))
             .collect::<Vec<_>>(),
     )
 }
 
 fn hl_style() -> Style {
-    Style::default().bg(C_HL).add_modifier(Modifier::BOLD)
+    Style::default().bg(C_HL()).add_modifier(Modifier::BOLD)
 }
 
 fn cellw(text: String, w: usize) -> Cell<'static> {
@@ -393,14 +422,14 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
             let mut mem = bar_line(mempct, 7, mem_color(mempct)).spans;
             mem.push(Span::styled(
                 format!(" {:.0}/{:.0}G", a.mem_used_gb, a.mem_total_gb),
-                Style::default().fg(C_DIM),
+                Style::default().fg(C_DIM()),
             ));
             let (hg, hc) = if !a.alive {
-                ("✗", C_BAD)
+                ("✗", C_BAD())
             } else if a.throttle > 0.0 {
-                ("⚠", C_WARN)
+                ("⚠", C_WARN())
             } else {
-                ("●", C_OK)
+                ("●", C_OK())
             };
             Row::new(vec![
                 Cell::from(Line::from(vec![
@@ -414,7 +443,7 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
                 Cell::from(Line::from(mem)),
                 Cell::from(Span::styled(format!("{:.0}°C", a.temp), Style::default().fg(temp_color(a.temp)))),
                 cellw(format!("{:.0}W", a.power), 5),
-                Cell::from(Span::styled(model_cell, Style::default().fg(C_DIM))),
+                Cell::from(Span::styled(model_cell, Style::default().fg(C_DIM()))),
             ])
         })
         .collect();
@@ -470,17 +499,17 @@ fn models_table<'a>(app: &'a App, title: &'a str) -> Table<'static> {
         .map(|(pos, &i)| {
             let m = &app.snap.models[i];
             let color = if m.status.contains("Running") {
-                C_OK
+                C_OK()
             } else if m.status.contains("Pending") {
-                C_WARN
+                C_WARN()
             } else {
-                C_DIM
+                C_DIM()
             };
             let kv = m.kv.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or("–".into());
             let name = if pos == app.selected { marquee(&m.name, 20, app.tick) } else { truncw(&m.name, 20) };
             Row::new(vec![
                 Cell::from(name),
-                Cell::from(Span::styled(truncw(&m.accel, 13), Style::default().fg(C_DIM))),
+                Cell::from(Span::styled(truncw(&m.accel, 13), Style::default().fg(C_DIM()))),
                 cellw(format!("{}/{}", m.ready, m.desired), 6),
                 cellw(fmt_opt(m.running), 4),
                 cellw(fmt_opt(m.waiting), 4),
@@ -520,10 +549,10 @@ fn view_pods(f: &mut Frame, area: Rect, app: &App) {
         .map(|(pos, &i)| {
             let p = &app.snap.pods[i];
             let color = match p.phase.as_str() {
-                "Running" => C_OK,
-                "Pending" => C_WARN,
-                "Failed" => C_BAD,
-                _ => C_DIM,
+                "Running" => C_OK(),
+                "Pending" => C_WARN(),
+                "Failed" => C_BAD(),
+                _ => C_DIM(),
             };
             let name = if pos == app.selected { marquee(&p.name, 40, app.tick) } else { truncw(&p.name, 40) };
             Row::new(vec![
@@ -533,7 +562,7 @@ fn view_pods(f: &mut Frame, area: Rect, app: &App) {
                 cellw(p.node.clone(), 18),
                 Cell::from(Span::styled(
                     p.restarts.to_string(),
-                    Style::default().fg(if p.restarts > 0 { C_WARN } else { C_DIM }),
+                    Style::default().fg(if p.restarts > 0 { C_WARN() } else { C_DIM() }),
                 )),
             ])
         })
@@ -567,9 +596,9 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
     match &app.snap.epp {
         Some(cfg) => {
             lines.push(Line::from(vec![
-                Span::styled("profile: ", Style::default().fg(C_DIM)),
+                Span::styled("profile: ", Style::default().fg(C_DIM())),
                 Span::styled(cfg.profile.clone(), Style::default().fg(Color::White)),
-                Span::styled("    picker: ", Style::default().fg(C_DIM)),
+                Span::styled("    picker: ", Style::default().fg(C_DIM())),
                 Span::styled(cfg.picker.clone(), Style::default().fg(Color::White)),
             ]));
             lines.push(Line::from(""));
@@ -578,24 +607,24 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                 let bw = ((w / maxw) * 16.0).round() as usize;
                 lines.push(Line::from(vec![
                     Span::styled(format!("{:<32}", truncw(name, 32)), Style::default().fg(Color::White)),
-                    Span::styled(format!("w{:>2.0} ", w), Style::default().fg(C_WARN)),
-                    Span::styled("█".repeat(bw), Style::default().fg(C_ACC)),
+                    Span::styled(format!("w{:>2.0} ", w), Style::default().fg(C_WARN())),
+                    Span::styled("█".repeat(bw), Style::default().fg(C_ACC())),
                 ]));
             }
         }
-        None => lines.push(Line::from(Span::styled("EPP ConfigMap 미발견 (llmd-router-epp)", Style::default().fg(C_DIM)))),
+        None => lines.push(Line::from(Span::styled("EPP ConfigMap 미발견 (llmd-router-epp)", Style::default().fg(C_DIM())))),
     }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("prefix indexer size: ", Style::default().fg(C_DIM)),
+        Span::styled("prefix indexer size: ", Style::default().fg(C_DIM())),
         Span::styled(
             if app.snap.prefix_idx.is_nan() { "–".to_string() } else { format!("{:.0}", app.snap.prefix_idx) },
             Style::default().fg(Color::White),
         ),
-        Span::styled("    EPP in request path: ", Style::default().fg(C_DIM)),
+        Span::styled("    EPP in request path: ", Style::default().fg(C_DIM())),
         Span::styled(
             if app.snap.epp_in_path { "yes" } else { "no (HTTPRoute가 Service 직접 → 우회)" },
-            Style::default().fg(if app.snap.epp_in_path { C_OK } else { C_WARN }),
+            Style::default().fg(if app.snap.epp_in_path { C_OK() } else { C_WARN() }),
         ),
     ]));
     f.render_widget(Paragraph::new(lines).block(block("EPP Inspector · active scorers (ConfigMap)")), split[0]);
@@ -617,7 +646,7 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                 cellw(fmt_nan(p.queue, 1), 8),
                 Cell::from(Span::styled(
                     fmt_nan(p.sat, 2),
-                    Style::default().fg(if p.sat > 0.8 { C_BAD } else if p.sat > 0.5 { C_WARN } else { C_DIM }),
+                    Style::default().fg(if p.sat > 0.8 { C_BAD() } else if p.sat > 0.5 { C_WARN() } else { C_DIM() }),
                 )),
             ])
         })
@@ -634,17 +663,17 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
     let mut dl: Vec<Line> = Vec::new();
     let total: f64 = app.snap.decisions.iter().map(|(_, c)| c).sum();
     if app.snap.decisions.is_empty() || total <= 0.0 {
-        dl.push(Line::from(Span::styled("요청 분배 데이터 없음", Style::default().fg(C_DIM))));
+        dl.push(Line::from(Span::styled("요청 분배 데이터 없음", Style::default().fg(C_DIM()))));
         dl.push(Line::from(Span::styled(
             if app.snap.epp_in_path { "(트래픽 대기 중)" } else { "(EPP 우회 — Topo 뷰 참조)" },
-            Style::default().fg(C_DIM),
+            Style::default().fg(C_DIM()),
         )));
     } else {
         for (pod, cnt) in app.snap.decisions.iter().take(6) {
             let share = cnt / total * 100.0;
             let mut sp = vec![Span::styled(format!("{:<22} ", truncw(pod, 22)), Style::default().fg(Color::White))];
-            sp.extend(bar_line(share, 8, C_ACC).spans);
-            sp.push(Span::styled(format!(" {:>3.0}%", share), Style::default().fg(C_DIM)));
+            sp.extend(bar_line(share, 8, C_ACC()).spans);
+            sp.push(Span::styled(format!(" {:>3.0}%", share), Style::default().fg(C_DIM())));
             dl.push(Line::from(sp));
         }
     }
@@ -662,7 +691,7 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     } else {
         format!("llm-d-gateway  {}  {}", s.gw_addr, if s.gw_ok { "●Programmed" } else { "○" })
     };
-    lines.push(Line::from(Span::styled(gw, Style::default().fg(C_OK).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(Span::styled(gw, Style::default().fg(C_OK()).add_modifier(Modifier::BOLD))));
     for (i, r) in s.routes.iter().enumerate() {
         let branch = if i + 1 == s.routes.len() { "└─" } else { "├─" };
         let m = s.models.iter().find(|m| m.name == r.backend);
@@ -672,23 +701,23 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
             None => "?".into(),
         };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", branch), Style::default().fg(C_DIM)),
+            Span::styled(format!(" {} ", branch), Style::default().fg(C_DIM())),
             dot(up),
             Span::styled(format!("{:<10}", truncw(&r.path, 10)), Style::default().fg(Color::White)),
-            Span::styled("→ ", Style::default().fg(C_DIM)),
-            Span::styled(format!("{}:", r.kind), Style::default().fg(C_DIM)),
-            Span::styled(format!("{:<24}", truncw(&r.backend, 24)), Style::default().fg(if up { C_OK } else { C_DIM })),
-            Span::styled(annot, Style::default().fg(C_DIM)),
+            Span::styled("→ ", Style::default().fg(C_DIM())),
+            Span::styled(format!("{}:", r.kind), Style::default().fg(C_DIM())),
+            Span::styled(format!("{:<24}", truncw(&r.backend, 24)), Style::default().fg(if up { C_OK() } else { C_DIM() })),
+            Span::styled(annot, Style::default().fg(C_DIM())),
         ]));
     }
     // EPP 경유 여부 진단
     if !s.routes.is_empty() {
         if s.epp_in_path {
-            lines.push(Line::from(Span::styled("  ✓ 라우팅이 InferencePool(EPP) 경유", Style::default().fg(C_OK))));
+            lines.push(Line::from(Span::styled("  ✓ 라우팅이 InferencePool(EPP) 경유", Style::default().fg(C_OK()))));
         } else {
             lines.push(Line::from(Span::styled(
                 "  ⚠ HTTPRoute 가 Service 로 직접 라우팅 → InferencePool/EPP 우회 (EPP 메트릭 비어있음)",
-                Style::default().fg(C_WARN),
+                Style::default().fg(C_WARN()),
             )));
         }
     }
@@ -702,34 +731,34 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     // InferencePool + EPP + SLO
     let mut pl: Vec<Line> = Vec::new();
     if s.pools.is_empty() {
-        pl.push(Line::from(Span::styled("(InferencePool 없음)", Style::default().fg(C_DIM))));
+        pl.push(Line::from(Span::styled("(InferencePool 없음)", Style::default().fg(C_DIM()))));
     }
     for p in &s.pools {
         pl.push(Line::from(vec![
             Span::styled(format!("{:<18}", truncw(&p.name, 18)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!("ep {}/{} ", p.ep_ready, p.ep_total),
-                Style::default().fg(if p.ep_total == 0 { C_WARN } else { C_OK }),
+                Style::default().fg(if p.ep_total == 0 { C_WARN() } else { C_OK() }),
             ),
-            Span::styled(format!("EPP:{} ", if p.epp.is_empty() { "–" } else { &p.epp }), Style::default().fg(C_ACC)),
-            Span::styled(format!("sel={}", if p.selector.is_empty() { "–" } else { &p.selector }), Style::default().fg(C_DIM)),
+            Span::styled(format!("EPP:{} ", if p.epp.is_empty() { "–" } else { &p.epp }), Style::default().fg(C_ACC())),
+            Span::styled(format!("sel={}", if p.selector.is_empty() { "–" } else { &p.selector }), Style::default().fg(C_DIM())),
         ]));
     }
     if !s.objectives.is_empty() {
         let so: Vec<String> = s.objectives.iter().map(|o| format!("{}(p{}→{})", o.name, o.priority, o.pool)).collect();
         pl.push(Line::from(vec![
-            Span::styled("SLO  ", Style::default().fg(C_DIM)),
+            Span::styled("SLO  ", Style::default().fg(C_DIM())),
             Span::styled(so.join("  "), Style::default().fg(Color::White)),
         ]));
     }
     for a in &s.autoscalers {
         pl.push(Line::from(vec![
-            Span::styled("autoscale ", Style::default().fg(C_DIM)),
+            Span::styled("autoscale ", Style::default().fg(C_DIM())),
             Span::styled(truncw(&a.target, 26), Style::default().fg(Color::White)),
-            Span::styled(format!("  {}↔{} rep={} ", a.min, a.max, a.replicas), Style::default().fg(C_DIM)),
-            Span::styled(if a.active { "active" } else { "idle" }, Style::default().fg(if a.active { C_OK } else { C_DIM })),
-            Span::styled(if a.ready { " ✓" } else { " ⚠notready" }, Style::default().fg(if a.ready { C_OK } else { C_WARN })),
-            Span::styled(format!(" [{}]", a.triggers), Style::default().fg(C_DIM)),
+            Span::styled(format!("  {}↔{} rep={} ", a.min, a.max, a.replicas), Style::default().fg(C_DIM())),
+            Span::styled(if a.active { "active" } else { "idle" }, Style::default().fg(if a.active { C_OK() } else { C_DIM() })),
+            Span::styled(if a.ready { " ✓" } else { " ⚠notready" }, Style::default().fg(if a.ready { C_OK() } else { C_WARN() })),
+            Span::styled(format!(" [{}]", a.triggers), Style::default().fg(C_DIM())),
         ]));
     }
     f.render_widget(Paragraph::new(pl).block(block("InferencePool / EPP / SLO / Autoscale")), top[1]);
@@ -757,11 +786,11 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     for (kind, node, cnt, us, mu, mt, alive, thr) in &groups {
         let util = us / (*cnt as f64);
         let mempct = if *mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
-        let (hi, hc) = if !*alive { ("✗", C_BAD) } else if *thr { ("⚠", C_WARN) } else { ("●", C_OK) };
+        let (hi, hc) = if !*alive { ("✗", C_BAD()) } else if *thr { ("⚠", C_WARN()) } else { ("●", C_OK()) };
         let mut sp = vec![
             Span::styled(format!("{} ", hi), Style::default().fg(hc)),
             Span::styled(format!("{:<4}×{} ", kind.label(), cnt), Style::default().fg(kind_color(*kind)).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("@{:<16} ", truncw(node, 16)), Style::default().fg(C_DIM)),
+            Span::styled(format!("@{:<16} ", truncw(node, 16)), Style::default().fg(C_DIM())),
         ];
         sp.extend(bar_line(util, 10, util_color(util)).spans);
         sp.push(Span::styled(format!(" {:>3.0}%  ", util), Style::default().fg(util_color(util))));
@@ -769,29 +798,29 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         al.push(Line::from(sp));
     }
     if al.is_empty() {
-        al.push(Line::from(Span::styled("  (no accelerator metrics)", Style::default().fg(C_DIM))));
+        al.push(Line::from(Span::styled("  (no accelerator metrics)", Style::default().fg(C_DIM()))));
     }
     f.render_widget(Paragraph::new(al).block(block("Accelerators (종류·노드별)")), rows[0]);
 
     // Inference: EPP 경로 + 풀 endpoints + scorers + autoscale
     let mut pl: Vec<Line> = Vec::new();
     pl.push(Line::from(vec![
-        Span::styled("EPP 경로 ", Style::default().fg(C_DIM)),
+        Span::styled("EPP 경로 ", Style::default().fg(C_DIM())),
         Span::styled(
             if s.epp_in_path { "InferencePool 경유 ●" } else { "우회 (HTTPRoute→Service 직접) ⚠" },
-            Style::default().fg(if s.epp_in_path { C_OK } else { C_WARN }),
+            Style::default().fg(if s.epp_in_path { C_OK() } else { C_WARN() }),
         ),
     ]));
     for p in s.pools.iter().take(2) {
         pl.push(Line::from(vec![
             dot(p.ep_ready > 0),
             Span::styled(format!("{:<16} ", truncw(&p.name, 16)), Style::default().fg(Color::White)),
-            Span::styled(format!("endpoints {}/{}  sat {}", p.ep_ready, p.ep_total, fmt_nan(p.sat, 2)), Style::default().fg(C_DIM)),
+            Span::styled(format!("endpoints {}/{}  sat {}", p.ep_ready, p.ep_total, fmt_nan(p.sat, 2)), Style::default().fg(C_DIM())),
         ]));
     }
     if let Some(cfg) = &s.epp {
         let names: Vec<String> = cfg.scorers.iter().map(|(n, w)| format!("{}·{:.0}", n.replace("-scorer", ""), w)).collect();
-        pl.push(Line::from(Span::styled(format!("scorers: {}", names.join("  ")), Style::default().fg(C_DIM))));
+        pl.push(Line::from(Span::styled(format!("scorers: {}", names.join("  ")), Style::default().fg(C_DIM()))));
     }
     f.render_widget(Paragraph::new(pl).block(block("Inference (EPP / InferencePool)")), rows[1]);
 
@@ -817,51 +846,51 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         let mempct = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
         lines.push(kv("kind", a.kind.label(), kind_color(a.kind)));
         lines.push(kv("id / node", &format!("{} / {}", a.id, a.node), Color::White));
-        let mut u = vec![Span::styled("util       ", Style::default().fg(C_DIM))];
+        let mut u = vec![Span::styled("util       ", Style::default().fg(C_DIM()))];
         u.extend(bar_line(a.util, 24, util_color(a.util)).spans);
         u.push(Span::styled(format!(" {:.0}%", a.util), Style::default().fg(util_color(a.util))));
         lines.push(Line::from(u));
-        let mut m = vec![Span::styled("memory     ", Style::default().fg(C_DIM))];
+        let mut m = vec![Span::styled("memory     ", Style::default().fg(C_DIM()))];
         m.extend(bar_line(mempct, 24, mem_color(mempct)).spans);
-        m.push(Span::styled(format!(" {:.1}/{:.1} GB ({:.0}%)", a.mem_used_gb, a.mem_total_gb, mempct), Style::default().fg(C_DIM)));
+        m.push(Span::styled(format!(" {:.1}/{:.1} GB ({:.0}%)", a.mem_used_gb, a.mem_total_gb, mempct), Style::default().fg(C_DIM())));
         lines.push(Line::from(m));
         lines.push(kv("temp", &format!("{:.0} °C", a.temp), temp_color(a.temp)));
         lines.push(kv("power", &format!("{:.0} W", a.power), Color::White));
         let health = if !a.alive {
-            ("✗ not alive".to_string(), C_BAD)
+            ("✗ not alive".to_string(), C_BAD())
         } else if a.throttle > 0.0 {
-            (format!("⚠ alive · throttling {:.0}", a.throttle), C_WARN)
+            (format!("⚠ alive · throttling {:.0}", a.throttle), C_WARN())
         } else {
-            ("● healthy".to_string(), C_OK)
+            ("● healthy".to_string(), C_OK())
         };
         lines.push(kv("health", &health.0, health.1));
-        lines.push(kv("model/pod", if a.busy_model.is_empty() { "(idle)" } else { a.busy_model.as_str() }, C_ACC));
+        lines.push(kv("model/pod", if a.busy_model.is_empty() { "(idle)" } else { a.busy_model.as_str() }, C_ACC()));
     } else if let Some(m) = app.selected_model() {
         title = "Model detail · esc 닫기";
         lines.push(kv("model", &m.name, Color::White));
-        lines.push(kv("status", &m.status, if m.ready > 0 { C_OK } else { C_DIM }));
+        lines.push(kv("status", &m.status, if m.ready > 0 { C_OK() } else { C_DIM() }));
         lines.push(kv("replicas", &format!("{}/{} (ready/desired)", m.ready, m.desired), Color::White));
-        lines.push(kv("accelerator", &m.accel, C_ACC));
+        lines.push(kv("accelerator", &m.accel, C_ACC()));
         lines.push(kv("route", if m.route.is_empty() { "–" } else { m.route.as_str() }, Color::White));
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("inference (vLLM)", Style::default().fg(C_HEAD).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled("inference (vLLM)", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))));
         lines.push(kv("  running / waiting", &format!("{} / {}", fmt_opt(m.running), fmt_opt(m.waiting)), Color::White));
         lines.push(kv("  KV cache", &m.kv.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or("– (vLLM 메트릭 미수집)".into()), Color::White));
         lines.push(kv("  tokens/s", &m.tps.map(|x| format!("{:.1}", x)).unwrap_or("–".into()), Color::White));
         lines.push(kv("  TTFT p95", &m.ttft.map(|x| format!("{:.0} ms", x * 1000.0)).unwrap_or("–".into()), Color::White));
         lines.push(Line::from(""));
         let pods: Vec<&str> = app.snap.pods.iter().filter(|p| p.name.starts_with(&m.name)).map(|p| p.name.as_str()).collect();
-        lines.push(kv("pods", &if pods.is_empty() { "(none)".to_string() } else { pods.join(", ") }, C_DIM));
-        lines.push(Line::from(Span::styled("  s = scale up/down", Style::default().fg(C_DIM))));
+        lines.push(kv("pods", &if pods.is_empty() { "(none)".to_string() } else { pods.join(", ") }, C_DIM()));
+        lines.push(Line::from(Span::styled("  s = scale up/down", Style::default().fg(C_DIM()))));
     } else if let Some(p) = app.selected_pod() {
         title = "Pod detail · esc 닫기";
         lines.push(kv("pod", &p.name, Color::White));
-        lines.push(kv("phase", &p.phase, if p.phase == "Running" { C_OK } else { C_DIM }));
+        lines.push(kv("phase", &p.phase, if p.phase == "Running" { C_OK() } else { C_DIM() }));
         lines.push(kv("ready", &p.ready, Color::White));
         lines.push(kv("node", &p.node, Color::White));
-        lines.push(kv("restarts", &p.restarts.to_string(), if p.restarts > 0 { C_WARN } else { Color::White }));
+        lines.push(kv("restarts", &p.restarts.to_string(), if p.restarts > 0 { C_WARN() } else { Color::White }));
     } else {
-        lines.push(Line::from(Span::styled("선택된 항목 없음", Style::default().fg(C_DIM))));
+        lines.push(Line::from(Span::styled("선택된 항목 없음", Style::default().fg(C_DIM()))));
     }
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block(title)), area);
@@ -869,7 +898,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
 
 fn kv(k: &str, v: &str, color: Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{:<18} ", k), Style::default().fg(C_DIM)),
+        Span::styled(format!("{:<18} ", k), Style::default().fg(C_DIM())),
         Span::styled(v.to_string(), Style::default().fg(color)),
     ])
 }
@@ -914,8 +943,8 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     let util_d: Vec<(f64, f64)> = app.hist_for("sys:util").iter().enumerate().map(|(i, v)| (i as f64, *v as f64)).collect();
     let vram_d: Vec<(f64, f64)> = app.hist_for("sys:vram").iter().enumerate().map(|(i, v)| (i as f64, *v as f64)).collect();
     let ds = vec![
-        Dataset::default().name("util%").marker(Marker::Braille).graph_type(GraphType::Line).style(Style::default().fg(C_OK)).data(&util_d),
-        Dataset::default().name("vram%").marker(Marker::Braille).graph_type(GraphType::Line).style(Style::default().fg(C_ACC)).data(&vram_d),
+        Dataset::default().name("util%").marker(Marker::Braille).graph_type(GraphType::Line).style(Style::default().fg(C_OK())).data(&util_d),
+        Dataset::default().name("vram%").marker(Marker::Braille).graph_type(GraphType::Line).style(Style::default().fg(C_ACC())).data(&vram_d),
     ];
     let chart = Chart::new(ds)
         .block(block("Timeline · util% / vram%"))
@@ -924,29 +953,29 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             Axis::default()
                 .bounds([0.0, 100.0])
                 .labels(["0", "50", "100"])
-                .style(Style::default().fg(C_DIM)),
+                .style(Style::default().fg(C_DIM())),
         );
     f.render_widget(chart, top[0]);
     let rt = Layout::default().direction(Direction::Vertical).constraints([Constraint::Ratio(1, 2); 2]).split(top[1]);
-    spark(f, rt[0], app, "sys:tps", "tok/s", 0, C_OK);
-    spark(f, rt[1], app, "sys:lat", "e2e ms", 0, C_WARN);
+    spark(f, rt[0], app, "sys:tps", "tok/s", 0, C_OK());
+    spark(f, rt[1], app, "sys:lat", "e2e ms", 0, C_WARN());
 
     // throughput 숫자 + 데이터 없음 안내
     let tl = Line::from(vec![
-        Span::styled("req/s ", Style::default().fg(C_DIM)),
-        Span::styled(format!("{}  ", rate(p.req_rate)), Style::default().fg(C_OK)),
-        Span::styled("err/s ", Style::default().fg(C_DIM)),
-        Span::styled(format!("{}  ", rate(p.err_rate)), Style::default().fg(if p.err_rate > 0.0 { C_BAD } else { C_DIM })),
-        Span::styled("tok/s ", Style::default().fg(C_DIM)),
-        Span::styled(format!("{}  ", rate(p.tps)), Style::default().fg(C_OK)),
-        Span::styled("prefix-hit ", Style::default().fg(C_DIM)),
+        Span::styled("req/s ", Style::default().fg(C_DIM())),
+        Span::styled(format!("{}  ", rate(p.req_rate)), Style::default().fg(C_OK())),
+        Span::styled("err/s ", Style::default().fg(C_DIM())),
+        Span::styled(format!("{}  ", rate(p.err_rate)), Style::default().fg(if p.err_rate > 0.0 { C_BAD() } else { C_DIM() })),
+        Span::styled("tok/s ", Style::default().fg(C_DIM())),
+        Span::styled(format!("{}  ", rate(p.tps)), Style::default().fg(C_OK())),
+        Span::styled("prefix-hit ", Style::default().fg(C_DIM())),
         Span::styled(
             if p.prefix_hit.is_nan() { "–  ".into() } else { format!("{:.0}%  ", p.prefix_hit * 100.0) },
-            Style::default().fg(C_ACC),
+            Style::default().fg(C_ACC()),
         ),
         Span::styled(
             if any { "" } else { "· 값 없음: EPP 경유 트래픽+vLLM 메트릭 필요" },
-            Style::default().fg(C_WARN),
+            Style::default().fg(C_WARN()),
         ),
     ]);
     f.render_widget(Paragraph::new(tl).block(block("Throughput")), rows[1]);
@@ -960,10 +989,10 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     if app.snap.perf_rows.is_empty() {
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled("모델별 성능 데이터 없음", Style::default().fg(C_DIM))),
+                Line::from(Span::styled("모델별 성능 데이터 없음", Style::default().fg(C_DIM()))),
                 Line::from(Span::styled(
                     "EPP 경유 트래픽 + vLLM 메트릭 노출 시 모델별로 표시됩니다.",
-                    Style::default().fg(C_DIM),
+                    Style::default().fg(C_DIM()),
                 )),
             ])
             .block(block("모델별 성능 (p95) · 구간별 지연·토큰·처리량")),
@@ -977,11 +1006,11 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             .map(|r| {
                 Row::new(vec![
                     cellw(r.model.clone(), 16),
-                    Cell::from(Span::styled(rate(r.req), Style::default().fg(C_OK))),
-                    Cell::from(Span::styled(rate(r.tps), Style::default().fg(C_OK))),
+                    Cell::from(Span::styled(rate(r.req), Style::default().fg(C_OK()))),
+                    Cell::from(Span::styled(rate(r.tps), Style::default().fg(C_OK()))),
                     cellw(ms(r.ttft_p95), 7),
                     cellw(ms(r.tpot_p95), 7),
-                    Cell::from(Span::styled(ms(r.e2e_p95), Style::default().fg(C_WARN))),
+                    Cell::from(Span::styled(ms(r.e2e_p95), Style::default().fg(C_WARN()))),
                     cellw(tok(r.in_tok_p95), 5),
                     cellw(tok(r.out_tok_p95), 5),
                 ])
@@ -1010,12 +1039,12 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     let mut ql: Vec<Line> = Vec::new();
     let maxq = app.snap.pod_queues.iter().map(|(_, q)| *q).fold(1.0, f64::max);
     if app.snap.pod_queues.is_empty() {
-        ql.push(Line::from(Span::styled("per-pod 큐 데이터 없음", Style::default().fg(C_DIM))));
+        ql.push(Line::from(Span::styled("per-pod 큐 데이터 없음", Style::default().fg(C_DIM()))));
     } else {
         for (pod, q) in app.snap.pod_queues.iter().take(8) {
             let mut sp = vec![Span::styled(format!("{:<20} ", truncw(pod, 20)), Style::default().fg(Color::White))];
-            sp.extend(bar_line(q / maxq * 100.0, 8, C_ACC).spans);
-            sp.push(Span::styled(format!(" {:.0}", q), Style::default().fg(C_DIM)));
+            sp.extend(bar_line(q / maxq * 100.0, 8, C_ACC()).spans);
+            sp.push(Span::styled(format!(" {:.0}", q), Style::default().fg(C_DIM())));
             ql.push(Line::from(sp));
         }
     }
@@ -1026,14 +1055,14 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
 fn diagnose(s: &Snapshot) -> (String, Color) {
     let serving = s.models.iter().filter(|m| m.ready > 0).count();
     if s.accel.is_empty() && serving == 0 {
-        return ("⚠ 가속기 메트릭 없음 + 서빙 모델 없음 — Prometheus/모델 상태 점검".into(), C_BAD);
+        return ("⚠ 가속기 메트릭 없음 + 서빙 모델 없음 — Prometheus/모델 상태 점검".into(), C_BAD());
     }
     if serving == 0 {
-        return ("⚠ 서빙 중인 모델 0 — Models 뷰에서 's'로 기동 (백엔드 없음)".into(), C_WARN);
+        return ("⚠ 서빙 중인 모델 0 — Models 뷰에서 's'로 기동 (백엔드 없음)".into(), C_WARN());
     }
     let busy = s.accel.iter().filter(|a| a.util > 80.0).count();
     if busy > 0 {
-        return (format!("● {} 모델 서빙 중, 가속기 {}개 고부하(>80%)", serving, busy), C_OK);
+        return (format!("● {} 모델 서빙 중, 가속기 {}개 고부하(>80%)", serving, busy), C_OK());
     }
-    (format!("● {} 모델 서빙 중, 가속기 여유", serving), C_OK)
+    (format!("● {} 모델 서빙 중, 가속기 여유", serving), C_OK())
 }

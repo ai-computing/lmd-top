@@ -2,6 +2,21 @@
 
 use crate::collect::Snapshot;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// 전역 테마 인덱스 (0=default, 1=고대비, 2=색맹친화). ui 색 함수가 읽음.
+pub static THEME: AtomicUsize = AtomicUsize::new(0);
+pub const N_THEMES: usize = 3;
+pub fn theme() -> usize {
+    THEME.load(Ordering::Relaxed)
+}
+pub fn theme_name(i: usize) -> &'static str {
+    match i {
+        1 => "high-contrast",
+        2 => "colorblind",
+        _ => "default",
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum View {
@@ -75,6 +90,11 @@ impl App {
 
     pub fn toggle_help(&mut self) {
         self.help = !self.help;
+    }
+    pub fn cycle_theme(&mut self) {
+        let n = (theme() + 1) % N_THEMES;
+        THEME.store(n, Ordering::Relaxed);
+        self.toast = Some(format!("theme: {}", theme_name(n)));
     }
     pub fn start_filter(&mut self) {
         self.filtering = true;

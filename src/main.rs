@@ -155,6 +155,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, ns: String) -> Result<()> {
                             }
                         }
                         KeyCode::Char('?') => app.toggle_help(),
+                        KeyCode::Char('t') => app.cycle_theme(),
                         KeyCode::Char('/') => app.start_filter(),
                         KeyCode::Enter => app.toggle_detail(),
                         KeyCode::Char('o') => app.cycle_sort(),
