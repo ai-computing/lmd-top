@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.8.2]
+### Changed — 컨텍스트 푸터 (IA 리뷰 P2)
+- 푸터가 12개 힌트를 뷰 무관하게 항상 나열하던 것(예: Events 에 `s scale` no-op)을, **현재 뷰가 실제 할 수 있는 액션만** 표시하도록 재구성. detail/filter/sort/pivot/logs/scale 을 뷰별로 노출, 전역 키(A/t/z/g/?/q)만 상시. (←→ 패널 포커스는 현재 다중 선택 패널이 없어 보류.)
+
 ## [0.8.1]
 ### Added — Perf 인터랙티브 드릴 (p50/p95/p99 + 히스토그램)
 - Perf per-model 표를 **선택 가능**하게 하고 **`⏎`** 로 드릴다운: 선택 모델의 **TTFT/TPOT/E2E p50·p95·p99** 백분위 표 + **E2E 지연 버킷 히스토그램**(rate by bucket)을 프로메테우스에서 온디맨드 조회. vLLM/ds4-proxy 엔진 구분. `esc` 로 복귀. (유휴 시 "no samples" — 트래픽 발생 시 채워짐.)

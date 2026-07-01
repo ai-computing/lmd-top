@@ -432,22 +432,43 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(format!("[filter: {}] ", app.filter), Style::default().fg(Color::Black).bg(C_ACC())));
         spans.push(Span::raw(" "));
     }
-    let sortable = app.sort_modes() > 1;
-    let mut hint = String::from("↑↓ sel  ⏎ detail  / filter  ");
-    if sortable {
-        hint.push_str(&format!("o sort:{}  ", app.sort_label()));
+    // 컨텍스트 푸터: 현재 뷰가 실제 할 수 있는 액션만(no-op 숨김).
+    use View::*;
+    let v = app.view;
+    let mut parts: Vec<String> = Vec::new();
+    parts.push("↑↓ sel".into());
+    match v {
+        Accel | Models | Overview | Pods | Nodes => parts.push("⏎ detail".into()),
+        Perf => parts.push("⏎ p50/95/99".into()),
+        _ => {}
     }
-    // 크로스레이어 드릴 pivot(뷰별) — 발견성
-    let pv = match app.view {
-        View::Models | View::Overview => "p/i/r/e pivot  ",
-        View::Accel => "p/m/n pivot  ",
-        View::Pods => "i/m pivot  ",
-        View::Nodes => "i pivot  ",
-        _ => "",
-    };
-    hint.push_str(pv);
-    hint.push_str("l logs  s scale  A alerts  t theme  z zoom  g grafana↗  ? help  q quit");
-    spans.push(Span::styled(hint, Style::default().fg(C_DIM())));
+    if matches!(v, Accel | Models | Overview | Pods | Launch | Epp | Events | Nodes) {
+        parts.push("/ filter".into());
+    }
+    if app.sort_modes() > 1 {
+        parts.push(format!("o sort:{}", app.sort_label()));
+    }
+    match v {
+        Models | Overview => parts.push("p/i/r/e pivot".into()),
+        Accel => parts.push("p/m/n pivot".into()),
+        Pods => parts.push("i/m pivot".into()),
+        Nodes => parts.push("i pivot".into()),
+        _ => {}
+    }
+    if matches!(v, Pods | Models | Overview | Accel) {
+        parts.push("l logs".into());
+    }
+    if matches!(v, Models | Overview) {
+        parts.push("s scale".into());
+    }
+    // 전역
+    parts.push("A alerts".into());
+    parts.push("t theme".into());
+    parts.push("z zoom".into());
+    parts.push("g grafana↗".into());
+    parts.push("? help".into());
+    parts.push("q quit".into());
+    spans.push(Span::styled(parts.join("  "), Style::default().fg(C_DIM())));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
