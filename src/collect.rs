@@ -319,7 +319,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             temp: r_temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
             power: r_pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
             busy_model: pod.to_string(),
-            alive: r_health.get(uuid).map(|x| x.value > 0.0).unwrap_or(true),
+            alive: r_health.get(uuid).map(|x| x.value == 0.0).unwrap_or(true), // RBLN HEALTH: 0=정상
             throttle: 0.0,
         });
     }

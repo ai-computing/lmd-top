@@ -1,0 +1,66 @@
+# lmd-top 모델 카탈로그 — 배포 가능한 모델 × 가속기 배치 후보.
+# PlacementSolver 가 라이브 가속기 재고와 대조해 ready/needs-* 를 판정(읽기전용).
+# 실제 배포(ModelService 렌더)는 후속 단계.
+models:
+  - id: exaone-3.5-32b
+    display: EXAONE-3.5-32B-Instruct-AWQ
+    role: chat
+    placements:
+      - engine: vllm
+        accel: nvidia
+        resource: nvidia.com/gpu
+        count: 1
+        replicas: 2
+        uri: hf://LGAI-EXAONE/EXAONE-3.5-32B-Instruct-AWQ
+        requires_artifact: false
+  - id: koni-llama3.1-8b
+    display: KONI-Llama3.1-8B-Instruct (RBLN)
+    role: chat
+    placements:
+      - engine: vllm-rbln
+        accel: rebellions
+        resource: rebellions.ai/ATOM
+        count: 4
+        replicas: 1
+        uri: pvc://rbln-artifacts/koni-tp4
+        requires_artifact: true
+  - id: gemma4-rbln
+    display: Gemma-4 (RBLN)
+    role: chat
+    placements:
+      - engine: vllm-rbln
+        accel: rebellions
+        resource: rebellions.ai/ATOM
+        count: 4
+        replicas: 1
+        uri: pvc://rbln-artifacts/gemma4
+        requires_artifact: true
+  - id: qwen3-embedding-8b
+    display: Qwen3-Embedding-8B (Furiosa)
+    role: embedding
+    placements:
+      - engine: furiosa
+        accel: furiosa
+        resource: furiosa.ai/rngd
+        count: 2
+        replicas: 1
+        uri: pvc://furiosa-artifacts/qwen3-embed
+        requires_artifact: true
+  - id: llama3.1-8b
+    display: Llama-3.1-8B-Instruct
+    role: chat
+    placements:
+      - engine: vllm
+        accel: nvidia
+        resource: nvidia.com/gpu
+        count: 1
+        replicas: 1
+        uri: hf://meta-llama/Llama-3.1-8B-Instruct
+        requires_artifact: false
+      - engine: vllm-rbln
+        accel: rebellions
+        resource: rebellions.ai/ATOM
+        count: 4
+        replicas: 1
+        uri: pvc://rbln-artifacts/llama31-8b-tp4
+        requires_artifact: true
