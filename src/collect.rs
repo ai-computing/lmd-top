@@ -2,6 +2,7 @@
 //! 각 소스는 독립적으로 실패해도 전체를 막지 않음(warnings 에 누적, 부재 필드는 None/빈값).
 
 use crate::kube;
+use crate::metrics;
 use crate::prom::{self, Series};
 use std::collections::BTreeMap;
 
@@ -433,22 +434,22 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
         prom::query(p, "max by (uuid) (furiosa_npu_dram_total)"),
         prom::query(p, "max by (uuid) (furiosa_npu_alive)"),
         prom::query(p, "max by (uuid) (furiosa_npu_throttling_events_count)"),
-        prom::query(p, "RBLN_DEVICE_STATUS:UTILIZATION"),
-        prom::query(p, "RBLN_DEVICE_STATUS:TEMPERATURE"),
-        prom::query(p, "RBLN_DEVICE_STATUS:CARD_POWER"),
-        prom::query(p, "RBLN_DEVICE_STATUS:DRAM_USED"),
-        prom::query(p, "RBLN_DEVICE_STATUS:DRAM_TOTAL"),
-        prom::query(p, "RBLN_DEVICE_STATUS:HEALTH"),
-        prom::query(p, "DCGM_FI_DEV_GPU_UTIL"),
-        prom::query(p, "DCGM_FI_DEV_FB_USED"),
-        prom::query(p, "DCGM_FI_DEV_FB_TOTAL"),
-        prom::query(p, "DCGM_FI_DEV_GPU_TEMP"),
-        prom::query(p, "DCGM_FI_DEV_POWER_USAGE"),
-        prom::query(p, "DCGM_FI_DEV_MEM_COPY_UTIL"), // 메모리 컨트롤러 busy% = 대역폭 압박
-        prom::query(p, "DCGM_FI_DEV_SM_CLOCK"),       // SM 클럭 MHz
-        prom::query(p, "DCGM_FI_DEV_MEMORY_TEMP"),    // 메모리 정션 온도 °C
-        prom::query(p, "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION"), // 누적 에너지(mJ)
-        prom::query(p, "node_load1"),
+        prom::query(p, metrics::RBLN_UTIL),
+        prom::query(p, metrics::RBLN_TEMP),
+        prom::query(p, metrics::RBLN_POWER),
+        prom::query(p, metrics::RBLN_DRAM_USED),
+        prom::query(p, metrics::RBLN_DRAM_TOTAL),
+        prom::query(p, metrics::RBLN_HEALTH),
+        prom::query(p, metrics::DCGM_GPU_UTIL),
+        prom::query(p, metrics::DCGM_FB_USED),
+        prom::query(p, metrics::DCGM_FB_TOTAL),
+        prom::query(p, metrics::DCGM_GPU_TEMP),
+        prom::query(p, metrics::DCGM_POWER),
+        prom::query(p, metrics::DCGM_MEM_COPY_UTIL), // 메모리 컨트롤러 busy% = 대역폭 압박
+        prom::query(p, metrics::DCGM_SM_CLOCK),       // SM 클럭 MHz
+        prom::query(p, metrics::DCGM_MEM_TEMP),    // 메모리 정션 온도 °C
+        prom::query(p, metrics::DCGM_ENERGY), // 누적 에너지(mJ)
+        prom::query(p, metrics::NODE_LOAD1),
         prom::query(p, "node_memory_MemTotal_bytes"),
         prom::query(p, "node_memory_MemAvailable_bytes"),
         prom::query(p, "100 - (avg by (instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)"),
@@ -619,14 +620,14 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     snap.nodes = nodes;
 
     // ---------- EPP pools ----------
-    let p_ready = q(cfg, "inference_pool_ready_pods", &mut warn).await;
-    let p_q = map_by(q(cfg, "inference_pool_average_queue_size", &mut warn).await, "name");
+    let p_ready = q(cfg, metrics::POOL_READY, &mut warn).await;
+    let p_q = map_by(q(cfg, metrics::POOL_QUEUE, &mut warn).await, "name");
     let p_kv = map_by(
-        q(cfg, "inference_pool_average_kv_cache_utilization", &mut warn).await,
+        q(cfg, metrics::POOL_KV, &mut warn).await,
         "name",
     );
     let p_sat = map_by(
-        q(cfg, "inference_extension_flow_control_pool_saturation", &mut warn).await,
+        q(cfg, metrics::POOL_SAT, &mut warn).await,
         "name",
     );
     // 라우팅 결정 분배 (트래픽이 EPP 경유 시 채워짐)
@@ -642,7 +643,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     snap.prefix_idx = pidx.first().map(|s| s.value).unwrap_or(f64::NAN);
 
     // per-pod 큐 깊이(요청 분배)
-    for s in &q(cfg, "inference_pool_per_pod_queue_size", &mut warn).await {
+    for s in &q(cfg, metrics::POOL_PER_POD_QUEUE, &mut warn).await {
         let pod = s.l("model_server_pod");
         if !pod.is_empty() {
             snap.pod_queues.push((pod.to_string(), s.value));

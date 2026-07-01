@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.9.0]
+### Changed — 리팩토링 R2: 메트릭 이름 단일 출처
+- 모든 프로메테우스 메트릭 이름을 **`metrics.rs` 단일 출처**로 모음(그룹별 `pub const` + doctor 커버리지 `DEPS`). `collect.rs`와 `doctor.rs`가 같은 상수를 참조 → 이름 drift 불가, 메트릭 추가는 한 곳만 수정. collect 의 bare 이름 21개를 상수로 치환. (동작 보존: doctor 33/40 동일, 테스트 통과.)
+
 ## [0.8.8]
 ### Changed — Flow(Topo) 인터랙티브화 (IA 리뷰 P1 핵심)
 - **"correlation이 텍스트일 뿐 내비게이션이 아니다"** 해소: Topo→**Flow** 로 개명하고 route 경로를 **선택 가능**(↑↓, 배경 하이라이트)하게 + 선택 route 에서 **`p`/`i`/`m`/`e` pivot**(pods/infra/model/epp)으로 레이어 횡단. 이제 경로 위에서 손으로 상관관계를 넘나듦.
