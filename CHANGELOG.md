@@ -2,6 +2,11 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.10.4]
+### Changed — Overview 한눈에 개선 (all-smi 참고)
+- 클러스터 Σ 줄을 **라벨된 그룹**으로 정리: `N accel · 벤더×n │ util·temp │ VRAM·W │ models`. 평균 **온도** 추가, 상단바와 중복인 req/s·TTFT 제거.
+- **LED 그리드 점을 util 히트(레인보우)** 로 채색 — fleet 핫스팟이 한눈에(파랑 저 → 빨강 고).
+
 ## [0.10.3]
 ### Changed — 레인보우 바 전면 통일 + Overview MEM 바
 - 모든 load 바(Accel UTIL/MEM · Overview util · Nodes cpu · 상세 게이지 compute/VRAM/temp)를 **레인보우 progressbar 로 통일**. 의미(심각도)는 옆 수치 색으로 유지. (사용 안 하게 된 `grad_bar` 제거; `grad_color` 는 mem-bw 색에 잔존.)

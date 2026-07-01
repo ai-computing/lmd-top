@@ -875,27 +875,28 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     {
         // 벤더별 (수, 색, 사용메모리GB) — 스택 바용.
         let mut kinds: std::collections::BTreeMap<&str, (usize, Color, f64)> = std::collections::BTreeMap::new();
-        let (mut usum, mut mu, mut mt, mut pw) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        let (mut usum, mut mu, mut mt, mut pw, mut tsum) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
         for a in &s.accel {
             let e = kinds.entry(a.disp()).or_insert((0, kind_color(a.kind), 0.0));
             e.0 += 1;
             e.2 += a.mem_used_gb;
-            usum += a.util; mu += a.mem_used_gb; mt += a.mem_total_gb; pw += a.power;
+            usum += a.util; mu += a.mem_used_gb; mt += a.mem_total_gb; pw += a.power; tsum += a.temp;
         }
         let ncnt = s.accel.len().max(1);
         let avg = usum / ncnt as f64;
+        let avg_temp = tsum / ncnt as f64;
         let mempct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
         let ready = s.models.iter().filter(|m| m.ready > 0).count();
-        let mut sp = vec![Span::styled("Σ ", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))];
+        // 인벤토리 라벨(GB10×2 …) + 라벨된 집계(util·temp·VRAM·W·models). req/s·TTFT 는 상단바에 있어 생략.
+        let mut sp = vec![Span::styled(format!("{} accel  ", s.accel.len()), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))];
         for (k, (c, col, _)) in &kinds {
             sp.push(Span::styled(format!("{}×{} ", k, c), Style::default().fg(*col).add_modifier(Modifier::BOLD)));
         }
-        sp.push(Span::styled(format!("· util {:.0}% ", avg), Style::default().fg(util_color(avg))));
-        sp.push(Span::styled(format!("· VRAM {:.0}/{:.0}GB ({:.0}%) ", mu, mt, mempct), Style::default().fg(mem_color(mempct))));
-        sp.push(Span::styled(format!("· {:.0}W ", pw), Style::default().fg(C_DIM())));
-        sp.push(Span::styled(format!("· models {}/{} ", ready, s.models.len()), Style::default().fg(if ready > 0 { C_OK() } else { C_DIM() })));
-        sp.push(Span::styled(format!("· req/s {} ", rate(s.perf.req_rate)), Style::default().fg(C_DIM())));
-        sp.push(Span::styled(format!("· TTFT {} ", ms(s.perf.ttft_p95)), Style::default().fg(C_DIM())));
+        sp.push(Span::styled(format!("│ util {:.0}% ", avg), Style::default().fg(util_color(avg))));
+        sp.push(Span::styled(format!("temp {:.0}°C ", avg_temp), Style::default().fg(temp_color(avg_temp))));
+        sp.push(Span::styled(format!("│ VRAM {:.0}/{:.0}GB {:.0}% ", mu, mt, mempct), Style::default().fg(mem_color(mempct))));
+        sp.push(Span::styled(format!("⚡{:.0}W ", pw), Style::default().fg(C_DIM())));
+        sp.push(Span::styled(format!("│ models {}/{} ", ready, s.models.len()), Style::default().fg(if ready > 0 { C_OK() } else { C_DIM() })));
         // 세션 에너지 총합(R 리셋)
         let ewh: f64 = s.accel.iter().map(|a| app.energy_session_wh(a)).filter(|x| !x.is_nan()).sum();
         if ewh > 0.0 {
@@ -938,12 +939,13 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
                     cur.push(Span::raw(" ".repeat(LABEL_W))); // 연속줄: 라벨 폭 들여쓰기
                     n = 0;
                 }
+                // 점 색 = util 히트(레인보우: 파랑 저부하 → 빨강 고부하) → fleet 핫스팟이 한눈에(all-smi식).
                 let (g, c) = if !a.alive {
                     ("✗", C_BAD())
                 } else if a.throttle > 0.0 {
                     ("⚠", C_WARN())
                 } else if a.util > IDLE_UTIL {
-                    ("●", kc)
+                    ("●", rainbow(a.util / 100.0))
                 } else {
                     ("○", C_DIM())
                 };
