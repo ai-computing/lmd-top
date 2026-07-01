@@ -188,7 +188,7 @@ fn summary_bar(f: &mut Frame, area: Rect, s: &Snapshot) {
     let serving = s.models.iter().filter(|m| m.ready > 0).count();
     let power: f64 = s.accel.iter().map(|a| a.power).sum();
     let mempct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!("GPU {} ", gpu), Style::default().fg(if gpu == 0 { C_DIM() } else { kind_color(AccelKind::Gpu) })),
         Span::styled(format!("RBLN {} ", rbln), Style::default().fg(kind_color(AccelKind::Rbln))),
         Span::styled(format!("RNGD {} ", rngd), Style::default().fg(kind_color(AccelKind::Rngd))),
@@ -200,8 +200,13 @@ fn summary_bar(f: &mut Frame, area: Rect, s: &Snapshot) {
             format!("models {}/{} ", serving, s.models.len()),
             Style::default().fg(if serving == 0 { C_WARN() } else { C_OK() }),
         ),
-        Span::styled(format!("│ ⚡{:.0}W", power), Style::default().fg(C_DIM())),
-    ]);
+        Span::styled(format!("│ ⚡{:.0}W ", power), Style::default().fg(C_DIM())),
+    ];
+    let warns = s.events.iter().filter(|e| e.typ == "Warning").count();
+    if warns > 0 {
+        spans.push(Span::styled(format!("│ ⚠{} warn", warns), Style::default().fg(C_WARN())));
+    }
+    let line = Line::from(spans);
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -1223,6 +1228,14 @@ fn diagnose(s: &Snapshot) -> (String, Color) {
     }
     if serving == 0 {
         return ("⚠ 0 models serving — press 's' in Models to start one (no backend)".into(), C_WARN());
+    }
+    let warns = s.events.iter().filter(|e| e.typ == "Warning").count();
+    if warns > 0 {
+        let top = s.events.iter().find(|e| e.typ == "Warning").map(|e| e.reason.clone()).unwrap_or_default();
+        return (
+            format!("● {} model(s) serving · ⚠ {} warning event(s) (top: {}) — see Events", serving, warns, top),
+            C_WARN(),
+        );
     }
     let busy = s.accel.iter().filter(|a| a.util > 80.0).count();
     if busy > 0 {
