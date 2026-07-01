@@ -1298,25 +1298,27 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
     if inner.width == 0 || inner.height == 0 || raw.is_empty() {
         return;
     }
-    let w = inner.width as usize;
     let rows_h = inner.height as usize;
-    // 컬럼당 최신 값 1개(오른쪽 정렬). 폭보다 데이터가 많으면 최근 w개만.
-    let data: Vec<u64> = raw.iter().rev().take(w).rev().copied().collect();
-    let start_x = inner.x + inner.width - data.len() as u16; // 오른쪽 정렬(now)
+    // 바 사이에 1칸 간격 → 개별 바 구분(bar chart 식). 바(1)+간격(1) = 2칸/데이터.
+    const STEP: u16 = 2;
+    let n = ((inner.width + 1) / STEP) as usize; // 들어갈 바 개수
+    let data: Vec<u64> = raw.iter().rev().take(n).rev().copied().collect();
+    // 위아래 여백: 높이가 충분(≥4행)하면 맨 윗행을 헤드룸으로 비워 바 상단이 테두리에 안 붙게(가독).
+    // 작은 타임라인(Perf 그리드 등)은 높이가 아까우므로 전체 사용.
+    let draw_h = if rows_h >= 4 { rows_h - 1 } else { rows_h }.max(1);
+    let denom = (draw_h as f64 - 1.0).max(1.0);
     let buf = f.buffer_mut();
-    let denom = (rows_h as f64 - 1.0).max(1.0);
     for (ci, &v) in data.iter().enumerate() {
         let frac = (v as f64 / ymax).clamp(0.0, 1.0);
-        let eighths_total = (frac * (rows_h as f64) * 8.0).round() as usize; // 전체 채움(1/8칸 단위)
-        let x = start_x + ci as u16;
-        for r in 0..rows_h {
-            // r=0 = 맨 아래 행. 셀 색은 세로 위치(축 레벨)별 레인보우 그라디언트(tui-bar-graph 식):
-            // 아래=파랑(저부하) → 위=빨강(고부하). 높은 컬럼일수록 빨강까지 닿음.
+        let eighths_total = (frac * (draw_h as f64) * 8.0).round() as usize;
+        // 오른쪽 정렬(now=맨 오른쪽 바), 바 사이 1칸 간격.
+        let x = inner.x + inner.width - 1 - ((data.len() - 1 - ci) as u16) * STEP;
+        for r in 0..draw_h {
+            // r=0 = 맨 아래 행. 셀 색 = 세로 위치별 레인보우(아래 파랑 → 위 빨강).
             let filled = eighths_total.saturating_sub(r * 8).min(8);
             let y = inner.y + inner.height - 1 - r as u16;
             if filled == 0 {
-                // 채워지지 않은 칸 = 은은한 track(░) → 상한(ymax) 대비 대략 %가 보임
-                buf[(x, y)].set_char('░').set_fg(C_TRACK());
+                buf[(x, y)].set_char('░').set_fg(C_TRACK()); // 헤드룸 track
             } else {
                 buf[(x, y)].set_char(LV[filled]).set_fg(rainbow(r as f64 / denom));
             }
