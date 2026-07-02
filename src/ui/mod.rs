@@ -2298,8 +2298,13 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
                 for d in &devs {
                     by_kind.entry(d.kind.label()).or_default().push(d);
                 }
-                let mut ry = by - 6.0;
+                // 내부는 위→아래로 일관 스택: 이름(by-2) → 서빙모델(by-5) → device 행(by-9↓).
+                // 서빙 모델명이 박스 바닥에 고정돼 device 행과 겹치던 문제 해소.
+                let mut ry = by - 9.0;
                 for (k, ds) in &by_kind {
+                    if ry < by - bh + 1.5 {
+                        break; // 박스 바닥 넘어가면 중단(오버플로 방지)
+                    }
                     let mut sp = vec![Span::styled(format!("{:<5} ", k), Style::default().fg(C_DIM()))];
                     for d in ds {
                         let (g, c) = if !d.alive {
@@ -2316,18 +2321,18 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
                     let free = ds.iter().filter(|d| d.alive && d.busy_model.is_empty()).count();
                     sp.push(Span::styled(format!("  {:>3.0}%  {}free", avg, free), Style::default().fg(C_DIM())));
                     ctx.print(bx + 1.0, ry, Line::from(sp));
-                    ry -= 4.0;
+                    ry -= 3.5;
                 }
-                // 서빙 중인 모델명(어느 pod/모델이 이 노드를 점유하는지) — 모델색.
+                // 서빙 중인 모델명(어느 pod/모델이 이 노드를 점유하는지) — 이름 바로 아래(by-5).
                 let mut serving: Vec<&str> = devs.iter().filter(|d| !d.busy_model.is_empty()).map(|d| d.busy_model.as_str()).collect();
                 serving.sort();
                 serving.dedup();
                 if !serving.is_empty() {
                     let mut msp: Vec<Span> = vec![Span::styled("⇢ ", Style::default().fg(C_DIM()))];
                     for m in serving.iter().take(2) {
-                        msp.push(Span::styled(format!("{} ", truncw(m, 16)), Style::default().fg(model_color(m))));
+                        msp.push(Span::styled(format!("{} ", truncw(m, 14)), Style::default().fg(model_color(m))));
                     }
-                    ctx.print(bx + 1.0, by - bh + 2.0, Line::from(msp));
+                    ctx.print(bx + 1.0, by - 5.0, Line::from(msp));
                 }
             }
             if node_names.is_empty() {
