@@ -3,6 +3,8 @@
 > **A terminal observability & operations tool for [llm-d](https://llm-d.ai) clusters.**
 > The whole serving stack — Gateway, EPP routing, model servers, and heterogeneous accelerators — on one screen, in one static binary.
 
+**English** · [한국어](README.ko.md)
+
 ![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white)
 ![single static binary](https://img.shields.io/badge/single%20static%20binary-no%20C%20deps-success)
 ![for llm-d](https://img.shields.io/badge/for-llm--d-8839ef)
@@ -227,7 +229,7 @@ Color encodes **severity** or **identity**; state is carried by a separate **gly
 | 🔴 red | critical / high load / error / device down / **active alert** |
 | 🔵 cyan | accent / headers / interactive values |
 | ⚫ dark gray | idle / absent (`–`) / labels |
-| vendor color | GPU = green · **RBLN = magenta** · RNGD = cyan |
+| vendor color | GPU · RBLN · RNGD each get a distinct hue (harmonized per theme) |
 | glyphs | `●` up/healthy · `○` idle/scaled-0 · `◐` pending · `⚠` throttle · `⊘` cordoned · `✗` down |
 | thresholds | util `>85`🔴 `>60`🟡 · mem `>90`🔴 `>70`🟡 · temp `>80`🔴 `>60`🟡 |
 
