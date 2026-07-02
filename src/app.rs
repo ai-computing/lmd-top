@@ -719,6 +719,10 @@ impl App {
     pub fn next_tab(&mut self) {
         self.set_view_idx((self.view.idx() + 1) % View::ALL.len());
     }
+    pub fn prev_tab(&mut self) {
+        let n = View::ALL.len();
+        self.set_view_idx((self.view.idx() + n - 1) % n);
+    }
 
     /// 현재 뷰에서 선택 가능한 행 수(필터 반영).
     pub fn list_len(&self) -> usize {

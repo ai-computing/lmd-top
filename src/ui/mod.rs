@@ -434,7 +434,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         parts.push("S restart".into());
     }
     // 전역
-    parts.push("⇥/0-9 view".into());
+    parts.push("⇥/⇧⇥/0-9 view".into());
     parts.push("A alerts".into());
     parts.push("t theme".into());
     parts.push("z zoom".into());
