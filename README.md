@@ -15,10 +15,9 @@ It reads your existing Prometheus + Kubernetes; it owns no data of its own.
 
 ## Demo
 
-*Demo recording omitted from the public export.*
-*Demo recording omitted from the public history.* -->
+*Demo recording omitted from the public history.*
 
-<sub>Soft (Catppuccin) theme · live braille timelines · cross-layer drill-down.</sub>
+*Demo recording omitted from the public export.*
 
 ```
 ⠙ lmd-top [observe]   llm-d · 8 nodes   ⌂ gw 192.0.2.6 ●   · updated 2s ago

@@ -13,6 +13,5 @@ config/local.toml
 *.swp
 *~
 
-# demo artifacts (regenerate with `lmd-top --cast` / agg)
+# demo cast is large & regenerable (`lmd-top --cast`); the GIF is committed for the README
 docs/demo.cast
-*Demo recording omitted from the public export.*
