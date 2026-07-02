@@ -2,6 +2,12 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.21.0]
+### Added — 모델 상세 pivot 미리보기 + 데모 asciicast 생성
+- **pivot 미리보기**: 모델 상세에서 pivot(p/i/r/e)이 이제 키 힌트뿐 아니라 **대상의 핵심 정보를 인라인 preview**로 — pods(수/running/이름), infra(디바이스·util), route, epp 경유 여부. 키 누르면 이동.
+*Demo recording omitted from the public export.*
+- Model 상세 텍스트 패널 높이를 내용에 맞춰 가변화.
+
 ## [0.20.0]
 ### Changed — 기본 테마를 soft(Catppuccin)로 승격
 - 거친 ANSI-16 대신 **soft(Catppuccin Mocha)를 기본 테마**로 — "기본 화면이 이쁘게". ANSI-16 원하면 `LMD_THEME=default` 또는 실행 중 `t` 로 즉시 복귀(무손실).

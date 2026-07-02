@@ -1222,10 +1222,32 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(kv("  tokens/s", &m.tps.map(|x| format!("{:.1}", x)).unwrap_or("–".into()), Color::White));
         lines.push(kv("  TTFT p95", &m.ttft.map(|x| format!("{:.0} ms", x * 1000.0)).unwrap_or("–".into()), Color::White));
         lines.push(Line::from(""));
-        let pods: Vec<&str> = app.snap.pods.iter().filter(|p| p.name.starts_with(&m.name)).map(|p| p.name.as_str()).collect();
-        lines.push(kv("pods", &if pods.is_empty() { "(none)".to_string() } else { pods.join(", ") }, C_DIM()));
-        lines.push(pivot_line(&[("p", "pods"), ("i", "infra"), ("r", "route"), ("e", "epp")]));
-        lines.push(Line::from(Span::styled("  s = scale up/down", Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled("pivot ▸ peek (press key to open)", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))));
+        // [p] pods — 매칭 파드 수/running + 첫 이름
+        let mpods: Vec<&crate::collect::PodRow> = app.snap.pods.iter().filter(|p| p.name.starts_with(&m.name)).collect();
+        let running = mpods.iter().filter(|p| p.phase == "Running").count();
+        let pods_prev = if mpods.is_empty() {
+            "(none)".to_string()
+        } else {
+            format!("{} pod(s) · {} running · {}", mpods.len(), running, truncw(&mpods[0].name, 26))
+        };
+        lines.push(pivot_prev("p", "pods", &pods_prev));
+        // [i] infra — 이 모델을 돌리는 디바이스(있으면 util 집계), 없으면 배치 문자열
+        let macc: Vec<&crate::collect::Accel> = app.snap.accel.iter().filter(|a| !a.busy_model.is_empty() && a.busy_model.starts_with(&m.name)).collect();
+        let infra_prev = if !macc.is_empty() {
+            let u = macc.iter().map(|a| a.util).sum::<f64>() / macc.len() as f64;
+            format!("{}×{} @{} · util {:.0}%", macc[0].disp(), macc.len(), truncw(&macc[0].node, 16), u)
+        } else if !m.accel.is_empty() && m.accel != "-" {
+            m.accel.clone()
+        } else {
+            "no device bound (scaled to 0?)".into()
+        };
+        lines.push(pivot_prev("i", "infra", &infra_prev));
+        // [r] route — HTTPRoute 경로
+        lines.push(pivot_prev("r", "route", if m.route.is_empty() { "no route" } else { m.route.as_str() }));
+        // [e] epp — EPP 경유 여부
+        lines.push(pivot_prev("e", "epp", if app.snap.epp_in_path { "via InferencePool ●" } else { "bypassed → Service ⚠" }));
+        lines.push(Line::from(Span::styled("  s scale · S restart", Style::default().fg(C_DIM()))));
         // 매칭되는 per-model perf 시계열(이름 정확/포함 일치) → 하단 타임라인.
         let mkey = app
             .snap
@@ -1238,12 +1260,14 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             Some(k) => series.iter().filter(|(s, _, _)| !app.hist_for(&format!("{}:{}", k, s)).is_empty()).collect(),
             None => Vec::new(),
         };
+        let n_lines = lines.len();
         let pblk = Paragraph::new(lines).scroll((app.detail_scroll, 0)).wrap(Wrap { trim: false }).block(block(&format!("Model{}", nav)));
         if present.is_empty() {
             f.render_widget(pblk, area);
         } else {
             let mk = mkey.unwrap();
-            let split = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(15), Constraint::Min(6)]).split(area);
+            let text_h = (n_lines as u16 + 2).clamp(12, 24); // 내용에 맞춘 텍스트 패널 높이
+            let split = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(text_h), Constraint::Min(6)]).split(area);
             f.render_widget(pblk, split[0]);
             let mut dash = Dashboard::new().min_width(30);
             for (s, label, unit) in present {
@@ -1283,6 +1307,15 @@ fn pivot_line(pivots: &[(&str, &str)]) -> Line<'static> {
         sp.push(Span::styled(format!(" {}  ", label), Style::default().fg(C_DIM())));
     }
     Line::from(sp)
+}
+
+/// pivot 미리보기 한 줄 — `[k] label  <peek>`. 키 누르면 해당 레이어로 이동(preview 로 먼저 엿봄).
+fn pivot_prev(key: &str, label: &str, preview: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("  [{}] ", key), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<6} ", label), Style::default().fg(C_DIM())),
+        Span::styled(preview.to_string(), Style::default().fg(Color::White)),
+    ])
 }
 
 fn kv(k: &str, v: &str, color: Color) -> Line<'static> {
