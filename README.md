@@ -30,20 +30,20 @@ Kubernetes; it stores no data of its own.
 
 ## Views
 
-Switch views with the number keys `0`–`9`, or cycle with `Tab` / `Shift+Tab`.
+Switch views with the number keys `0`–`7`, or cycle with `Tab` / `Shift+Tab`.
 
 | # | View | Shows |
 |---|---|---|
 | 0 | **Overview** | Cluster summary, LED device grid, VRAM bar, accelerators by kind/node, EPP path, models, and a one-line diagnosis |
-| 1 | **Accel** | Per-device util / VRAM / temp / power with a trend; `⏎` opens the util & VRAM timeline |
-| 2 | **Models** | Per-model accelerator/node, ready count, running/waiting, KV%, tok/s, route, and status |
+| 1 | **Nodes** hub | Node health (CPU/mem/disk/load + devices). Press `w` to cycle the hub: **nodes → devices** (per-device util/VRAM/temp/power) **→ serving** (per-model p95 latency QUEUE→PREFILL→DECODE→TPOT→E2E, tok/s, + SLO advisor) **→ map** (Canvas topology: Gateway→EPP→Pool flow + device pressure heatmap) |
+| 2 | **Models** | Per-model accelerator/node, ready, running/waiting, KV%, tok/s, route, status. `⏎` opens the action menu (Info/Compile/Deploy/Stop/Scale/Restart/Logs/YAML/Objective) |
 | 3 | **EPP** | Scorers and weights, the picker, InferencePool endpoints, and request distribution |
 | 4 | **Flow** | Gateway → HTTPRoute → backend → pods, with InferencePool/EPP/SLO and the EPP-bypass diagnosis; `⏎` jumps to the backend model |
-| 5 | **Pods** | `llm-serving` pods (ready / phase / node / restarts) |
-| 6 | **Perf** | Per-device history plus per-model p95 latency broken down QUEUE → PREFILL → DECODE → TPOT → E2E, tok/s, and queues; `⏎` opens p50/95/99 + timelines |
-| 7 | **Deploy** | The model lifecycle: compiled variants (family → build, with options, `@node /path`, and status), deploy targets (free capacity per node), and catalog feasibility |
-| 8 | **Events** | Kubernetes + llm-d events, newest first; `⏎` shows the full message |
-| 9 | **Nodes** | Node health — CPU, memory, disk, load, and devices per node; press `⏎`, then `↑↓` to pick a device |
+| 5 | **Pods** | `llm-serving` pods (ready / phase / node / restarts); `⏎` actions (Info/Logs/YAML/Delete) |
+| 6 | **Deploy** | Model lifecycle: compiled variants (family → build, options, `@node /path`), device occupancy per node, and catalog feasibility. `⏎` acts on the selection (Compile→RBLN/Furiosa · Deploy · node Cordon · …) |
+| 7 | **Events** | Kubernetes + llm-d events, newest first; `⏎` shows the full message |
+
+List headers show a `Σ` aggregate of the shown rows (all rows, or just the filtered ones). `y` shows any selected resource's live YAML (read-only).
 
 ## Install
 
@@ -92,9 +92,9 @@ y/n confirmation) → `danger` (reserved). Admin actions always ask before apply
 
 | | |
 |---|---|
-| Navigate | `↑↓` / `kj` select · `⏎` drill into detail · `←→` step items · `w` move focus between panels |
-| Act | `/` filter · `o` cycle sort · `l` logs · `s` scale · `A` alert history |
-| Display | `t` theme · `f` animations · `z` zoom · `Space` pause · `g` Grafana · `?` help · `q` quit |
+| Navigate | `↑↓`/`kj` select · `⏎` action menu (or drill) · `w` Nodes-hub / panel focus · `←→` step · `p i r e m` cross-layer pivot |
+| Act | `/` filter · `o` sort · `y` live YAML · `l` logs · action menu → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (admin gated, y/n confirm) |
+| Display | `t` theme · `f` animations · `z` zoom · `Space` pause · `g` Grafana · `A` alerts · `?` help · `q` quit |
 
 **Environment.**
 

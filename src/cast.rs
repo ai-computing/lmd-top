@@ -30,29 +30,57 @@ pub async fn run(cfg: &Config, out: &str) {
         app.apply(evolve(&base, i));
     }
 
-    // 스토리보드: (뷰, detail, 프레임수) — 앞단→상세를 두루 보여줌.
-    let story: [(View, bool, u32); 7] = [
-        (View::Overview, false, 30),
-        (View::Accel, false, 20),
-        (View::Accel, true, 22),   // 가속기 상세(게이지+타임라인)
-        (View::Nodes, false, 24),  // 노드 + disk
-        (View::Launch, false, 26), // Deploy 라이프사이클(컴파일 변형·배치 타깃)
-        (View::Perf, false, 24),
-        (View::Models, true, 28),  // 모델 상세(pivot 미리보기)
+    // SLO advisor 데모용: 첫 perf 모델에 목표 설정(관측 대비 판정·조언이 렌더됨).
+    if let Some(r) = base.perf_rows.first() {
+        app.objectives.insert(
+            r.model.clone(),
+            crate::app::Objective { ttft_ms: Some(2000.0), tpot_ms: Some(50.0), e2e_ms: Some(1500.0), min_tps: Some(150.0) },
+        );
+    }
+
+    // 스토리보드: (뷰, detail, 프레임수, 특수연출) — 새 UI(허브·토폴로지·액션메뉴·SLO)를 두루 보여줌.
+    let story: &[(View, bool, u32, Extra)] = &[
+        (View::Overview, false, 28, Extra::None),
+        (View::Nodes, false, 20, Extra::None),     // Nodes 허브: 노드+disk (w 로 전환)
+        (View::Accel, false, 18, Extra::None),     // 허브: 디바이스 pressure
+        (View::Topo, false, 26, Extra::None),      // 허브: 토폴로지/pressure 맵(Canvas)
+        (View::Launch, false, 20, Extra::None),    // Deploy 변형(컴파일·배치)
+        (View::Launch, false, 24, Extra::ActionMenu), // Enter 액션 메뉴
+        (View::Perf, false, 26, Extra::Slo),       // 서빙 perf + SLO advisor
+        (View::Models, true, 24, Extra::None),     // 모델 상세
     ];
 
     let mut events = String::new();
     let mut t = 0.0f64;
     let mut i = HISTORY_PREROLL;
-    for (view, detail, frames) in story {
+    for &(view, detail, frames, extra) in story {
         for lf in 0..frames {
             app.apply(evolve(&base, i));
             app.tick = app.tick.wrapping_add(1);
             app.view = view;
             app.detail = detail;
-            // 앞단 리스트에선 선택을 천천히 내려 스크롤을 보여줌; 상세에선 고정.
+            app.action_menu = None; // 기본은 닫힘(scene 별로 아래에서 연출)
             let n = app.list_len().max(1);
-            app.selected = if detail { (i as usize / 40) % n } else { (lf as usize / 5) % n };
+            match extra {
+                Extra::None => {
+                    app.selected = if detail { (i as usize / 40) % n } else { (lf as usize / 5) % n };
+                }
+                Extra::ActionMenu => {
+                    // Deploy 변형 선택 → Enter 액션 메뉴 오픈 + 커서 천천히 이동.
+                    app.panel_focus = 0;
+                    app.selected = 0;
+                    app.open_action_menu();
+                    if let Some(m) = app.action_menu.as_mut() {
+                        let mi = m.items.len().max(1);
+                        m.cursor = (lf as usize / 5) % mi;
+                    }
+                }
+                Extra::Slo => {
+                    // 서빙 perf: SLO advisor 가 보이도록 선택을 목표설정 모델(0)에 고정.
+                    app.panel_focus = 0;
+                    app.selected = 0;
+                }
+            }
             let frame = render_frame(&app);
             events.push_str(&event_line(t, &frame));
             t += DT;
@@ -69,6 +97,14 @@ pub async fn run(cfg: &Config, out: &str) {
 }
 
 const HISTORY_PREROLL: u64 = 50;
+
+/// 스토리보드 특수 연출 — 새 UI 요소를 캐스트에 노출.
+#[derive(Clone, Copy)]
+enum Extra {
+    None,
+    ActionMenu, // Enter 액션 메뉴 오버레이
+    Slo,        // SLO advisor(목표 대비 판정)
+}
 
 fn nan_row(model: &str) -> PerfRow {
     let n = f64::NAN;
