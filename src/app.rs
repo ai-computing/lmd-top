@@ -278,8 +278,8 @@ impl App {
 
     /// EPP what-if: 선택 scorer 가중치를 delta 만큼 조정(로컬 오버라이드, ≥0).
     pub fn epp_adjust(&mut self, delta: f64) {
-        if self.view != View::Epp {
-            return;
+        if self.view != View::Epp || self.panel_focus != 0 {
+            return; // scorers 패널에 포커스일 때만
         }
         let ord = self.order();
         if let (Some(cfg), Some(&i)) = (&self.snap.epp, ord.get(self.selected)) {
@@ -491,9 +491,11 @@ impl App {
                 2 => self.catalog.get(i).map(|m| format!("{} {}", m.id, m.role)).unwrap_or_default(),
                 _ => self.snap.artifacts.get(i).map(|a| format!("{} {} {}", a.model, a.family, a.source)).unwrap_or_default(),
             },
+            View::Epp if self.panel_focus == 1 => self.snap.pools.get(i).map(|p| p.name.clone()).unwrap_or_default(),
             View::Epp => self.snap.epp.as_ref().and_then(|e| e.scorers.get(i)).map(|(n, _)| n.clone()).unwrap_or_default(),
             View::Events => self.snap.events.get(i).map(|e| format!("{} {} {}", e.reason, e.object, e.message)).unwrap_or_default(),
             View::Nodes => self.snap.nodes.get(i).map(|n| n.name.clone()).unwrap_or_default(),
+            View::Routing if self.panel_focus == 1 => self.snap.pools.get(i).map(|p| p.name.clone()).unwrap_or_default(),
             View::Routing => self.snap.routes.get(i).map(|r| format!("{} {}", r.path, r.backend)).unwrap_or_default(),
             View::Perf => self.snap.perf_rows.get(i).map(|r| r.model.clone()).unwrap_or_default(),
         }
@@ -733,7 +735,9 @@ impl App {
     /// 현재 뷰의 포커스 가능한 패널 수(멀티패널 뷰만 >1).
     pub fn panel_count(&self) -> usize {
         match self.view {
-            View::Launch => 3, // Deploy: 컴파일 변형 / 배치 타깃 / 카탈로그
+            View::Launch => 3,  // Deploy: 컴파일 변형 / 배치 타깃 / 카탈로그
+            View::Epp => 2,     // scorers / InferencePool
+            View::Routing => 2, // routes / InferencePool
             _ => 1,
         }
     }
@@ -861,6 +865,7 @@ impl App {
                 };
                 (0..n).collect()
             }
+            View::Epp if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
             View::Epp => (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect(),
             View::Events => (0..self.snap.events.len()).collect(),
             View::Nodes => (0..self.snap.nodes.len()).collect(),
@@ -889,6 +894,7 @@ impl App {
                 });
                 idx
             }
+            View::Routing if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
             View::Routing => (0..self.snap.routes.len()).collect(),
         };
         if !self.filter.is_empty() {

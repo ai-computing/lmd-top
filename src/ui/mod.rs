@@ -646,16 +646,16 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
 
     match &app.snap.epp {
         Some(cfg) => {
-            let order = app.order();
+            let sfocus = app.panel_focus == 0; // scorers 패널 포커스
             // 유효 가중치(what-if 오버라이드 반영) + 상대 영향도(%).
             let eff: Vec<f64> = cfg.scorers.iter().map(|(n, w)| app.epp_weight(n, *w)).collect();
             let maxw = eff.iter().cloned().fold(1.0, f64::max);
             let total: f64 = eff.iter().sum::<f64>().max(1e-9);
             let simulating = !app.epp_weights.is_empty();
-            let srows: Vec<Row> = order
+            let srows: Vec<Row> = cfg
+                .scorers
                 .iter()
-                .map(|&i| {
-                    let (name, base) = &cfg.scorers[i];
+                .map(|(name, base)| {
                     let w = app.epp_weight(name, *base);
                     let ov = app.epp_weights.contains_key(name);
                     let infl = w / total * 100.0;
@@ -672,23 +672,28 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                 .collect();
             // 정직한 문구: +/- 는 가중치를 조정하고 infl=상대 점유율(weight share)을 보여줄 뿐,
             // 실제 라우팅 결정 재시뮬이 아님(그건 per-endpoint score 필요 → 인프라 대기).
+            let ns = cfg.scorers.len();
+            let cnt = if sfocus { count_suffix(app.selected, ns) } else { String::new() };
             let title = if simulating {
-                format!("EPP scorers · +/- weight (sim) · infl=share{}", count_suffix(app.selected, order.len()))
+                format!("EPP scorers · +/- weight (sim) · infl=share{}", cnt)
             } else {
-                format!("EPP scorers · +/- weight · infl=share{}", count_suffix(app.selected, order.len()))
+                format!("EPP scorers · +/- weight · infl=share{}", cnt)
             };
-            let t = Table::new(srows, [Constraint::Min(14), Constraint::Length(3), Constraint::Length(9), Constraint::Length(4)])
+            let mut t = Table::new(srows, [Constraint::Min(14), Constraint::Length(3), Constraint::Length(9), Constraint::Length(4)])
                 .header(hrow(&["SCORER", "WT", "WEIGHT", "infl"]))
                 .column_spacing(1)
-                .row_highlight_style(hl_style())
-                .highlight_symbol("▎")
-                .block(block_active(&title));
+                .block(if sfocus { block_active(&title) } else { block(&title) });
+            if sfocus {
+                t = t.row_highlight_style(hl_style()).highlight_symbol("▎");
+            }
             let mut st = TableState::default();
-            st.select(Some(app.selected));
+            st.select(if sfocus { Some(app.selected) } else { None });
             f.render_stateful_widget(t, top_l, &mut st);
-            list_scrollbar(f, top_l, order.len(), app.selected, 1);
+            if sfocus {
+                list_scrollbar(f, top_l, ns, app.selected, 1);
+            }
 
-            let sel = order.get(app.selected).and_then(|&i| cfg.scorers.get(i));
+            let sel = if sfocus { cfg.scorers.get(app.selected) } else { None };
             let mut dl: Vec<Line> = vec![
                 Line::from(vec![
                     Span::styled("profile: ", Style::default().fg(C_DIM())),
@@ -732,10 +737,20 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
             ])
         })
         .collect();
-    let t = Table::new(rows, [Constraint::Min(12), Constraint::Length(7), Constraint::Length(8), Constraint::Length(6)])
+    let pfocus = app.panel_focus == 1; // InferencePool 패널 포커스
+    let ptitle = format!("InferencePool{}", if pfocus { count_suffix(app.selected, app.snap.pools.len()) } else { String::new() });
+    let mut t = Table::new(rows, [Constraint::Min(12), Constraint::Length(7), Constraint::Length(8), Constraint::Length(6)])
         .header(hrow(&["POOL", "EP r/t", "QUEUE", "SAT"]))
-        .block(block("InferencePool"));
-    f.render_widget(t, bottom_l);
+        .block(if pfocus { block_active(&ptitle) } else { block(&ptitle) });
+    if pfocus {
+        t = t.row_highlight_style(hl_style()).highlight_symbol("▎");
+    }
+    let mut pst = TableState::default();
+    pst.select(if pfocus { Some(app.selected) } else { None });
+    f.render_stateful_widget(t, bottom_l, &mut pst);
+    if pfocus {
+        list_scrollbar(f, bottom_l, app.snap.pools.len(), app.selected, 1);
+    }
 
     // request distribution
     let mut dl: Vec<Line> = vec![Line::from(vec![
@@ -795,7 +810,7 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
             Some(m) => format!("{}/{} {} [{}]", m.ready, m.desired, m.accel, m.engine),
             None => "?".into(),
         };
-        let sel = i == app.selected;
+        let sel = app.panel_focus == 0 && i == app.selected; // routes 패널 포커스일 때만 강조
         if sel {
             sel_line = lines.len();
         }
@@ -843,21 +858,21 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     // 트리가 길면 선택 route 가 보이도록 세로 스크롤(무언의 잘림 방지).
     let vis = (top[0].height as usize).saturating_sub(2);
     let scroll = if sel_line + 2 > vis { (sel_line + 3).saturating_sub(vis) as u16 } else { 0 };
+    let rfocus = app.panel_focus == 0;
+    let rtitle = format!("Flow · Gateway→EPP→Model→Infra · ↑↓ route · p/i/m/e pivot{}", if rfocus { count_suffix(app.selected, s.routes.len()) } else { String::new() });
     f.render_widget(
-        Paragraph::new(lines).scroll((scroll, 0)).block(block(&format!(
-            "Flow · Gateway→EPP→Model→Infra · ↑↓ route · p/i/m/e pivot{}",
-            count_suffix(app.selected, s.routes.len())
-        ))),
+        Paragraph::new(lines).scroll((scroll, 0)).block(if rfocus { block_active(&rtitle) } else { block(&rtitle) }),
         top[0],
     );
 
     // InferencePool + EPP + SLO
+    let pfocus = app.panel_focus == 1; // InferencePool 패널 포커스
     let mut pl: Vec<Line> = Vec::new();
     if s.pools.is_empty() {
         pl.push(Line::from(Span::styled("(no InferencePool)", Style::default().fg(C_DIM()))));
     }
-    for p in &s.pools {
-        pl.push(Line::from(vec![
+    for (pi, p) in s.pools.iter().enumerate() {
+        let mut pline = Line::from(vec![
             Span::styled(format!("{:<18}", truncw(&p.name, 18)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!("ep {}/{} ", p.ep_ready, p.ep_total),
@@ -865,7 +880,11 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(format!("EPP:{} ", if p.epp.is_empty() { "–" } else { &p.epp }), Style::default().fg(C_ACC())),
             Span::styled(format!("sel={}", if p.selector.is_empty() { "–" } else { &p.selector }), Style::default().fg(C_DIM())),
-        ]));
+        ]);
+        if pfocus && pi == app.selected {
+            pline.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+        }
+        pl.push(pline);
     }
     if !s.objectives.is_empty() {
         let so: Vec<String> = s.objectives.iter().map(|o| format!("{}(p{}→{})", o.name, o.priority, o.pool)).collect();
@@ -884,7 +903,8 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!(" [{}]", a.triggers), Style::default().fg(C_DIM())),
         ]));
     }
-    f.render_widget(Paragraph::new(pl).block(block("InferencePool / EPP / SLO / Autoscale")), top[1]);
+    let ptitle = format!("InferencePool / EPP / SLO / Autoscale{}", if pfocus { count_suffix(app.selected, s.pools.len()) } else { String::new() });
+    f.render_widget(Paragraph::new(pl).block(if pfocus { block_active(&ptitle) } else { block(&ptitle) }), top[1]);
 }
 
 // ── Overview ───────────────────────────────────────────
