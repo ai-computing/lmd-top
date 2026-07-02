@@ -5,6 +5,7 @@
 
 [English](README.md) · **한국어**
 
+[![release](https://img.shields.io/github/v/release/gspark-etri/lmd-top?logo=github)](https://github.com/gspark-etri/lmd-top/releases/latest)
 ![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white)
 ![single static binary](https://img.shields.io/badge/single%20static%20binary-no%20C%20deps-success)
 ![for llm-d](https://img.shields.io/badge/for-llm--d-8839ef)
