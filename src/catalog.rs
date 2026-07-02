@@ -3,6 +3,8 @@
 
 use serde::Deserialize;
 
+// 일부 필드는 Deploy 뷰 v1 에선 미표시(컴파일/배포 자동화 Phase 2 에서 사용) — 파싱은 유지.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct CatModel {
     pub id: String,
@@ -14,6 +16,7 @@ pub struct CatModel {
     pub placements: Vec<CatPlacement>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct CatPlacement {
     pub engine: String,
@@ -56,6 +59,7 @@ pub enum Ready {
 }
 
 impl Ready {
+    #[allow(dead_code)]
     pub fn glyph(&self) -> &'static str {
         match self {
             Ready::Ready => "✓ ready",
