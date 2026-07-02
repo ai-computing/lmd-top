@@ -253,10 +253,11 @@ impl PerfAdvice {
 
 /// 배포 용량 판정 — replica×디바이스 총 수요 대비 클러스터 동종 가속기 총량.
 pub struct DeployFit {
-    pub demand: i64,   // replicas × replica당 디바이스
-    pub total: i64,    // 클러스터 동종 디바이스 총 수
-    pub free: i64,     // 유휴(비busy) 추정
-    pub nodes: i64,    // 동종 디바이스 보유 노드 수
+    pub demand: i64,        // replicas × replica당 디바이스
+    pub total: i64,         // 클러스터 동종 디바이스 총 수
+    pub free: i64,          // 유휴(metric busy_model 비어있음) 추정
+    pub resource_free: i64, // k8s 리소스 유휴 = allocatable - requested(스케줄러 관점)
+    pub nodes: i64,         // 동종 디바이스 보유 노드 수
     pub verdict: FitVerdict,
     pub tips: Vec<String>,
 }

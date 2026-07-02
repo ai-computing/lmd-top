@@ -133,7 +133,7 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
         Span::styled("  cap    ", Style::default().fg(C_DIM())),
         Span::styled(format!("{} {}", glyph, fit.verdict.label()), Style::default().fg(vcol).add_modifier(Modifier::BOLD)),
         Span::styled(
-            format!("   demand {} dev   free {}/{} over {} node", fit.demand, fit.free, fit.total, fit.nodes),
+            format!("   demand {} dev   free {} (res {}) / {} over {} node", fit.demand, fit.free, fit.resource_free, fit.total, fit.nodes),
             Style::default().fg(C_DIM()),
         ),
     ]));

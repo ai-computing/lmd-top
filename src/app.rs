@@ -1317,22 +1317,49 @@ impl App {
             };
             envs.push((ek.into(), f.value.clone()));
         }
-        let env_lines: String = envs
-            .iter()
-            .map(|(k, v)| format!("             \x20           - {{ name: {}, value: \"{}\" }}\n", k, v))
-            .collect();
         let opts_summary: String = form
             .fields
             .iter()
             .map(|f| format!("{}={}", f.key, f.value))
             .collect::<Vec<_>>()
             .join("  ");
+        let outdir = format!("/mnt/store/compiled/{}/{}/{}", repo_dir, vendor, target);
+        // 벤더별 컨테이너: Furiosa 는 이미지에 든 `fxb build` 를 직접 호출(스크립트 불필요, 바로 실행 가능).
+        // RBLN 은 optimum-rbln 커스텀 스크립트(compile-script ConfigMap)를 env 로 구동.
+        let (volumes_extra, env_block, mounts_extra, command, note) = if vendor == "furiosa" {
+            let pp = { let p = form.get("pp"); if p.is_empty() { "1".into() } else { p } };
+            let ml = { let m = form.get("max-len"); if m.is_empty() { "8192".into() } else { m } };
+            // fxb 는 .fxb 아카이브를 씀 → {target}/model.fxb 로 디렉터리 안에 두어 discovery 레이아웃 유지.
+            let cmd = format!(
+                "set -e; mkdir -p {outdir}; fxb build {model_id} {outdir}/model -tp {tp} -pp {pp} --max-model-len {ml}; echo COMPILE_DONE; ls -la {outdir}",
+                outdir = outdir, model_id = model_id, tp = tp, pp = pp, ml = ml
+            );
+            (
+                String::new(),
+                "             \x20           - { name: HF_HOME, value: /mnt/store/hub }\n".to_string(),
+                String::new(),
+                format!("[\"sh\", \"-c\", \"{}\"]", cmd),
+                "# Furiosa: 이미지의 fxb build 직접 호출(레지스트리 등록 모델만 빌드됨).",
+            )
+        } else {
+            let env_lines: String = envs
+                .iter()
+                .map(|(k, v)| format!("             \x20           - {{ name: {}, value: \"{}\" }}\n", k, v))
+                .collect();
+            (
+                // 들여쓰기는 형제 항목(store)과 정확히 일치해야 함(volumes 8칸, mounts 12칸).
+                "        - { name: script, configMap: { name: compile-script } }\n".to_string(),
+                env_lines,
+                "            - { name: script, mountPath: /scripts, readOnly: true }\n".to_string(),
+                "[\"python3\", \"/scripts/compile.py\"]".to_string(),
+                "# RBLN: optimum-rbln 스크립트(compile-script ConfigMap)를 env 로 구동. 이미지 placeholder(TODO-)면 LMD_COMPILE_IMAGE_RBLN 필요.",
+            )
+        };
         let yaml = format!(
             "# 컴파일 Job (dry-run 미리보기) — 검토 후 `kubectl apply -f -` 로 적용.\n\
              # 모델 {model_id} → {vendor} 컴파일 → 공유 스토어(compiled/{repo_dir}/{vendor}/{target}).\n\
              # 옵션(컴파일 타임 고정): {opts}\n\
-             # nodeSelector·디바이스 resource 는 클러스터 감지 라벨. 컴파일 스크립트는 아래 env 를 읽음.\n\
-             # 이미지 placeholder(TODO-)면 LMD_COMPILE_IMAGE_RBLN 로 지정해야 apply 가능.\n\
+             {note}\n\
              apiVersion: batch/v1\n\
              kind: Job\n\
              metadata: {{ name: {name}, namespace: {ns} }}\n\
@@ -1344,29 +1371,33 @@ impl App {
              \x20     nodeSelector: {{ {node_label} }}\n\
              \x20     volumes:\n\
              \x20       - {{ name: store, persistentVolumeClaim: {{ claimName: model-store }} }}\n\
-             \x20       - {{ name: script, configMap: {{ name: compile-script }} }}\n\
+             {volumes_extra}\
              \x20     containers:\n\
              \x20       - name: compile\n\
              \x20         image: {image}\n\
              \x20         resources: {{ limits: {{ {res_key}: {res_qty} }} }}\n\
              \x20         env:\n\
-             {env_lines}\
+             {env_block}\
              \x20         volumeMounts:\n\
              \x20           - {{ name: store, mountPath: /mnt/store }}\n\
-             \x20           - {{ name: script, mountPath: /scripts, readOnly: true }}\n\
-             \x20         command: [\"python3\", \"/scripts/compile.py\"]\n",
+             {mounts_extra}\
+             \x20         command: {command}\n",
             model_id = model_id,
             vendor = vendor,
             repo_dir = repo_dir,
             target = target,
             opts = opts_summary,
+            note = note,
             name = name,
             ns = self.ns,
             node_label = node_label,
             image = image,
             res_key = res_key,
             res_qty = res_qty,
-            env_lines = env_lines,
+            volumes_extra = volumes_extra,
+            env_block = env_block,
+            mounts_extra = mounts_extra,
+            command = command,
         );
         self.preview = Some((format!("compile · {} → {}", form.model, target), yaml));
         self.preview_scroll = 0;
@@ -1793,10 +1824,27 @@ impl App {
         let replicas = form.get("replicas").parse::<i64>().unwrap_or(1).max(1);
         let per = form.get("devices").parse::<i64>().unwrap_or(1).max(1);
         let demand = replicas * per;
+        // k8s 리소스 관점 유휴 = allocatable - requested (스케줄러가 실제로 보는 값).
+        // metric busy_model 로는 유휴여도, 다른 배포가 리소스를 예약(request)했으면 스케줄 불가.
+        let res_key = match form.vendor {
+            "rbln" => "rebellions.ai/ATOM",
+            "furiosa" => "furiosa.ai/rngd",
+            _ => "nvidia.com/gpu",
+        };
+        let resource_free = self
+            .snap
+            .inventory
+            .iter()
+            .find(|(k, _, _)| k == res_key)
+            .map(|(_, alloc, req)| (alloc - req).max(0))
+            .unwrap_or(free); // inventory 없으면 metric 값으로 폴백
         // 실제 배치 가능 replica 수 = Σ floor(node_free / per) (한 노드 안에 per 개가 모여야).
         let placeable: i64 = free_by_node.values().map(|f| f / per).sum();
         let verdict = if total == 0 {
             FitVerdict::Unknown
+        } else if demand > resource_free {
+            // 스케줄러 관점 리소스 부족 — metric 유휴여도 예약돼 있으면 못 뜸(우선).
+            FitVerdict::Oom
         } else if per > max_node_free {
             FitVerdict::Oom // replica 하나도 어느 노드에도 안 들어감(조각난 여유)
         } else if placeable < replicas {
@@ -1805,14 +1853,19 @@ impl App {
             FitVerdict::Fits
         };
         let mut tips: Vec<String> = Vec::new();
-        match verdict {
-            FitVerdict::Oom => {
-                tips.push(format!("replica당 {}개가 단일 노드에 안 들어감(최대 유휴 {}/노드) — devices/replica↓ 또는 서빙 정리", per, max_node_free));
-            }
-            FitVerdict::Tight => {
-                tips.push(format!("노드 패킹상 {}/{} replica 만 배치 가능(유휴 {}, 노드별 조각) — replicas↓ 또는 노드 확보", placeable, replicas, free));
-            }
-            _ => {}
+        if demand > resource_free {
+            tips.push(format!(
+                "리소스 예약 기준 유휴 {} < 수요 {} — 다른 배포가 {} 를 점유(request)함. 그 서빙을 stop 하거나 replicas/devices↓",
+                resource_free, demand, res_key
+            ));
+        } else if matches!(verdict, FitVerdict::Oom) {
+            tips.push(format!("replica당 {}개가 단일 노드에 안 들어감(최대 유휴 {}/노드) — devices/replica↓ 또는 서빙 정리", per, max_node_free));
+        } else if matches!(verdict, FitVerdict::Tight) {
+            tips.push(format!("노드 패킹상 {}/{} replica 만 배치 가능(유휴 {}, 노드별 조각) — replicas↓ 또는 노드 확보", placeable, replicas, free));
+        }
+        // metric 유휴와 리소스 유휴가 어긋나면 명시(오해 방지).
+        if resource_free != free {
+            tips.push(format!("(metric 유휴 {} ≠ 리소스 유휴 {} — 예약됐지만 idle 인 디바이스 있음)", free, resource_free));
         }
         if form.get("place") == "spread" && replicas > nodes && nodes > 0 {
             tips.push(format!("⚠ spread: replicas {} > 노드 {} — 일부는 같은 노드로", replicas, nodes));
@@ -1820,7 +1873,7 @@ impl App {
         if per > 1 && form.vendor == "rbln" {
             tips.push("replica당 다중 칩은 컴파일 TP 와 일치해야 함".into());
         }
-        DeployFit { demand, total, free, nodes, verdict, tips }
+        DeployFit { demand, total, free, resource_free, nodes, verdict, tips }
     }
 
     /// 배포 폼 → Deployment 매니페스트 미리보기(dry-run). Enter 시 호출.
@@ -2098,6 +2151,36 @@ mod tests {
         // (문자열 보간 들여쓰기 실수를 dry-run 이전에 잡음).
         serde_yaml::from_str::<serde_yaml::Value>(&yaml).expect("compile manifest is valid YAML");
         serde_yaml::from_str::<serde_yaml::Value>(&dyaml).expect("deploy manifest is valid YAML");
+    }
+
+    #[test]
+    fn furiosa_compile_uses_fxb_build() {
+        use crate::collect::ModelArtifact;
+        let mut a = App::new();
+        a.snap = Snapshot {
+            artifacts: vec![ModelArtifact {
+                model: "exaone-rngd".into(),
+                family: "lgai-exaone/exaone".into(),
+                engine: "Furiosa-LLM".into(),
+                node: "etri-001".into(),
+                image: String::new(),
+                source: "LGAI-EXAONE/EXAONE-4.0".into(),
+                mount: String::new(),
+                opts: vec![],
+            }],
+            ..Default::default()
+        };
+        a.view = View::Launch;
+        a.panel_focus = 0;
+        a.selected = 0;
+        a.compile_preview(); // Furiosa 엔진 → 폼 열림
+        a.compile_form_submit();
+        let (_, yaml) = a.preview.clone().expect("furiosa compile preview");
+        assert!(yaml.contains("fxb build"), "furiosa uses fxb build CLI directly");
+        assert!(yaml.contains("furiosaai/furiosa-llm:latest"), "default furiosa image");
+        assert!(!yaml.contains("compile-script"), "no custom script needed for furiosa");
+        assert!(yaml.contains("furiosa.ai/rngd"));
+        serde_yaml::from_str::<serde_yaml::Value>(&yaml).expect("furiosa manifest is valid YAML");
     }
 
     #[test]
