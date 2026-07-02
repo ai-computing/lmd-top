@@ -88,9 +88,46 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
     if app.alerts_panel {
         alerts_overlay(f, app);
     }
+    // 확인 팝업 — 가장 위(다른 오버레이보다 앞). Yes/No 선택.
+    if app.confirm.is_some() {
+        confirm_overlay(f, app);
+    }
     if app.help {
         help_overlay(f);
     }
+}
+
+/// 변경 작업 확인 팝업 — ←→ 로 Yes/No 선택, Enter 실행/취소. (엔터만으로 진행 가능하게)
+fn confirm_overlay(f: &mut Frame, app: &App) {
+    let Some(pending) = &app.confirm else { return };
+    let full = f.area();
+    let area = centered(full, 62, 8);
+    f.render_widget(Clear, area);
+    let yes = app.confirm_yes;
+    let btn = |label: &str, on: bool| {
+        if on {
+            Span::styled(format!("  {}  ", label), Style::default().fg(Color::Black).bg(C_ACC()).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(format!("  {}  ", label), Style::default().fg(C_DIM()))
+        }
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(format!("  {}", pending.prompt()), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("  이 작업을 실행할까요? (되돌릴 수 있는 변경)", Style::default().fg(C_DIM()))),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("      "),
+            btn("▶ Yes 실행", yes),
+            Span::raw("        "),
+            btn("No 취소", !yes),
+        ]),
+    ];
+    let title = "confirm · ←→ 선택 · Enter 결정 · Esc 취소";
+    f.render_widget(
+        Paragraph::new(lines).block(block(title).border_style(Style::default().fg(C_WARN()))),
+        area,
+    );
 }
 
 /// 알림 히스토리 오버레이(A) — 최신 앞, 상대시각 + 심각도색.
@@ -382,14 +419,13 @@ fn tabs(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn footer(f: &mut Frame, area: Rect, app: &App) {
-    // 변경 작업 확인(y/n) 프롬프트
-    if let Some(pending) = &app.confirm {
+    // 확인은 이제 팝업(confirm_overlay)으로 표시 — 푸터에는 안내만.
+    if app.confirm.is_some() {
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(" confirm ", Style::default().fg(Color::Black).bg(C_WARN()).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" {} ", pending.prompt()), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                Span::styled("  y confirm · n/esc cancel", Style::default().fg(C_DIM())),
-            ])),
+            Paragraph::new(Line::from(Span::styled(
+                " confirm popup — ←→ Yes/No · Enter 결정 · Esc 취소",
+                Style::default().fg(C_WARN()).add_modifier(Modifier::BOLD),
+            ))),
             area,
         );
         return;
