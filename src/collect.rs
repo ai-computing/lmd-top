@@ -133,12 +133,14 @@ pub struct ModelRow {
 /// deploy 컨테이너 spec(command/args/env/volumeMounts)에서 추출(휴리스틱).
 #[derive(Clone, Default)]
 pub struct ModelArtifact {
-    pub model: String,               // deploy 이름
+    pub model: String,               // deploy 이름(=변형 이름)
+    pub family: String,              // 트리 그룹 키(모델 계열, source/name 에서 정규화)
     pub engine: String,              // 추론 엔진
+    pub node: String,                // 저장/구동 노드(파드 스케줄 노드)
     pub image: String,               // 컨테이너 이미지
     pub source: String,              // 모델 소스: HF id / --model 경로 / MODEL_ID
     pub mount: String,               // 저장 위치: "mountPath ← PVC/hostPath/emptyDir"
-    pub opts: Vec<(String, String)>, // 컴파일/서빙 옵션(TP·max-len·batch·dtype·quant·NPU 등)
+    pub opts: Vec<(String, String)>, // 컴파일/서빙 옵션(TP·PP·max-len·batch·dtype·quant·NPU bucket 등)
 }
 
 #[derive(Clone)]
@@ -487,16 +489,25 @@ fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtif
             }
         }
     };
-    push("tp", arg_val("--tensor-parallel-size").or_else(|| arg_val("-tp")));
-    push("pp", arg_val("--pipeline-parallel-size"));
-    push("max-len", arg_val("--max-model-len").or_else(|| arg_val("--max-seq-len")));
+    // 병렬화(공통): TP/PP/DP.
+    push("tp", arg_val("--tensor-parallel-size").or_else(|| arg_val("-tp")).or_else(|| env_val(&["TENSOR_PARALLEL_SIZE", "RBLN_TENSOR_PARALLEL_SIZE"])));
+    push("pp", arg_val("--pipeline-parallel-size").or_else(|| arg_val("-pp")));
+    push("dp", arg_val("--data-parallel-size").or_else(|| arg_val("-dp")));
+    // 길이/배치(NPU 는 컴파일 시 고정되는 값 — RBLN max_seq_len / Furiosa bucket).
+    push("max-len", arg_val("--max-model-len").or_else(|| arg_val("--max-seq-len")).or_else(|| env_val(&["RBLN_MAX_SEQ_LEN", "MAX_SEQ_LEN"])));
     push("max-seqs", arg_val("--max-num-seqs"));
-    push("batch", arg_val("--max-num-batched-tokens").or_else(|| env_val(&["BATCH_SIZE", "MAX_BATCH_SIZE"])));
+    push("batch", arg_val("--max-num-batched-tokens").or_else(|| env_val(&["BATCH_SIZE", "MAX_BATCH_SIZE", "RBLN_BATCH_SIZE"])));
+    push("bucket", arg_val("--bucket-config").or_else(|| arg_val("--prefill-buckets")).or_else(|| arg_val("--decode-buckets"))); // Furiosa RNGD
+    // 정밀도/양자화.
     push("dtype", arg_val("--dtype").or_else(|| env_val(&["DTYPE"])));
-    push("quant", arg_val("--quantization").or_else(|| env_val(&["QUANTIZATION"])));
+    push("quant", arg_val("--quantization").or_else(|| env_val(&["QUANTIZATION", "RBLN_QUANTIZATION"])));
     push("kv-dtype", arg_val("--kv-cache-dtype"));
     push("block", arg_val("--block-size"));
+    // 디바이스/타깃 NPU.
     push("device", arg_val("--device"));
+    push("devices", arg_val("--devices")); // Furiosa PE 지정
+    push("npu", arg_val("--npu").or_else(|| env_val(&["RBLN_NPU"]))); // RBLN 타깃 칩(예: RBLN-CA22)
+    push("gpu-mem", arg_val("--gpu-memory-utilization"));
     // NPU 특화 env / args (RBLN·Furiosa·compile).
     for (n, v) in &env {
         let nu = n.to_uppercase();
@@ -514,7 +525,34 @@ fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtif
         }
     }
 
-    ModelArtifact { model: name.to_string(), engine: engine.to_string(), image, source, mount, opts }
+    let family = model_family(&source, name);
+    ModelArtifact { model: name.to_string(), family, engine: engine.to_string(), node: String::new(), image, source, mount, opts }
+}
+
+/// 트리 그룹 키(모델 계열) — HF id/경로면 모델명 부분, 아니면 deploy 이름에서 엔진/HW/양자화 접사 제거.
+fn model_family(source: &str, name: &str) -> String {
+    let base = if source.contains('/') && !source.starts_with('/') {
+        source.rsplit('/').next().unwrap_or(source).to_string() // org/Model → Model
+    } else if source.starts_with('/') {
+        source.rsplit('/').find(|s| !s.is_empty()).unwrap_or(source).to_string() // /a/b/model → model
+    } else {
+        name.to_string()
+    };
+    let mut b = base.to_lowercase();
+    for pre in ["vllm-", "sglang-", "ollama-", "furiosa-", "k-"] {
+        if let Some(x) = b.strip_prefix(pre) {
+            b = x.to_string();
+        }
+    }
+    for suf in ["-instruct", "-awq", "-gptq", "-fp8", "-bf16", "-fp16", "-int8", "-int4", "-w4a16", "-rbln", "-gb10", "-npu", "-cpu", "-llm-d", "-proxy", "-server", "-n2", "-n3"] {
+        b = b.replace(suf, "");
+    }
+    let b = b.trim_matches(|c| c == '-' || c == '_').to_string();
+    if b.is_empty() {
+        name.to_string()
+    } else {
+        b
+    }
 }
 
 /// 모델 deploy 가 어느 가속기/노드에서 도는지 추정(가속기 busy_model 라벨이 파드명 ⊇ deploy명).
@@ -1287,6 +1325,23 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                 });
             }
         }
+    }
+
+    // artifact 저장/구동 노드 — 가속기 busy_model 우선, 없으면 파드 스케줄 노드(분리 차용으로 먼저 계산).
+    let nodes: Vec<String> = snap
+        .artifacts
+        .iter()
+        .map(|a| {
+            snap.accel
+                .iter()
+                .find(|x| !x.busy_model.is_empty() && x.busy_model.starts_with(&a.model))
+                .map(|x| x.node.clone())
+                .or_else(|| snap.pods.iter().find(|p| p.name.starts_with(&a.model)).map(|p| p.node.clone()))
+                .unwrap_or_default()
+        })
+        .collect();
+    for (a, n) in snap.artifacts.iter_mut().zip(nodes) {
+        a.node = n;
     }
 }
 
