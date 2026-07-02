@@ -109,10 +109,11 @@ pub enum View {
     Launch,
     Events,
     Nodes,
+    Store,
 }
 
 impl View {
-    pub const ALL: [View; 10] = [
+    pub const ALL: [View; 11] = [
         View::Overview,
         View::Accel,
         View::Models,
@@ -123,6 +124,7 @@ impl View {
         View::Launch,
         View::Events,
         View::Nodes,
+        View::Store,
     ];
     pub fn idx(&self) -> usize {
         View::ALL.iter().position(|v| v == self).unwrap_or(0)
@@ -139,6 +141,7 @@ impl View {
             View::Launch => "Launch",
             View::Events => "Events",
             View::Nodes => "Nodes",
+            View::Store => "Store",
         }
     }
 }
@@ -498,13 +501,14 @@ impl App {
             View::Nodes => self.snap.nodes.get(i).map(|n| n.name.clone()).unwrap_or_default(),
             View::Routing => self.snap.routes.get(i).map(|r| format!("{} {}", r.path, r.backend)).unwrap_or_default(),
             View::Perf => self.snap.perf_rows.get(i).map(|r| r.model.clone()).unwrap_or_default(),
+            View::Store => self.snap.artifacts.get(i).map(|a| format!("{} {} {}", a.model, a.source, a.engine)).unwrap_or_default(),
         }
     }
 
     /// 상세 패널을 가진 뷰인지(detail=true 가 실제로 렌더에 반영되는 뷰).
     /// 없는 뷰(Routing/Epp/Launch/Events)에서 detail=true 로 두면 ↑↓ 가 스크롤로 빠져 네비가 잠김.
     pub fn view_has_detail(&self) -> bool {
-        matches!(self.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events)
+        matches!(self.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events | View::Store)
     }
 
     pub fn toggle_detail(&mut self) {
@@ -864,6 +868,7 @@ impl App {
                 idx
             }
             View::Routing => (0..self.snap.routes.len()).collect(),
+            View::Store => (0..self.snap.artifacts.len()).collect(),
         };
         if !self.filter.is_empty() {
             let fl = self.filter.to_lowercase();
@@ -904,6 +909,12 @@ impl App {
     pub fn selected_event(&self) -> Option<&crate::collect::EventRow> {
         match self.view {
             View::Events => self.sel_orig().and_then(|i| self.snap.events.get(i)),
+            _ => None,
+        }
+    }
+    pub fn selected_artifact(&self) -> Option<&crate::collect::ModelArtifact> {
+        match self.view {
+            View::Store => self.sel_orig().and_then(|i| self.snap.artifacts.get(i)),
             _ => None,
         }
     }

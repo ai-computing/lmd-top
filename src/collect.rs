@@ -129,6 +129,18 @@ pub struct ModelRow {
     pub ttft: Option<f64>, // TTFT p95 (s)
 }
 
+/// Store 뷰용 — 모델이 "어디에(경로/볼륨)" 저장되고 "어떤 옵션으로" 컴파일/서빙되는지.
+/// deploy 컨테이너 spec(command/args/env/volumeMounts)에서 추출(휴리스틱).
+#[derive(Clone, Default)]
+pub struct ModelArtifact {
+    pub model: String,               // deploy 이름
+    pub engine: String,              // 추론 엔진
+    pub image: String,               // 컨테이너 이미지
+    pub source: String,              // 모델 소스: HF id / --model 경로 / MODEL_ID
+    pub mount: String,               // 저장 위치: "mountPath ← PVC/hostPath/emptyDir"
+    pub opts: Vec<(String, String)>, // 컴파일/서빙 옵션(TP·max-len·batch·dtype·quant·NPU 등)
+}
+
 #[derive(Clone)]
 pub struct EventRow {
     pub typ: String,    // Normal | Warning
@@ -161,6 +173,7 @@ pub struct Snapshot {
     pub accel: Vec<Accel>,
     pub pools: Vec<Pool>,
     pub models: Vec<ModelRow>,
+    pub artifacts: Vec<ModelArtifact>, // Store 뷰: 모델 저장 위치 + 컴파일/서빙 옵션
     pub pods: Vec<PodRow>,
     pub events: Vec<EventRow>,
     pub routes: Vec<Route>,
@@ -374,6 +387,134 @@ fn detect_engine(d: &serde_json::Value, accel: &str) -> String {
     } else {
         "custom".into()
     }
+}
+
+/// deploy 컨테이너 spec(command/args/env/volumeMounts)에서 모델 저장 위치 + 컴파일/서빙 옵션 추출.
+fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtifact {
+    let pod = &d["spec"]["template"]["spec"];
+    let c = &pod["containers"][0];
+    let image = c["image"].as_str().unwrap_or("").to_string();
+
+    let mut toks: Vec<String> = Vec::new();
+    for key in ["command", "args"] {
+        if let Some(arr) = c[key].as_array() {
+            for x in arr {
+                if let Some(s) = x.as_str() {
+                    toks.push(s.to_string());
+                }
+            }
+        }
+    }
+    let mut env: Vec<(String, String)> = Vec::new();
+    if let Some(arr) = c["env"].as_array() {
+        for e in arr {
+            if let (Some(n), Some(v)) = (e["name"].as_str(), e["value"].as_str()) {
+                env.push((n.to_string(), v.to_string()));
+            }
+        }
+    }
+    // `--key value` / `--key=value` 값 추출.
+    let arg_val = |flag: &str| -> Option<String> {
+        for (i, t) in toks.iter().enumerate() {
+            if let Some(rest) = t.strip_prefix(flag) {
+                if let Some(v) = rest.strip_prefix('=') {
+                    return Some(v.to_string());
+                }
+                if rest.is_empty() {
+                    return toks.get(i + 1).cloned();
+                }
+            }
+        }
+        None
+    };
+    let env_val = |keys: &[&str]| -> Option<String> {
+        env.iter().find(|(n, _)| keys.iter().any(|k| n.eq_ignore_ascii_case(k))).map(|(_, v)| v.clone())
+    };
+
+    // HF id(`org/model`) 또는 경로처럼 보이는 토큰만(셸 스크립트 인자 `sh -c "…"` 는 공백/개행 포함 → 제외).
+    let looks_like_model = |t: &&String| -> bool {
+        !t.starts_with('-')
+            && t.contains('/')
+            && !t.chars().any(|c| c.is_whitespace() || matches!(c, ';' | '#' | '&' | '|' | '='))
+    };
+    let source = arg_val("--model")
+        .or_else(|| arg_val("--model-path"))
+        .or_else(|| env_val(&["MODEL_ID", "HF_MODEL_ID", "MODEL_PATH", "MODEL", "HF_MODEL", "SERVED_MODEL_NAME"]))
+        .or_else(|| toks.iter().find(looks_like_model).cloned())
+        .unwrap_or_default();
+
+    // 저장 위치: model/hf/cache/weight/rbln/npu 힌트가 있는 volumeMount 우선, 없으면 첫 번째.
+    let mut mount = String::new();
+    if let Some(vms) = c["volumeMounts"].as_array() {
+        let pick = vms
+            .iter()
+            .find(|m| {
+                let p = m["mountPath"].as_str().unwrap_or("").to_lowercase();
+                let n = m["name"].as_str().unwrap_or("").to_lowercase();
+                ["model", "hf", "cache", "data", "weight", "ckpt", "rbln", "npu"].iter().any(|h| p.contains(h) || n.contains(h))
+            })
+            .or_else(|| vms.first());
+        if let Some(m) = pick {
+            let mp = m["mountPath"].as_str().unwrap_or("").to_string();
+            let vn = m["name"].as_str().unwrap_or("");
+            let backing = pod["volumes"]
+                .as_array()
+                .and_then(|vs| vs.iter().find(|v| v["name"].as_str() == Some(vn)))
+                .map(|v| {
+                    if let Some(pvc) = v["persistentVolumeClaim"]["claimName"].as_str() {
+                        format!("PVC:{}", pvc)
+                    } else if let Some(hp) = v["hostPath"]["path"].as_str() {
+                        format!("host:{}", hp)
+                    } else if v.get("emptyDir").is_some() {
+                        "emptyDir".into()
+                    } else if let Some(cm) = v["configMap"]["name"].as_str() {
+                        format!("cm:{}", cm)
+                    } else {
+                        "vol".into()
+                    }
+                })
+                .unwrap_or_default();
+            mount = if backing.is_empty() { mp } else { format!("{} ← {}", mp, backing) };
+        }
+    }
+
+    // 컴파일/서빙 옵션.
+    let mut opts: Vec<(String, String)> = Vec::new();
+    let mut push = |k: &str, v: Option<String>| {
+        if let Some(v) = v {
+            if !v.is_empty() {
+                opts.push((k.into(), v));
+            }
+        }
+    };
+    push("tp", arg_val("--tensor-parallel-size").or_else(|| arg_val("-tp")));
+    push("pp", arg_val("--pipeline-parallel-size"));
+    push("max-len", arg_val("--max-model-len").or_else(|| arg_val("--max-seq-len")));
+    push("max-seqs", arg_val("--max-num-seqs"));
+    push("batch", arg_val("--max-num-batched-tokens").or_else(|| env_val(&["BATCH_SIZE", "MAX_BATCH_SIZE"])));
+    push("dtype", arg_val("--dtype").or_else(|| env_val(&["DTYPE"])));
+    push("quant", arg_val("--quantization").or_else(|| env_val(&["QUANTIZATION"])));
+    push("kv-dtype", arg_val("--kv-cache-dtype"));
+    push("block", arg_val("--block-size"));
+    push("device", arg_val("--device"));
+    // NPU 특화 env / args (RBLN·Furiosa·compile).
+    for (n, v) in &env {
+        let nu = n.to_uppercase();
+        if (nu.starts_with("RBLN_") || nu.starts_with("FURIOSA_") || nu.contains("COMPILE") || nu.contains("NPU")) && opts.len() < 14 && !v.is_empty() {
+            opts.push((n.clone(), v.clone()));
+        }
+    }
+    for t in &toks {
+        if (t.starts_with("--rbln") || t.starts_with("--furiosa") || t.starts_with("--compile")) && opts.len() < 14 {
+            let (k, v) = match t.split_once('=') {
+                Some((a, b)) => (a.to_string(), b.to_string()),
+                None => (t.clone(), "✓".into()),
+            };
+            opts.push((k.trim_start_matches("--").into(), v));
+        }
+    }
+
+    ModelArtifact { model: name.to_string(), engine: engine.to_string(), image, source, mount, opts }
 }
 
 /// 모델 deploy 가 어느 가속기/노드에서 도는지 추정(가속기 busy_model 라벨이 파드명 ⊇ deploy명).
@@ -947,6 +1088,7 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                     let mn = match_model(name.as_str(), &vllm.run);
                     let accel = accel_for(&snap.accel, &name);
                     let engine = detect_engine(d, &accel);
+                    snap.artifacts.push(model_artifact(d, &name, &engine));
                     snap.models.push(ModelRow {
                         route: route_for(&name),
                         engine,

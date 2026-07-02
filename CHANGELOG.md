@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.23.0]
+### Added — Store 뷰(모델 저장 위치 + 컴파일/서빙 옵션)
+- 새 탭 **Store**(Tab 접근) — deploy 컨테이너 spec 에서 모델 소스(HF id/경로), 저장 위치(mountPath ← PVC/host/emptyDir), 컴파일/서빙 옵션(TP·max-len·batch·dtype·quant·NPU 등) 추출·표시. `⏎` 로 전체 옵션 상세.
+
 ## [0.22.0]
 ### Added — 노드 디스크 사용량 모니터링
 - 루트 파일시스템(`mountpoint="/"`) 사용량을 `node_filesystem_*` 로 수집(NodeInfo.disk_used/total).
