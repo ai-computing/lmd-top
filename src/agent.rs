@@ -32,8 +32,11 @@ struct AgentState {
     gateway: Gw,
     epp_in_path: bool,
     cluster: Cluster,
+    nodes: Vec<Node>,
     accelerators: Vec<Acc>,
     models: Vec<Mdl>,
+    artifacts: Vec<Artifact>,
+    stored: Vec<Stored>,
     pools: Vec<Pl>,
     per_model_perf: Vec<Pm>,
     diagnosis: Diag,
@@ -55,6 +58,8 @@ struct Cluster {
     util_avg_pct: f64,
     vram_used_gb: f64,
     vram_total_gb: f64,
+    disk_used_gb: f64,
+    disk_total_gb: f64,
     power_w: f64,
     models_serving: usize,
     models_total: usize,
@@ -124,6 +129,43 @@ struct Pm {
 }
 
 #[derive(Serialize)]
+struct Node {
+    name: String,
+    ready: bool,
+    cordoned: bool,
+    cpu_pct: Option<f64>,
+    mem_used_gb: f64,
+    mem_total_gb: f64,
+    disk_used_gb: Option<f64>,
+    disk_total_gb: Option<f64>,
+    load1: Option<f64>,
+}
+
+/// Deploy 컴파일 변형(아티팩트) — 모델 소스·저장 위치·컴파일/서빙 옵션.
+#[derive(Serialize)]
+struct Artifact {
+    model: String,
+    family: String,
+    engine: String,
+    node: Option<String>,
+    source: Option<String>,
+    storage: Option<String>,
+    compile_opts: std::collections::BTreeMap<String, String>,
+}
+
+/// 공유 스토어 인벤토리(배포 무관) — HF 원본/NPU 컴파일본.
+#[derive(Serialize)]
+struct Stored {
+    repo: String,
+    family: String,
+    format: String,
+    compiled_for: Option<String>,
+    revision: Option<String>,
+    size: String,
+    path: String,
+}
+
+#[derive(Serialize)]
 struct Diag {
     message: String,
     severity: &'static str, // ok / warn / bad
@@ -158,6 +200,52 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
     }
     let n = s.accel.len().max(1);
     let serving = s.models.iter().filter(|m| m.ready > 0).count();
+    let (disk_u, disk_t): (f64, f64) = s.nodes.iter().fold((0.0, 0.0), |(u, t), nd| (u + nd.disk_used_gb, t + nd.disk_total_gb));
+
+    let nodes = s
+        .nodes
+        .iter()
+        .map(|nd| Node {
+            name: nd.name.clone(),
+            ready: nd.ready,
+            cordoned: nd.cordoned,
+            cpu_pct: opt(nd.cpu_pct),
+            mem_used_gb: nd.mem_used_gb,
+            mem_total_gb: nd.mem_total_gb,
+            disk_used_gb: if nd.disk_total_gb > 0.0 { Some(nd.disk_used_gb) } else { None },
+            disk_total_gb: if nd.disk_total_gb > 0.0 { Some(nd.disk_total_gb) } else { None },
+            load1: opt(nd.load1),
+        })
+        .collect();
+
+    let artifacts = s
+        .artifacts
+        .iter()
+        .map(|a| Artifact {
+            model: a.model.clone(),
+            family: a.family.clone(),
+            engine: a.engine.clone(),
+            node: if a.node.is_empty() { None } else { Some(a.node.clone()) },
+            source: if a.source.is_empty() { None } else { Some(a.source.clone()) },
+            storage: if a.mount.is_empty() { None } else { Some(a.mount.clone()) },
+            compile_opts: a.opts.iter().cloned().collect(),
+        })
+        .collect();
+
+    let noneify = |v: &str| if v.is_empty() || v == "-" { None } else { Some(v.to_string()) };
+    let stored = s
+        .stored
+        .iter()
+        .map(|m| Stored {
+            repo: m.repo.clone(),
+            family: m.family.clone(),
+            format: m.format.clone(),
+            compiled_for: noneify(&m.compiled_for),
+            revision: noneify(&m.revision),
+            size: m.size.clone(),
+            path: m.path.clone(),
+        })
+        .collect();
 
     let accelerators = s
         .accel
@@ -263,7 +351,7 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
         .collect();
 
     AgentState {
-        schema: "lmd-top/agent-state/v1",
+        schema: "lmd-top/agent-state/v2",
         ts: s.ts,
         namespace: cfg.ns.clone(),
         prometheus: cfg.prom.clone(),
@@ -276,14 +364,19 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             util_avg_pct: util_sum / n as f64,
             vram_used_gb: mu,
             vram_total_gb: mt,
+            disk_used_gb: disk_u,
+            disk_total_gb: disk_t,
             power_w: pw,
             models_serving: serving,
             models_total: s.models.len(),
             req_per_s: opt(s.perf.req_rate),
             ttft_p95_s: opt(s.perf.ttft_p95),
         },
+        nodes,
         accelerators,
         models,
+        artifacts,
+        stored,
         pools,
         per_model_perf,
         diagnosis,
