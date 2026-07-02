@@ -29,20 +29,20 @@
 
 ## 뷰
 
-숫자키 `0`–`9` 로 전환하거나 `Tab` / `Shift+Tab` 으로 순환합니다.
+숫자키 `0`–`7` 로 전환하거나 `Tab` / `Shift+Tab` 으로 순환합니다.
 
 | # | 뷰 | 내용 |
 |---|---|---|
 | 0 | **Overview** | 클러스터 요약, LED 그리드, VRAM 바, 종류/노드별 가속기, EPP 경로, 모델, 한 줄 진단 |
-| 1 | **Accel** | 디바이스별 util / VRAM / 온도 / 전력과 추세. `⏎` 로 util·VRAM 타임라인 |
-| 2 | **Models** | 모델별 가속기/노드, ready, running/waiting, KV%, tok/s, 경로, 상태 |
+| 1 | **Nodes** 허브 | 노드 헬스(CPU/메모리/디스크/load + 디바이스). `w` 로 허브 순환: **노드 → 디바이스**(util/VRAM/온도/전력) **→ 서빙**(모델별 p95 QUEUE→PREFILL→DECODE→TPOT→E2E, tok/s, + SLO advisor) **→ 맵**(Canvas 토폴로지: Gateway→EPP→Pool 흐름 + 디바이스 pressure 히트맵) |
+| 2 | **Models** | 모델별 가속기/노드, ready, running/waiting, KV%, tok/s, 경로, 상태. `⏎` 액션 메뉴(Info/Compile/Deploy/Stop/Scale/Restart/Logs/YAML/Objective) |
 | 3 | **EPP** | scorer 와 가중치, picker, InferencePool 엔드포인트, 요청 분배 |
 | 4 | **Flow** | Gateway → HTTPRoute → backend → 파드, InferencePool/EPP/SLO 와 EPP 우회 진단. `⏎` 로 backend 모델 이동 |
-| 5 | **Pods** | `llm-serving` 파드(ready / phase / node / restarts) |
-| 6 | **Perf** | 디바이스별 히스토리와 모델별 p95 지연(QUEUE → PREFILL → DECODE → TPOT → E2E), tok/s, 큐. `⏎` 로 p50/95/99 + 타임라인 |
-| 7 | **Deploy** | 모델 라이프사이클 — 컴파일 변형(계열 → build, 옵션·`@노드 /경로`·상태), 배치 타깃(노드별 여유), 카탈로그 배치 가능성 |
-| 8 | **Events** | Kubernetes + llm-d 이벤트(최신순). `⏎` 로 전체 메시지 |
-| 9 | **Nodes** | 노드 헬스 — CPU, 메모리, 디스크, load, 노드별 디바이스. `⏎` 후 `↑↓` 로 디바이스 선택 |
+| 5 | **Pods** | `llm-serving` 파드(ready / phase / node / restarts). `⏎` 액션(Info/Logs/YAML/Delete) |
+| 6 | **Deploy** | 모델 라이프사이클 — 컴파일 변형(계열→build·옵션·`@노드 /경로`), 노드별 디바이스 점유, 카탈로그 배치 가능성. `⏎` 로 선택 대상에 액션(Compile→RBLN/Furiosa·Deploy·노드 Cordon 등) |
+| 7 | **Events** | Kubernetes + llm-d 이벤트(최신순). `⏎` 로 전체 메시지 |
+
+리스트 헤더에 보이는 행(전체 또는 필터된 것)의 `Σ` 통합 메트릭이 표시됩니다. `y` 로 선택 리소스의 live YAML(읽기전용)을 봅니다.
 
 ## 설치
 
@@ -91,9 +91,9 @@ LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # 다른 클러스터 지정
 
 | | |
 |---|---|
-| 이동 | `↑↓` / `kj` 행 선택 · `⏎` 상세 진입 · `←→` 항목 넘기기 · `w` 패널 포커스 이동 |
-| 액션 | `/` 필터 · `o` 정렬 순환 · `l` 로그 · `s` scale · `A` 알림 히스토리 |
-| 표시 | `t` 테마 · `f` 애니메이션 · `z` zoom · `Space` 일시정지 · `g` Grafana · `?` 도움말 · `q` 종료 |
+| 이동 | `↑↓`/`kj` 선택 · `⏎` 액션 메뉴(또는 상세) · `w` Nodes 허브/패널 포커스 · `←→` 항목 · `p i r e m` 크로스레이어 pivot |
+| 액션 | `/` 필터 · `o` 정렬 · `y` live YAML · `l` 로그 · 액션 메뉴 → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (admin 게이팅·y/n 확인) |
+| 표시 | `t` 테마 · `f` 애니메이션 · `z` zoom · `Space` 일시정지 · `g` Grafana · `A` 알림 · `?` 도움말 · `q` 종료 |
 
 **환경 변수.**
 
