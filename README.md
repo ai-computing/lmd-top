@@ -1,27 +1,42 @@
 # lmd-top
 
 > **A terminal observability & operations tool for [llm-d](https://llm-d.ai) clusters.**
-> `k9s`-style navigation + `all-smi`-style accelerator cards + **first-class understanding of the llm-d EPP routing architecture** — in one screen.
+> `k9s` navigation · `all-smi` accelerator cards · **first-class EPP routing awareness** — one screen, one static binary.
 
-`lmd-top` is a TUI that **correlates all four layers** of an llm-d serving stack —
+![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white)
+![single static binary](https://img.shields.io/badge/single%20static%20binary-no%20C%20deps-success)
+![for llm-d](https://img.shields.io/badge/for-llm--d-8839ef)
+![views](https://img.shields.io/badge/correlated%20views-10-89b4fa)
+
+`lmd-top` **correlates all four layers** of an llm-d serving stack —
 `Gateway → EPP (Endpoint Picker) → Model Server → Infrastructure` — for
 **heterogeneous accelerator** fleets (NVIDIA GPU · Rebellions RBLN · Furiosa RNGD · host CPU).
 It reads your existing Prometheus + Kubernetes; it owns no data of its own.
 
+## Demo
+
+*Demo recording omitted from the public export.*
+*Demo recording omitted from the public history.* -->
+
+<sub>Soft (Catppuccin) theme · live braille timelines · cross-layer drill-down.</sub>
+
 ```
-◐ lmd-top  llm-d · 5 nodes  ⌂ gw 192.0.2.6 ●   · updated 1s ago
-GPU 0 RBLN 4 RNGD 8 · 8 busy │ vram 210/544GB │ models 2/6 │ ⚡390W   ⚠1 alert (A)
- 0:Overview  1:Accel  2:Models  3:EPP  4:Topo  5:Pods  6:Perf  7:Launch  8:Events  9:Nodes
-╭ Cluster ─────────────────────────────────────────────────────────────────────╮
-│ Σ RBLN×4 RNGD×8 · util 41% · VRAM 210/544GB (39%) · 390W · models 2/6 · TTFT … │
-│ VRAM  ████████░░░░░░░░░░░░░░░░  210/544GB used                                  │
-│ RBLN  ● ● ● ●   RNGD  ● ● ○ ● ⚠ ● ● ●                                          │
-╰────────────────────────────────────────────────────────────────────────────────╯
-╭ Accelerators (by kind / node) ───────────────────────────────────────────────╮
-│ ● RBLN×4 @node-a1        ██████░░░░  58%  56/68 GB   ▁▂▄▅▆▅▄▃                   │
-│ ⚠ RNGD×8 @node-b2        ███░░░░░░░  31%  154/476GB  ▂▃▃▄▃▂▁▁                   │
-╰────────────────────────────────────────────────────────────────────────────────╯
- ↑↓ sel  ⏎ detail  / filter  l logs  s scale  A alerts  t theme  z zoom  ? help  q quit
+⠙ lmd-top [observe]   llm-d · 8 nodes   ⌂ gw 192.0.2.6 ●   · updated 2s ago
+● SERVING 5/11   req/s 6.2  TTFT 92ms  E2E 0.8s  │ accel 9/14 busy  VRAM 67%  ⚡409W  ⚠1 alert
+⇥  0:Overview  1:Accel  2:Models  3:EPP  4:Flow  5:Pods  6:Perf  7:Launch  8:Events  9:Nodes
+╭ Cluster ───────────────────────────────────────────────────────────────────────────────╮
+│ 14 accel  GB10×2 RBLN×4 RNGD×8 │ util 41% temp 52°C │ VRAM 489/735GB 67% ⚡409W │ 5/11    │
+│ VRAM  █████│████│████│████│████│████│█░░░│░░░░│░░░░│░░  489/735GB used                     │
+│ GB10 ● ●   RBLN ● ● ● ●   RNGD ● ● ● ● ● ● ● ●                                             │
+╰───────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Status ──────────────────────────────────────────────────────────────────────────────────╮
+│ ● 5 models serving, accelerators have headroom                                            │
+╰───────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Accelerators (by kind / node) ────────────────────────────────────────────────────────────╮
+│ ● GB10×1 @dgx-spark0   ●●●●●○○○○○  47%  mem ●●●●●●●●●●  124/131GB  trend ▁▂▄▅▆▅▄▃            │
+│ ● RBLN×4 @etri-001     ●●●○○○○○○○  31%  mem ●●●●●●●●··   54/ 68GB  trend ▂▃▃▄▃▂▁▁            │
+╰───────────────────────────────────────────────────────────────────────────────────────────╯
+ ↑↓ sel  ⏎ detail  / filter  o sort  l logs  t theme  f anim  z zoom  ? help  q quit
 ```
 
 ---
@@ -83,14 +98,14 @@ Ten correlated views — switch with the top number keys (`0`–`9`) or `Tab`:
 | 1 | **Accel** | Per-device rows: util bar / VRAM / temp / power + inline util trend. GPU · RBLN · RNGD unified. `⏎` → full util/VRAM timeline |
 | 2 | **Models** | Per-model accelerator/node · ready · running/waiting · KV% · tok/s · routing path · status |
 | 3 | **EPP** | Active scorers & weights (ConfigMap introspect) + picker + InferencePool endpoints + **request distribution** (routing decisions) |
-| 4 | **Topo** | **Whole topology at a glance** — Gateway → HTTPRoute → backend (model status/accelerator/node) + InferencePool/EPP/**SLO** (InferenceObjective) + autoscalers + **EPP-bypass diagnosis** |
+| 4 | **Flow** | **Whole topology at a glance** — Gateway → HTTPRoute → backend (model status/accelerator/node) + InferencePool/EPP/**SLO** (InferenceObjective) + autoscalers + **EPP-bypass diagnosis**. `⏎` → backend model detail |
 | 5 | **Pods** | `llm-serving` pod status (ready / phase / node / restarts) |
 | 6 | **Perf** | **For EPP policy tuning** — system timelines + per-model p95 latency broken down **QUEUE → PREFILL(P) → DECODE(D) → TPOT → E2E** + preemptions, tok/s, per-pod queue distribution. *Lists every launched model (idle ones show `–`).* |
 | 7 | **Launch** | Model **catalog** × live accelerator inventory → placement feasibility (`✓` ready / `⚙` needs-artifact / `✗` no-capacity). Read-only; catalog = `catalog/models.yaml` |
 | 8 | **Events** | Unified k8s + llm-d events (newest first), warnings highlighted |
 | 9 | **Nodes** | Node health / placement — status · kubelet · CPU · load · memory · accelerators per node |
 
-> **Topo** answers *where does each model run, how is it routed, and does traffic actually
+> **Flow** answers *where does each model run, how is it routed, and does traffic actually
 > pass through the EPP?* **Perf** gathers the latency/token/distribution signals you need
 > to design EPP scorer policy (populated once EPP-path traffic + vLLM metrics are present).
 
@@ -173,8 +188,8 @@ without hand-writing PromQL.
 | `0`–`9` | switch view |
 | `Tab` | next view |
 | `↑`/`↓` (or `k`/`j`), mouse scroll | select row |
-| `Enter` | **drill-down detail** (accelerator / model / pod / node) |
-| `←`/`→` | previous / next item |
+| `Enter` | **drill-down detail** (accel · model · pod · node · event; in **Flow** → backend model; in **Perf** → p50/p95/p99 + timelines) |
+| `←`/`→` | previous / next item (in a node detail, `↑`/`↓` picks a device) |
 | `/` | **filter** (substring) — type, then Enter/Esc |
 | `o` | cycle **sort** (Accel: util/temp/mem/name · Models: name/status/ready · Pods: name/phase/restarts) |
 | `l` | **logs** overlay for selected pod/model (scroll, `r` refresh) |
@@ -269,12 +284,13 @@ Data flows in on two tiers: a **~1 s fast tier** (accelerators + nodes) and a
 
 ```
 src/
-  main.rs      entry point · event loop · --snapshot / --render
-  collect.rs   Snapshot types + prom/kube collection
-  prom.rs      pure-tokio HTTP/1.0 Prometheus client
-  kube.rs      kubectl shelling + scale action
-  app.rs       UI state (view / selection / history / alerts)
-  ui.rs        ratatui rendering (header / tabs / views / footer)
+  main.rs      entry point · event loop · --snapshot/--json/--doctor/--render/--cast
+  collect.rs   Snapshot types + prom/kube collection      config.rs   env/yaml settings
+  prom.rs      pure-tokio HTTP/1.0 Prometheus client       metrics.rs  metric-name registry
+  kube.rs      kubectl shelling + scale action             catalog.rs  Launch model catalog
+  app.rs       UI state (view / selection / history / alerts / permission modes)
+  agent.rs     --json agent state    doctor.rs   --doctor survey    cast.rs   --cast demo
+  ui/          mod.rs (views) · theme.rs (palette) · widgets.rs · panel.rs · fx.rs (animation)
 ```
 
 ---
