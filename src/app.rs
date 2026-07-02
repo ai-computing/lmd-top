@@ -1277,21 +1277,32 @@ impl App {
         };
         let node_pick = form.get("node");
         let node_host = node_pick.split('(').next().unwrap_or("any").trim().to_string();
-        // 클러스터 감지값 기반 nodeSelector·디바이스 resource. 이미지는 env 설정값(없으면 placeholder).
-        let (res_key, product_label, image) = if vendor == "rbln" {
-            let img = self.img_rbln.clone().unwrap_or_else(|| "TODO-rbln-compiler-image".into());
-            ("rebellions.ai/ATOM", "rebellions.ai/npu.product: RBLN-CA22", img)
+        // 컴파일은 AOT — 가속기 디바이스 예약 불필요(서빙이 칩을 다 써도 컴파일 가능).
+        //   Furiosa: 공개 이미지(furiosaai/furiosa-llm:latest)에 toolchain 내장 → 아무 노드/CPU.
+        //   RBLN   : 레지스트리 이미지(LMD_COMPILE_IMAGE_RBLN)가 있으면 그걸로, 없으면
+        //            rebel-compiler 가 깔린 노드의 호스트 스택을 hostPath 로 사용(그 노드에 고정).
+        let rbln_host_stack = vendor == "rbln" && self.img_rbln.is_none();
+        let auto_rbln_node = self.snap.nodes.iter().find(|n| n.npu.to_uppercase().contains("RBLN")).map(|n| n.name.clone());
+        let image = if vendor == "rbln" {
+            if rbln_host_stack { "ubuntu:22.04".to_string() } else { self.img_rbln.clone().unwrap() }
         } else {
-            let img = self.img_furiosa.clone().unwrap_or_else(|| "furiosaai/furiosa-llm:latest".into());
-            ("furiosa.ai/rngd", "furiosa.ai/npu.product: rngd", img)
+            self.img_furiosa.clone().unwrap_or_else(|| "furiosaai/furiosa-llm:latest".into())
         };
-        let res_qty = devices;
-        // 노드 지정: any=제품 라벨 매칭, 특정=hostname 고정.
-        let node_label = if node_host == "any" || node_host.is_empty() {
-            product_label.to_string()
-        } else {
+        // 노드: 특정 선택이 최우선. any 면 — RBLN 호스트스택은 그 노드에 자동 고정(hostPath),
+        // 그 외(furiosa AOT·RBLN 이미지)는 제약 없음(아무 노드/CPU 에서 실행).
+        let node_label = if node_host != "any" && !node_host.is_empty() {
             format!("kubernetes.io/hostname: {}", node_host)
+        } else if rbln_host_stack {
+            match &auto_rbln_node {
+                Some(n) => format!("kubernetes.io/hostname: {}", n),
+                None => "rebellions.ai/npu.product: RBLN-CA22".to_string(),
+            }
+        } else {
+            String::new() // AOT: 노드 제약 없음
         };
+        // 컴파일 Job 리소스 — 디바이스 예약 없이 cpu/mem 만(AOT).
+        let resources_line = "resources: { requests: { cpu: \"8\", memory: \"16Gi\" } }".to_string();
+        let _ = devices;
         // 폼 값을 스크립트가 읽는 env 로 — 벤더별 파라미터 이름 대응.
         let mut envs: Vec<(String, String)> = vec![
             ("MODEL_STORE".into(), "/mnt/store".into()),
@@ -1387,16 +1398,39 @@ impl App {
                  ---\n",
                 name = name, ns = self.ns
             );
-            (
-                // 들여쓰기는 형제 항목(store)과 정확히 일치해야 함(volumes 8칸, mounts 12칸).
-                "        - { name: script, configMap: { name: SCRIPT_CM } }\n        - { name: work, emptyDir: {} }\n"
-                    .replace("SCRIPT_CM", &format!("{}-script", name)),
-                env_lines,
-                "            - { name: script, mountPath: /scripts, readOnly: true }\n            - { name: work, mountPath: /work }\n".to_string(),
-                "[\"python3\", \"/scripts/compile.py\"]".to_string(),
-                "# RBLN: optimum-rbln 인라인 스크립트(create_runtimes=False). 이미지 placeholder(TODO-)면 LMD_COMPILE_IMAGE_RBLN 필요.",
-                script_doc,
-            )
+            let cm_vol = format!("        - {{ name: script, configMap: {{ name: {}-script }} }}\n        - {{ name: work, emptyDir: {{}} }}\n", name);
+            if rbln_host_stack {
+                // 레지스트리 이미지 없음 → rebel-compiler 가 깔린 노드의 호스트 스택을 hostPath 로 사용.
+                // ubuntu 베이스에 python3.10 설치 + 호스트 site-packages/libs 마운트(서빙과 동일 패턴).
+                // sympy 등은 /usr/local dist-packages 에 있어 PYTHONPATH 에 포함.
+                let host_vols = format!(
+                    "{cm}\
+                     \x20       - {{ name: hp-local, hostPath: {{ path: /home/gspark/.local/lib/python3.10/site-packages, type: Directory }} }}\n\
+                     \x20       - {{ name: hp-sys, hostPath: {{ path: /usr/local/lib/python3.10/dist-packages, type: Directory }} }}\n\
+                     \x20       - {{ name: hp-lib, hostPath: {{ path: /usr/lib, type: Directory }} }}\n",
+                    cm = cm_vol
+                );
+                let host_mounts = "            - { name: script, mountPath: /scripts, readOnly: true }\n            - { name: work, mountPath: /work }\n            - { name: hp-local, mountPath: /home/gspark/.local/lib/python3.10/site-packages }\n            - { name: hp-sys, mountPath: /host-sys }\n            - { name: hp-lib, mountPath: /host-lib }\n".to_string();
+                let host_env = "             \x20           - { name: PYTHONPATH, value: \"/home/gspark/.local/lib/python3.10/site-packages:/host-sys\" }\n             \x20           - { name: LD_LIBRARY_PATH, value: \"/host-lib:/host-lib/x86_64-linux-gnu\" }\n";
+                let cmd = "set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq --no-install-recommends python3.10 libnuma1 libgomp1 ca-certificates >/dev/null 2>&1; ln -sf /usr/bin/python3.10 /usr/local/bin/python3; python3 /scripts/compile.py";
+                (
+                    host_vols,
+                    format!("{}{}", host_env, env_lines),
+                    host_mounts,
+                    format!("[\"bash\", \"-c\", \"{}\"]", cmd),
+                    "# RBLN: 레지스트리 이미지 없음 → 노드 호스트 rebel-compiler 스택(hostPath)으로 컴파일. create_runtimes=False.",
+                    script_doc,
+                )
+            } else {
+                (
+                    cm_vol,
+                    env_lines,
+                    "            - { name: script, mountPath: /scripts, readOnly: true }\n            - { name: work, mountPath: /work }\n".to_string(),
+                    "[\"python3\", \"/scripts/compile.py\"]".to_string(),
+                    "# RBLN: LMD_COMPILE_IMAGE_RBLN 이미지의 optimum-rbln 인라인 스크립트(create_runtimes=False).",
+                    script_doc,
+                )
+            }
         };
         let yaml = format!(
             "# 컴파일 Job (dry-run 미리보기) — 검토 후 `kubectl apply -f -` 로 적용.\n\
@@ -1419,7 +1453,7 @@ impl App {
              \x20     containers:\n\
              \x20       - name: compile\n\
              \x20         image: {image}\n\
-             \x20         resources: {{ limits: {{ {res_key}: {res_qty} }} }}\n\
+             \x20         {resources_line}\n\
              \x20         env:\n\
              {env_block}\
              \x20         volumeMounts:\n\
@@ -1437,8 +1471,7 @@ impl App {
             ns = self.ns,
             node_label = node_label,
             image = image,
-            res_key = res_key,
-            res_qty = res_qty,
+            resources_line = resources_line,
             volumes_extra = volumes_extra,
             env_block = env_block,
             mounts_extra = mounts_extra,
@@ -1613,29 +1646,26 @@ impl App {
             // RNGD 는 ARM64 제어 프로세서 → EDF 최종 코드젠에 aarch64 크로스컴파일러 필요(매니페스트가 자동 설치).
             out.push((true, "toolchain: aarch64 크로스컴파일러 매니페스트가 자동 설치".into()));
             out.push((true, "build I/O: 로컬 emptyDir 빌드→스토어 복사(SMB os error 95 회피)".into()));
-        } else {
-            let has_img = self.img_rbln.is_some();
-            out.push((
-                has_img,
-                if has_img {
-                    "image: LMD_COMPILE_IMAGE_RBLN 지정됨".into()
-                } else {
-                    "image: rebel-compiler 는 공개 PyPI 부재(pypi.rbln.ai 승인계정 전용) — 그게 든 이미지를 LMD_COMPILE_IMAGE_RBLN 로 지정 필요".into()
-                },
-            ));
+            // RBLN 은 create_runtimes=False 로 디바이스 없이 컴파일(서빙 중에도 가능).
+            out.push((true, "compile-only: rbln_create_runtimes=False — 디바이스 점유 없이 컴파일(서빙 중에도 OK)".into()));
             let compat_ok = crate::compat::compilable_vendors(&form.model_id).contains(&"rbln");
             out.push((compat_ok, format!("registry: RBLN 지원 계열 {}", if compat_ok { "확인됨(npu-compat)" } else { "미확인" })));
         }
-        // 공통: 타깃 노드에 해당 NPU 드라이버가 설치돼 있는지(컴파일은 드라이버 노드에서만).
-        let node = form.get("node");
-        let node = node.split('(').next().unwrap_or("any").trim();
-        let want = if form.vendor == "rbln" { "RBLN" } else { "RNGD" };
-        if node != "any" && !node.is_empty() {
-            let has = self.snap.nodes.iter().find(|n| n.name == node).map(|n| n.npu.to_uppercase().contains(want)).unwrap_or(false);
-            out.push((has, format!("node {}: {} 드라이버 {}", node, want, if has { "설치됨" } else { "없음 — 컴파일 실패" })));
+        // 컴파일 실행 노드 — AOT 라 가속기 드라이버는 불필요. 툴체인이 있는 노드만 있으면 됨.
+        //   Furiosa: 이미지(furiosaai/furiosa-llm:latest, 공개)에 toolchain 포함 → 아무 노드(CPU 포함)에서 실행.
+        //   RBLN   : 레지스트리 이미지(LMD_COMPILE_IMAGE_RBLN) 또는 rebel-compiler 가 깔린 노드의 호스트 스택(hostPath).
+        if form.vendor == "furiosa" {
+            out.push((true, "compile node: AOT — 가속기 불필요, 아무 노드(CPU 포함)에서 실행. 이미지에 toolchain 내장".into()));
         } else {
-            let any_node = self.snap.nodes.iter().any(|n| n.npu.to_uppercase().contains(want));
-            out.push((any_node, format!("node: any — {} 드라이버 노드 {}", want, if any_node { "있음" } else { "없음(클러스터에 미설치)" })));
+            let host_node = self.snap.nodes.iter().find(|n| n.npu.to_uppercase().contains("RBLN")).map(|n| n.name.clone());
+            match (self.img_rbln.is_some(), host_node) {
+                (true, _) => out.push((true, "compile node: LMD_COMPILE_IMAGE_RBLN 이미지로 실행(아무 노드)".into())),
+                (false, Some(n)) => out.push((true, format!("compile node: {} 의 rebel-compiler 호스트 스택 사용(hostPath) — 레지스트리 이미지 불필요", n))),
+                (false, None) => out.push((
+                    false,
+                    "compile node: rebel-compiler 이미지도, 그게 깔린 노드도 없음 — LMD_COMPILE_IMAGE_RBLN 지정 또는 RBLN 노드 필요".into(),
+                )),
+            }
         }
         out
     }
@@ -2526,7 +2556,9 @@ mod tests {
         assert!(yaml.contains("fxb build"), "furiosa uses fxb build CLI directly");
         assert!(yaml.contains("furiosaai/furiosa-llm:latest"), "default furiosa image");
         assert!(!yaml.contains("compile-script"), "no custom script needed for furiosa");
-        assert!(yaml.contains("furiosa.ai/rngd"));
+        // 컴파일은 AOT → 가속기 디바이스를 예약하지 않음(furiosa.ai/rngd limits 없음). cpu/mem 만.
+        assert!(!yaml.contains("furiosa.ai/rngd:"), "compile is AOT — no device reservation");
+        assert!(yaml.contains("cpu:") && yaml.contains("memory:"), "compile requests cpu/mem only");
         serde_yaml::from_str::<serde_yaml::Value>(&yaml).expect("furiosa manifest is valid YAML");
     }
 
