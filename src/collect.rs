@@ -289,6 +289,17 @@ fn short(s: &str) -> String {
     s.chars().take(28).collect()
 }
 
+/// prom::query 결과에 q() 와 동일한 warn 처리 — tokio::join! 로 병렬 조회 후 결과 해소용.
+fn resolve(r: Result<Vec<Series>, anyhow::Error>, promql: &str, warn: &mut Vec<String>) -> Vec<Series> {
+    match r {
+        Ok(v) => v,
+        Err(e) => {
+            warn.push(format!("prom[{}]: {}", short(promql), e));
+            Vec::new()
+        }
+    }
+}
+
 /// 단일 스칼라 결과(첫 값) — 없으면 NaN. (join! 병렬용, warn 없음)
 async fn qs1(prom_base: &str, promql: &str) -> f64 {
     prom::query(prom_base, promql).await.ok().and_then(|v| v.first().map(|s| s.value)).unwrap_or(f64::NAN)
@@ -862,19 +873,24 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     snap.accel = accel;
     snap.nodes = nodes;
 
-    // ---------- EPP pools ----------
-    let p_ready = q(cfg, metrics::POOL_READY, &mut warn).await;
-    let p_q = map_by(q(cfg, metrics::POOL_QUEUE, &mut warn).await, "name");
-    let p_kv = map_by(
-        q(cfg, metrics::POOL_KV, &mut warn).await,
-        "name",
+    // ---------- EPP pools (독립 쿼리 — 병렬 배칭으로 순차 라운드트립 제거) ----------
+    let dec_q = "sum by (pod_name) (inference_extension_scheduler_attempts_total)";
+    let pidx_q = "max(inference_extension_prefix_indexer_size)";
+    let (r_ready, r_q, r_kv, r_sat, r_dec, r_pidx, r_ppq) = tokio::join!(
+        prom::query(&cfg.prom, metrics::POOL_READY),
+        prom::query(&cfg.prom, metrics::POOL_QUEUE),
+        prom::query(&cfg.prom, metrics::POOL_KV),
+        prom::query(&cfg.prom, metrics::POOL_SAT),
+        prom::query(&cfg.prom, dec_q),
+        prom::query(&cfg.prom, pidx_q),
+        prom::query(&cfg.prom, metrics::POOL_PER_POD_QUEUE),
     );
-    let p_sat = map_by(
-        q(cfg, metrics::POOL_SAT, &mut warn).await,
-        "name",
-    );
+    let p_ready = resolve(r_ready, metrics::POOL_READY, &mut warn);
+    let p_q = map_by(resolve(r_q, metrics::POOL_QUEUE, &mut warn), "name");
+    let p_kv = map_by(resolve(r_kv, metrics::POOL_KV, &mut warn), "name");
+    let p_sat = map_by(resolve(r_sat, metrics::POOL_SAT, &mut warn), "name");
     // 라우팅 결정 분배 (트래픽이 EPP 경유 시 채워짐)
-    let dec = q(cfg, "sum by (pod_name) (inference_extension_scheduler_attempts_total)", &mut warn).await;
+    let dec = resolve(r_dec, dec_q, &mut warn);
     for s in &dec {
         let pod = s.l("pod_name");
         if !pod.is_empty() {
@@ -882,11 +898,11 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         }
     }
     snap.decisions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let pidx = q(cfg, "max(inference_extension_prefix_indexer_size)", &mut warn).await;
+    let pidx = resolve(r_pidx, pidx_q, &mut warn);
     snap.prefix_idx = pidx.first().map(|s| s.value).unwrap_or(f64::NAN);
 
     // per-pod 큐 깊이(요청 분배)
-    for s in &q(cfg, metrics::POOL_PER_POD_QUEUE, &mut warn).await {
+    for s in &resolve(r_ppq, metrics::POOL_PER_POD_QUEUE, &mut warn) {
         let pod = s.l("model_server_pod");
         if !pod.is_empty() {
             snap.pod_queues.push((pod.to_string(), s.value));
@@ -923,36 +939,39 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     // per-model 성능 — service(=Deployment 이름) 기준 병합. Models 뷰와 동일 키.
     // 여기선 pm 만 채우고, 런칭된 모델 seed 는 collect_kube(모델 목록) 이후에 좌조인(아래).
     let mut pm: BTreeMap<String, PerfRow> = BTreeMap::new();
-    macro_rules! merge {
-        ($promql:expr, $field:ident) => {
-            for s in &q(cfg, $promql, &mut warn).await {
-                let m = s.l("service").to_string();
-                if !m.is_empty() {
-                    pm.entry(m.clone()).or_insert_with(|| PerfRow::new(&m)).$field = s.value;
-                }
+    // per-model 지연/토큰/처리량 — 17개 독립 쿼리를 병렬 배칭(순차 라운드트립 제거).
+    // (promql, 필드 setter). setter 는 캡처 없는 클로저라 fn 포인터로 강제.
+    type Set = fn(&mut PerfRow, f64);
+    let specs: &[(&str, Set)] = &[
+        ("sum by (service)(rate(vllm:request_success_total[1m]))", |r, v| r.req = v),
+        ("sum by (service)(rate(vllm:generation_tokens_total[1m]))", |r, v| r.tps = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:time_to_first_token_seconds_bucket[1m])))", |r, v| r.ttft_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_time_per_output_token_seconds_bucket[1m])))", |r, v| r.tpot_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:e2e_request_latency_seconds_bucket[1m])))", |r, v| r.e2e_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_prompt_tokens_bucket[1m])))", |r, v| r.in_tok_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_generation_tokens_bucket[1m])))", |r, v| r.out_tok_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_queue_time_seconds_bucket[1m])))", |r, v| r.queue_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_prefill_time_seconds_bucket[1m])))", |r, v| r.prefill_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_decode_time_seconds_bucket[1m])))", |r, v| r.decode_p95 = v),
+        ("sum by (service)(rate(vllm:num_preemptions_total[1m]))", |r, v| r.preempt = v),
+        // Furiosa-LLM (K-EXAONE 등): furiosa_llm_* 로 노출, 같은 service 조인키. TPOT≈inter-token-latency.
+        ("sum by (service)(rate(furiosa_llm_request_success_total[1m]))", |r, v| r.req = v),
+        ("sum by (service)(rate(furiosa_llm_generation_tokens_total[1m]))", |r, v| r.tps = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_time_to_first_token_seconds_bucket[1m])))", |r, v| r.ttft_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_inter_token_latency_seconds_bucket[1m])))", |r, v| r.tpot_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_request_prompt_tokens_bucket[1m])))", |r, v| r.in_tok_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_request_generation_tokens_bucket[1m])))", |r, v| r.out_tok_p95 = v),
+    ];
+    let qs: Vec<&str> = specs.iter().map(|(q, _)| *q).collect();
+    let results = prom::query_all(&cfg.prom, &qs).await;
+    for ((promql, set), r) in specs.iter().zip(results) {
+        for s in &resolve(r, promql, &mut warn) {
+            let m = s.l("service");
+            if !m.is_empty() {
+                set(pm.entry(m.to_string()).or_insert_with(|| PerfRow::new(m)), s.value);
             }
-        };
+        }
     }
-    merge!("sum by (service)(rate(vllm:request_success_total[1m]))", req);
-    merge!("sum by (service)(rate(vllm:generation_tokens_total[1m]))", tps);
-    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:time_to_first_token_seconds_bucket[1m])))", ttft_p95);
-    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_time_per_output_token_seconds_bucket[1m])))", tpot_p95);
-    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:e2e_request_latency_seconds_bucket[1m])))", e2e_p95);
-    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_prompt_tokens_bucket[1m])))", in_tok_p95);
-    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_generation_tokens_bucket[1m])))", out_tok_p95);
-    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_queue_time_seconds_bucket[1m])))", queue_p95);
-    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_prefill_time_seconds_bucket[1m])))", prefill_p95);
-    merge!("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_decode_time_seconds_bucket[1m])))", decode_p95);
-    merge!("sum by (service)(rate(vllm:num_preemptions_total[1m]))", preempt);
-
-    // Furiosa-LLM (K-EXAONE 등): vllm:* 대신 furiosa_llm_* 로 노출, 같은 `service` 조인키.
-    // e2e/queue/prefill/decode/preempt 버킷은 미노출(NaN 유지). TPOT≈inter-token-latency.
-    merge!("sum by (service)(rate(furiosa_llm_request_success_total[1m]))", req);
-    merge!("sum by (service)(rate(furiosa_llm_generation_tokens_total[1m]))", tps);
-    merge!("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_time_to_first_token_seconds_bucket[1m])))", ttft_p95);
-    merge!("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_inter_token_latency_seconds_bucket[1m])))", tpot_p95);
-    merge!("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_request_prompt_tokens_bucket[1m])))", in_tok_p95);
-    merge!("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_request_generation_tokens_bucket[1m])))", out_tok_p95);
 
     for s in &p_ready {
         let name = s.l("name");
