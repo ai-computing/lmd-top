@@ -49,22 +49,17 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
     if let Some(fld) = form.fields.get(form.cursor) {
         lines.push(Line::from(Span::styled(format!("  {}", fld.help), Style::default().fg(C_DIM()))));
     }
-    // ── fit 추정 ──
-    let vcol = match fit.verdict {
-        crate::app::FitVerdict::Fits => C_OK(),
-        crate::app::FitVerdict::Tight => C_WARN(),
-        crate::app::FitVerdict::Oom => C_BAD(),
-        crate::app::FitVerdict::Unknown => C_DIM(),
-    };
-    let glyph = match fit.verdict {
-        crate::app::FitVerdict::Fits => "●",
-        crate::app::FitVerdict::Tight => "◐",
-        crate::app::FitVerdict::Oom => "✗",
-        crate::app::FitVerdict::Unknown => "○",
+    // ── 서빙 메모리 추정(advisory) — 컴파일 자체를 막는 게 아니라 "이 옵션으로 서빙 시 칩에
+    //    들어갈지" 참고용 힌트. 이름 기반 휴리스틱이라 과신 금지 → OOM 도 빨간 ✗ 대신 부드럽게. ──
+    let (vcol, glyph, hint) = match fit.verdict {
+        crate::app::FitVerdict::Fits => (C_OK(), "●", "여유 있음"),
+        crate::app::FitVerdict::Tight => (C_WARN(), "◐", "빠듯할 수 있음"),
+        crate::app::FitVerdict::Oom => (C_WARN(), "◐", "칩당 부족할 수 있음 → tp↑ 또는 max-len↓ 고려"),
+        crate::app::FitVerdict::Unknown => (C_DIM(), "○", "추정 불가"),
     };
     lines.push(Line::from(vec![
-        Span::styled("  fit~   ", Style::default().fg(C_DIM())),
-        Span::styled(format!("{} {}", glyph, fit.verdict.label()), Style::default().fg(vcol).add_modifier(Modifier::BOLD)),
+        Span::styled("  serving fit~ ", Style::default().fg(C_DIM())),
+        Span::styled(format!("{} {}", glyph, hint), Style::default().fg(vcol).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!(
                 "   ≈{:.0}/{:.0} GiB/chip × {} chip   (w {:.0} + kv {:.0} + oh {:.0})",
@@ -73,9 +68,9 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
             Style::default().fg(C_DIM()),
         ),
     ]));
-    // 추정 근거·한계 명시(이름 기반 휴리스틱 — 과신 방지).
+    // 추정 근거·한계 명시(이름 기반 휴리스틱 — 컴파일을 막지 않는 참고 지표).
     lines.push(Line::from(Span::styled(
-        "  rough estimate: params from name · KV linear proxy · dtype guessed — verify on real compile",
+        "  ※ 참고용 추정(이름 기반 파라미터·KV 선형근사) — 컴파일 진행엔 영향 없음, 실제는 컴파일로 확인",
         Style::default().fg(C_DIM()),
     )));
     for tip in &fit.tips {
