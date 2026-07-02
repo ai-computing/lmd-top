@@ -2,6 +2,10 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.21.1]
+### Added — Events 상세(Enter)
+- 이벤트 표에서 잘리던 **전체 메시지**를 Enter 로 열어 읽음: type/count/reason/object + 전체 message(줄바꿈). 깊이 갭 보완.
+
 ## [0.21.0]
 ### Added — 모델 상세 pivot 미리보기 + 데모 asciicast 생성
 - **pivot 미리보기**: 모델 상세에서 pivot(p/i/r/e)이 이제 키 힌트뿐 아니라 **대상의 핵심 정보를 인라인 preview**로 — pods(수/running/이름), infra(디바이스·util), route, epp 경유 여부. 키 누르면 이동.
