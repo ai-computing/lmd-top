@@ -416,6 +416,9 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     if app.sort_modes() > 1 {
         parts.push(format!("o sort:{}", app.sort_label()));
     }
+    if app.panel_count() > 1 {
+        parts.push(format!("w panel {}/{}", app.panel_focus + 1, app.panel_count()));
+    }
     match v {
         Models | Overview => parts.push("p/i/r/e pivot".into()),
         Accel => parts.push("p/m/n pivot".into()),
@@ -1751,12 +1754,12 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(6), Constraint::Length(7), Constraint::Length(6)])
         .split(area);
+    let focus = app.panel_focus; // 0 변형 · 1 타깃 · 2 카탈로그
+    let blk = |title: &str, active: bool| if active { block_active(title) } else { block(title) };
 
-    // ── 1) 컴파일 변형: family → variant 트리(선택 가능) ──
-    let order = app.order(); // artifacts
-    let sel_orig = app.sel_orig();
+    // ── 1) 컴파일 변형: family → variant 트리(focus 0 일 때 선택/강조) ──
     let mut fams: Vec<(String, Vec<usize>)> = Vec::new();
-    for &i in &order {
+    for i in 0..app.snap.artifacts.len() {
         let fam = app.snap.artifacts[i].family.clone();
         if let Some(e) = fams.iter_mut().find(|(k, _)| *k == fam) {
             e.1.push(i);
@@ -1764,6 +1767,7 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
             fams.push((fam, vec![i]));
         }
     }
+    let vsel = if focus == 0 { app.sel_orig() } else { None };
     let mut lines: Vec<Line> = Vec::new();
     let mut sel_line = 0usize;
     if fams.is_empty() {
@@ -1778,7 +1782,7 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
         let last = idxs.len();
         for (j, &i) in idxs.iter().enumerate() {
             let a = &app.snap.artifacts[i];
-            let selected = sel_orig == Some(i);
+            let selected = vsel == Some(i);
             if selected {
                 sel_line = lines.len();
             }
@@ -1806,12 +1810,14 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
     }
     let vis = (rows[0].height as usize).saturating_sub(2);
     let scroll = if sel_line + 2 > vis { (sel_line + 3).saturating_sub(vis) as u16 } else { 0 };
+    let vtotal = app.snap.artifacts.len();
     f.render_widget(
-        Paragraph::new(lines).scroll((scroll, 0)).block(block(&format!("Deploy · compiled variants (family → build · @node) · ⏎ full{}", count_suffix(app.selected, order.len())))),
+        Paragraph::new(lines).scroll((scroll, 0)).block(blk(&format!("compiled variants (family → build · @node) · ⏎ full{}", if focus == 0 { count_suffix(app.selected, vtotal) } else { String::new() }), focus == 0)),
         rows[0],
     );
 
-    // ── 2) 배치 타깃: 노드별 여유 가속기(busy_model 없는 alive 디바이스) ──
+    // ── 2) 배치 타깃: 노드별 여유 가속기(focus 1 일 때 선택/강조) ──
+    let nodes = app.target_nodes();
     let mut free_by: std::collections::BTreeMap<String, std::collections::BTreeMap<String, (i64, i64)>> = std::collections::BTreeMap::new();
     for a in &app.snap.accel {
         let e = free_by.entry(a.node.clone()).or_default().entry(a.disp().to_string()).or_insert((0, 0));
@@ -1821,35 +1827,49 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
         }
     }
     let mut tl: Vec<Line> = Vec::new();
-    if free_by.is_empty() {
+    if nodes.is_empty() {
         tl.push(Line::from(Span::styled("(no accelerators)", Style::default().fg(C_DIM()))));
     }
-    for (node, kinds) in &free_by {
+    for (j, node) in nodes.iter().enumerate() {
         let mut sp = vec![Span::styled(format!("{:<18} ", truncw(node, 18)), Style::default().fg(Color::White))];
-        for (k, (free, total)) in kinds {
-            sp.push(Span::styled(format!("{} {}/{} free  ", k, free, total), Style::default().fg(if *free > 0 { C_OK() } else { C_DIM() })));
+        if let Some(kinds) = free_by.get(node) {
+            for (k, (free, total)) in kinds {
+                sp.push(Span::styled(format!("{} {}/{} free  ", k, free, total), Style::default().fg(if *free > 0 { C_OK() } else { C_DIM() })));
+            }
         }
-        tl.push(Line::from(sp));
+        let mut line = Line::from(sp);
+        if focus == 1 && app.selected == j {
+            line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+        }
+        tl.push(line);
     }
-    f.render_widget(Paragraph::new(tl).block(block("deploy targets · free accelerator capacity per node")), rows[1]);
+    f.render_widget(Paragraph::new(tl).block(blk(&format!("deploy targets · free capacity per node{}", if focus == 1 { count_suffix(app.selected, nodes.len()) } else { String::new() }), focus == 1)), rows[1]);
 
-    // ── 3) 카탈로그(배포 가능 모델 × 재고 가능성) + 예정 액션 ──
+    // ── 3) 카탈로그(배포 가능 모델 × 재고 가능성)(focus 2 일 때 선택/강조) + 예정 액션 ──
     let mut cl: Vec<Line> = Vec::new();
-    for m in app.catalog.iter().take(4) {
+    for (j, m) in app.catalog.iter().enumerate() {
         let any_ready = m.placements.iter().any(|p| matches!(crate::catalog::solve(p, &app.snap.inventory).0, crate::catalog::Ready::Ready));
         let needs = m.placements.iter().any(|p| matches!(crate::catalog::solve(p, &app.snap.inventory).0, crate::catalog::Ready::NeedsArtifact));
         let (g, c) = if any_ready { ("✓", C_OK()) } else if needs { ("⚙", C_WARN()) } else { ("✗", C_BAD()) };
-        cl.push(Line::from(vec![
+        let mut line = Line::from(vec![
             Span::styled(format!("{} ", g), Style::default().fg(c)),
             Span::styled(format!("{:<24} ", truncw(&m.id, 24)), Style::default().fg(Color::White)),
             Span::styled(m.role.clone(), Style::default().fg(C_DIM())),
-        ]));
+        ]);
+        if focus == 2 && app.selected == j {
+            line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+        }
+        cl.push(line);
     }
     cl.push(Line::from(Span::styled(
         "[c] compile (RBLN/Furiosa)   [d] deploy (ModelService)   — planned (Phase 2, gated)",
         Style::default().fg(C_DIM()),
     )));
-    f.render_widget(Paragraph::new(cl).block(block(&format!("catalog · deployable ({}) × live inventory", app.catalog.len()))), rows[2]);
+    let cscroll = if focus == 2 && app.selected + 3 > (rows[2].height as usize).saturating_sub(2) { (app.selected + 3).saturating_sub((rows[2].height as usize).saturating_sub(2)) as u16 } else { 0 };
+    f.render_widget(
+        Paragraph::new(cl).scroll((cscroll, 0)).block(blk(&format!("catalog · deployable ({}){}", app.catalog.len(), if focus == 2 { count_suffix(app.selected, app.catalog.len()) } else { String::new() }), focus == 2)),
+        rows[2],
+    );
 }
 
 // ── Nodes (health / placement) — all-smi 식 트리: node → devices ──────

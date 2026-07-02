@@ -161,6 +161,7 @@ pub struct App {
     pub paused: bool,     // 화면 갱신 일시정지(데이터 고정, 읽기용)
     pub detail_scroll: u16, // detail 내부 세로 스크롤
     pub dev_sel: usize,     // Node 상세 내 device 커서: 0=노드요약, 1..=n=해당 device 히스토리
+    pub panel_focus: usize, // 멀티패널 뷰에서 활성(포커스) 패널 인덱스(w 로 순환)
     pub logs_mode: bool,      // 로그 오버레이
     pub logs_target: String,  // 로그 대상 pod
     pub logs: Vec<String>,    // 로그 줄
@@ -227,6 +228,7 @@ impl App {
             paused: false,
             detail_scroll: 0,
             dev_sel: 0,
+            panel_focus: 0,
             logs_mode: false,
             logs_target: String::new(),
             logs: Vec::new(),
@@ -484,7 +486,11 @@ impl App {
                 .unwrap_or_default(),
             View::Models | View::Overview => self.snap.models.get(i).map(|m| format!("{} {}", m.name, m.accel)).unwrap_or_default(),
             View::Pods => self.snap.pods.get(i).map(|p| format!("{} {}", p.name, p.node)).unwrap_or_default(),
-            View::Launch => self.snap.artifacts.get(i).map(|a| format!("{} {} {}", a.model, a.family, a.source)).unwrap_or_default(),
+            View::Launch => match self.panel_focus {
+                1 => self.target_nodes().get(i).cloned().unwrap_or_default(),
+                2 => self.catalog.get(i).map(|m| format!("{} {}", m.id, m.role)).unwrap_or_default(),
+                _ => self.snap.artifacts.get(i).map(|a| format!("{} {} {}", a.model, a.family, a.source)).unwrap_or_default(),
+            },
             View::Epp => self.snap.epp.as_ref().and_then(|e| e.scorers.get(i)).map(|(n, _)| n.clone()).unwrap_or_default(),
             View::Events => self.snap.events.get(i).map(|e| format!("{} {} {}", e.reason, e.object, e.message)).unwrap_or_default(),
             View::Nodes => self.snap.nodes.get(i).map(|n| n.name.clone()).unwrap_or_default(),
@@ -711,6 +717,7 @@ impl App {
             self.selected = 0;
             self.sort = 0;
             self.detail = false;
+            self.panel_focus = 0; // 뷰 바뀌면 첫 패널로
             self.nav_stack.clear(); // 수동 뷰 전환 → 브레드크럼 초기화
             self.epp_weights.clear(); // what-if 오버라이드는 EPP 떠나면 리셋
         }
@@ -722,6 +729,21 @@ impl App {
     pub fn prev_tab(&mut self) {
         let n = View::ALL.len();
         self.set_view_idx((self.view.idx() + n - 1) % n);
+    }
+    /// 현재 뷰의 포커스 가능한 패널 수(멀티패널 뷰만 >1).
+    pub fn panel_count(&self) -> usize {
+        match self.view {
+            View::Launch => 3, // Deploy: 컴파일 변형 / 배치 타깃 / 카탈로그
+            _ => 1,
+        }
+    }
+    /// 활성 패널 순환(w). 패널 바뀌면 선택 리셋(패널마다 리스트 길이가 다름).
+    pub fn cycle_panel(&mut self) {
+        let n = self.panel_count();
+        if n > 1 {
+            self.panel_focus = (self.panel_focus + 1) % n;
+            self.selected = 0;
+        }
     }
 
     /// 현재 뷰에서 선택 가능한 행 수(필터 반영).
@@ -830,7 +852,15 @@ impl App {
                 });
                 idx
             }
-            View::Launch => (0..self.snap.artifacts.len()).collect(), // Deploy: 모델 변형(아티팩트)
+            View::Launch => {
+                // Deploy: 활성 패널에 따라 선택 리스트가 다름(0 변형 / 1 타깃노드 / 2 카탈로그).
+                let n = match self.panel_focus {
+                    1 => self.target_nodes().len(),
+                    2 => self.catalog.len(),
+                    _ => self.snap.artifacts.len(),
+                };
+                (0..n).collect()
+            }
             View::Epp => (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect(),
             View::Events => (0..self.snap.events.len()).collect(),
             View::Nodes => (0..self.snap.nodes.len()).collect(),
@@ -903,11 +933,19 @@ impl App {
             _ => None,
         }
     }
-    /// Deploy 뷰(=Launch)에서 선택된 아티팩트(모델 변형).
+    /// Deploy 뷰의 배치 타깃 후보 노드(가속기를 가진 노드, 정렬·중복제거). order()/뷰 공용.
+    pub fn target_nodes(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.snap.accel.iter().map(|a| a.node.clone()).collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+    /// Deploy 뷰 '변형' 패널(focus 0)에서 선택된 아티팩트.
     pub fn selected_artifact(&self) -> Option<&crate::collect::ModelArtifact> {
-        match self.view {
-            View::Launch => self.sel_orig().and_then(|i| self.snap.artifacts.get(i)),
-            _ => None,
+        if self.view == View::Launch && self.panel_focus == 0 {
+            self.sel_orig().and_then(|i| self.snap.artifacts.get(i))
+        } else {
+            None
         }
     }
 
