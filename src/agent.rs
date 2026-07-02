@@ -388,9 +388,49 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
 }
 
 /// stdout 으로 pretty JSON 상태 트리 출력.
+/// agent 상태를 JSON 문자열로(테스트·계약 검증용 시임). emit_json 이 이걸 출력.
+pub fn to_json(snap: &Snapshot, cfg: &Config) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(&build(snap, cfg))
+}
+
 pub fn emit_json(snap: &Snapshot, cfg: &Config) {
-    match serde_json::to_string_pretty(&build(snap, cfg)) {
+    match to_json(snap, cfg) {
         Ok(s) => println!("{}", s),
         Err(e) => eprintln!("lmd-top: json serialize error: {}", e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_contract_schema_and_keys() {
+        // 합성 스냅샷 → agent JSON → 계약(스키마 버전·핵심 키) 검증. 클러스터 무관.
+        let mut snap = Snapshot::default();
+        snap.nodes.push(crate::collect::NodeInfo {
+            name: "etri-001".into(),
+            load1: 0.5,
+            mem_used_gb: 10.0,
+            mem_total_gb: 100.0,
+            cpu_pct: 20.0,
+            disk_used_gb: 5.0,
+            disk_total_gb: 50.0,
+            ready: true,
+            cordoned: false,
+            pressure: false,
+            version: "v1.30".into(),
+            npu: "RNGD drv2026.3.0".into(),
+        });
+        let cfg = Config::default();
+        let s = to_json(&snap, &cfg).expect("serialize");
+        let v: serde_json::Value = serde_json::from_str(&s).expect("valid json");
+        // 계약: schema 버전 v2, 최상위 키, node.npu 필드 노출.
+        assert_eq!(v["schema"], "lmd-top/agent-state/v2");
+        for k in ["cluster", "nodes", "artifacts", "stored", "models"] {
+            assert!(v.get(k).is_some(), "top-level key '{}' present", k);
+        }
+        assert_eq!(v["nodes"][0]["name"], "etri-001");
+        assert_eq!(v["nodes"][0]["npu"], "RNGD drv2026.3.0");
     }
 }
