@@ -106,7 +106,7 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
     let Some(form) = &app.deploy_form else { return };
     let fit = app.deploy_fit(form);
     let full = f.area();
-    let h = (form.fields.len() as u16) + (fit.tips.len() as u16) + 12;
+    let h = (form.fields.len() as u16) + (fit.tips.len() as u16) + (app.deploy_preflight(form).len() as u16) + 13;
     let area = centered(full, 92, h.min(full.height.saturating_sub(2)));
     f.render_widget(Clear, area);
     let mut lines: Vec<Line> = Vec::new();
@@ -151,6 +151,17 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
     for tip in &fit.tips {
         let tcol = if tip.starts_with('⚠') { C_BAD() } else { C_WARN() };
         lines.push(Line::from(Span::styled(format!("   → {}", tip), Style::default().fg(tcol))));
+    }
+    // ── preflight: apply 전 서빙 전제조건 사전 점검 ──
+    let pf = app.deploy_preflight(form);
+    let pf_ok = pf.iter().all(|(ok, _)| *ok);
+    lines.push(Line::from(Span::styled(
+        format!("  preflight {}", if pf_ok { "● ready" } else { "✗ check" }),
+        Style::default().fg(if pf_ok { C_OK() } else { C_BAD() }).add_modifier(Modifier::BOLD),
+    )));
+    for (ok, msg) in &pf {
+        let (g, c) = if *ok { ("✓", C_DIM()) } else { ("✗", C_BAD()) };
+        lines.push(Line::from(Span::styled(format!("   {} {}", g, msg), Style::default().fg(c))));
     }
     let title = if form.editing {
         "deploy · TYPING custom — Enter/Esc confirm · Backspace del".to_string()

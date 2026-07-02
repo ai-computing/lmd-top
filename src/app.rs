@@ -1585,7 +1585,7 @@ impl App {
                 if has_img {
                     "image: LMD_COMPILE_IMAGE_RBLN 지정됨".into()
                 } else {
-                    "image: RBLN 컴파일러 이미지 미지정 — optimum-rbln+rebel-compiler(pypi.rbln.ai 인증) 이미지를 LMD_COMPILE_IMAGE_RBLN 로".into()
+                    "image: rebel-compiler 는 공개 PyPI 부재(pypi.rbln.ai 승인계정 전용) — 그게 든 이미지를 LMD_COMPILE_IMAGE_RBLN 로 지정 필요".into()
                 },
             ));
             let compat_ok = crate::compat::compilable_vendors(&form.model_id).contains(&"rbln");
@@ -1943,6 +1943,35 @@ impl App {
             tips.push("replica당 다중 칩은 컴파일 TP 와 일치해야 함".into());
         }
         DeployFit { demand, total, free, resource_free, nodes, verdict, tips }
+    }
+
+    /// 배포 사전 점검(preflight) — apply 전에 서빙 전제조건 확인(사전 방어).
+    pub fn deploy_preflight(&self, form: &DeployForm) -> Vec<(bool, String)> {
+        let mut out: Vec<(bool, String)> = Vec::new();
+        // 서빙 이미지 지정 여부(미지정이면 TODO placeholder → apply 차단).
+        let has_img = self.img_serving.is_some() || form.vendor == "gpu"; // gpu 는 vLLM 기본 이미지 가정 아님 — 그래도 명시 권장
+        out.push((
+            self.img_serving.is_some(),
+            if self.img_serving.is_some() {
+                "image: LMD_SERVING_IMAGE 지정됨".into()
+            } else {
+                "image: 미지정 — TODO placeholder 라 apply 차단. LMD_SERVING_IMAGE 로 서빙 런타임 지정".into()
+            },
+        ));
+        let _ = has_img;
+        // 아티팩트 경로(스토어/컴파일본) 존재.
+        out.push((!form.mount.is_empty(), format!("artifact: {}", if form.mount.is_empty() { "경로 미상 — 컴파일/스토어 확인".into() } else { form.mount.clone() })));
+        // NPU 벤더면 타깃 노드에 드라이버.
+        if form.vendor != "gpu" {
+            let want = if form.vendor == "rbln" { "RBLN" } else { "RNGD" };
+            let any = self.snap.nodes.iter().any(|n| n.npu.to_uppercase().contains(want));
+            out.push((any, format!("node: {} 드라이버 노드 {}", want, if any { "있음" } else { "없음" })));
+        }
+        // 용량(deploy_fit 재사용).
+        let fit = self.deploy_fit(form);
+        let cap_ok = matches!(fit.verdict, FitVerdict::Fits);
+        out.push((cap_ok, format!("capacity: 수요 {} · 리소스유휴 {} → {}", fit.demand, fit.resource_free, fit.verdict.label())));
+        out
     }
 
     /// 배포 폼 → Deployment 매니페스트 미리보기(dry-run). Enter 시 호출.
