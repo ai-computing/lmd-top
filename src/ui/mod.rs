@@ -2318,11 +2318,15 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
     node_names.dedup();
     let epp_present = app.snap.epp.is_some() || !app.snap.pools.is_empty();
     let gw = !app.snap.gw_addr.is_empty();
-    let cols = 2usize;
-    let bw = 38.0; // box width(간격 포함)
-    let bh = 20.0; // box height
-    let x0 = 18.0; // 노드 그리드 시작 x(왼쪽 flow 컬럼 뒤)
-    let y_top = 84.0;
+    // 노드 수에 맞춰 열/박스 크기 적응 — 많아도 캔버스(0..100) 안에 다 들어가게(겹침 방지).
+    let ncount = node_names.len().max(1);
+    let cols = if ncount <= 2 { 1 } else if ncount <= 6 { 2 } else { 3 };
+    let x0 = 16.0; // 노드 그리드 시작 x(왼쪽 flow 컬럼 뒤)
+    let bw = (100.0 - x0) / cols as f64; // 열 폭(간격 포함)
+    let nrows = ncount.div_ceil(cols);
+    let y_top = 92.0;
+    let row_h = (86.0 / nrows as f64).min(24.0); // 행 높이(행 많으면 축소)
+    let bh = (row_h - 3.0).max(6.0); // 박스 높이(행 간격 3)
     let canvas = Canvas::default()
         .marker(ratatui::symbols::Marker::HalfBlock)
         .x_bounds([0.0, 100.0])
@@ -2353,7 +2357,7 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
                     continue;
                 }
                 let bx = x0 + (i % cols) as f64 * bw;
-                let by = y_top - (i / cols) as f64 * (bh + 4.0);
+                let by = y_top - (i / cols) as f64 * row_h;
                 let col = model_color(&busy[0].busy_model);
                 if epp_present {
                     ctx.draw(&CLine { x1: pool_x, y1: pool_y, x2: bx, y2: by - bh / 2.0, color: col });
@@ -2362,8 +2366,8 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
             // ── 노드 박스 + 디바이스 pressure ──
             for (i, node) in node_names.iter().enumerate() {
                 let bx = x0 + (i % cols) as f64 * bw;
-                let by = y_top - (i / cols) as f64 * (bh + 4.0);
-                ctx.draw(&Rectangle { x: bx, y: by - bh, width: bw - 4.0, height: bh, color: C_TRACK() });
+                let by = y_top - (i / cols) as f64 * row_h;
+                ctx.draw(&Rectangle { x: bx, y: by - bh, width: bw - 3.0, height: bh, color: C_TRACK() });
                 // 노드명.
                 ctx.print(bx + 1.0, by - 2.0, Line::from(Span::styled(truncw(node, 18), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))));
                 // 디바이스들 — kind 별 줄, 각 디바이스는 util 히트 블록.
