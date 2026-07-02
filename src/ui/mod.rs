@@ -212,6 +212,8 @@ fn help_overlay(f: &mut Frame) {
         g("o", "cycle sort"),
         g("/", "filter (substring) — list header shows Σ aggregate of shown rows"),
         g("actions", "Enter menu: Info/Compile→RBLN·Furiosa/Deploy/Stop/Scale/Restart/Logs/YAML/Delete/Cordon/Objective"),
+        g("Flow route", "Enter on a route → Rename/Retarget/Delete (gateway 경로 관리, admin+)"),
+        g("apply", "deploy/compile Enter → Yes/No 확인 팝업(←→ Enter) · e=vi로 매니페스트 편집 · v=dry-run 검증"),
         g("Objective", "set per-model SLO (TTFT/TPOT/E2E/tok·s) → Perf shows met/violated + data-driven advice"),
         g("l s S x y", "accelerators (also in the actions menu): logs/scale/restart/stop/yaml"),
         g("A", "alert history (threshold/health events)"),
