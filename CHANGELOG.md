@@ -2,6 +2,12 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.26.0]
+### Changed — Launch → Deploy 라이프사이클 뷰(모델 관점 통합)
+- 탭 7 을 **Deploy** 로: (1) 컴파일 변형 트리(모델 계열→build: 상태·엔진·컴파일 옵션·`@node /path`), (2) **배치 타깃**(노드별 여유 가속기 = 어디 배포 가능한지), (3) 카탈로그(배포 가능 모델 × 재고 가능성). `⏎` 로 아티팩트 상세(family·source·저장 노드/경로·전체 컴파일 옵션).
+- Models 는 serving 전용으로 되돌림(artifacts 는 Deploy 로 통합) → 뷰 10개 유지.
+- 컴파일/배포 실행(`[c]/[d]`)은 Phase 2(게이팅) 예정으로 명시.
+
 ## [0.25.0]
 ### Changed — Store 뷰를 Models 관점 토글로 통합(뷰 10개로 복귀)
 - 별도 Store 탭 제거 → Models 뷰에 **관점 토글 `v`** 추가: **serving**(런타임: ready/run/wait/kv/tps) ⇄ **artifacts**(모델 정체성 중심: HF/local 소스·format(quant/dtype)·컴파일 옵션·저장 노드).

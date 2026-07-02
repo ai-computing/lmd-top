@@ -136,7 +136,7 @@ impl View {
             View::Routing => "Flow",
             View::Pods => "Pods",
             View::Perf => "Perf",
-            View::Launch => "Launch",
+            View::Launch => "Deploy", // 모델 라이프사이클(컴파일 변형·저장 노드·배치 타깃)
             View::Events => "Events",
             View::Nodes => "Nodes",
         }
@@ -161,7 +161,6 @@ pub struct App {
     pub paused: bool,     // 화면 갱신 일시정지(데이터 고정, 읽기용)
     pub detail_scroll: u16, // detail 내부 세로 스크롤
     pub dev_sel: usize,     // Node 상세 내 device 커서: 0=노드요약, 1..=n=해당 device 히스토리
-    pub models_persp: usize, // Models 뷰 관점: 0=serving(런타임) · 1=artifacts(모델 정체성/저장/컴파일)
     pub logs_mode: bool,      // 로그 오버레이
     pub logs_target: String,  // 로그 대상 pod
     pub logs: Vec<String>,    // 로그 줄
@@ -228,7 +227,6 @@ impl App {
             paused: false,
             detail_scroll: 0,
             dev_sel: 0,
-            models_persp: 0,
             logs_mode: false,
             logs_target: String::new(),
             logs: Vec::new(),
@@ -432,14 +430,6 @@ impl App {
         self.toast_bad = false;
     }
 
-    pub fn selected_cat(&self) -> Option<&crate::catalog::CatModel> {
-        if self.view == View::Launch {
-            self.sel_orig().and_then(|i| self.catalog.get(i))
-        } else {
-            None
-        }
-    }
-
     /// 뷰의 표시 컬럼 순서(설정 없으면 default 반환). 설정의 미지 키는 무시(default에서 교집합).
     pub fn columns<'a>(&'a self, view: &str, default: &'a [&'a str]) -> Vec<&'a str> {
         match self.cols.get(view) {
@@ -494,7 +484,7 @@ impl App {
                 .unwrap_or_default(),
             View::Models | View::Overview => self.snap.models.get(i).map(|m| format!("{} {}", m.name, m.accel)).unwrap_or_default(),
             View::Pods => self.snap.pods.get(i).map(|p| format!("{} {}", p.name, p.node)).unwrap_or_default(),
-            View::Launch => self.catalog.get(i).map(|m| format!("{} {}", m.id, m.display)).unwrap_or_default(),
+            View::Launch => self.snap.artifacts.get(i).map(|a| format!("{} {} {}", a.model, a.family, a.source)).unwrap_or_default(),
             View::Epp => self.snap.epp.as_ref().and_then(|e| e.scorers.get(i)).map(|(n, _)| n.clone()).unwrap_or_default(),
             View::Events => self.snap.events.get(i).map(|e| format!("{} {} {}", e.reason, e.object, e.message)).unwrap_or_default(),
             View::Nodes => self.snap.nodes.get(i).map(|n| n.name.clone()).unwrap_or_default(),
@@ -506,7 +496,7 @@ impl App {
     /// 상세 패널을 가진 뷰인지(detail=true 가 실제로 렌더에 반영되는 뷰).
     /// 없는 뷰(Routing/Epp/Launch/Events)에서 detail=true 로 두면 ↑↓ 가 스크롤로 빠져 네비가 잠김.
     pub fn view_has_detail(&self) -> bool {
-        matches!(self.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events)
+        matches!(self.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events | View::Launch)
     }
 
     pub fn toggle_detail(&mut self) {
@@ -836,7 +826,7 @@ impl App {
                 });
                 idx
             }
-            View::Launch => (0..self.catalog.len()).collect(),
+            View::Launch => (0..self.snap.artifacts.len()).collect(), // Deploy: 모델 변형(아티팩트)
             View::Epp => (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect(),
             View::Events => (0..self.snap.events.len()).collect(),
             View::Nodes => (0..self.snap.nodes.len()).collect(),
@@ -909,20 +899,11 @@ impl App {
             _ => None,
         }
     }
-    /// Models 뷰의 artifacts 관점에서만 — 선택 모델명에 대응하는 아티팩트.
+    /// Deploy 뷰(=Launch)에서 선택된 아티팩트(모델 변형).
     pub fn selected_artifact(&self) -> Option<&crate::collect::ModelArtifact> {
-        if self.view != View::Models || self.models_persp != 1 {
-            return None;
-        }
-        let i = self.sel_orig()?;
-        let name = self.snap.models.get(i)?.name.clone();
-        self.snap.artifacts.iter().find(|a| a.model == name)
-    }
-    /// Models 뷰 관점 토글(serving ⇄ artifacts).
-    pub fn toggle_models_persp(&mut self) {
-        if self.view == View::Models {
-            self.models_persp ^= 1;
-            self.detail = false;
+        match self.view {
+            View::Launch => self.sel_orig().and_then(|i| self.snap.artifacts.get(i)),
+            _ => None,
         }
     }
 
