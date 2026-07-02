@@ -162,6 +162,8 @@ pub struct App {
     pub detail_scroll: u16, // detail 내부 세로 스크롤
     pub dev_sel: usize,     // Node 상세 내 device 커서: 0=노드요약, 1..=n=해당 device 히스토리
     pub panel_focus: usize, // 멀티패널 뷰에서 활성(포커스) 패널 인덱스(w 로 순환)
+    pub preview: Option<(String, String)>, // (제목, YAML) 매니페스트 미리보기 오버레이(compile/deploy dry-run)
+    pub preview_scroll: u16,
     pub logs_mode: bool,      // 로그 오버레이
     pub logs_target: String,  // 로그 대상 pod
     pub logs: Vec<String>,    // 로그 줄
@@ -229,6 +231,8 @@ impl App {
             detail_scroll: 0,
             dev_sel: 0,
             panel_focus: 0,
+            preview: None,
+            preview_scroll: 0,
             logs_mode: false,
             logs_target: String::new(),
             logs: Vec::new(),
@@ -960,6 +964,115 @@ impl App {
         }
     }
 
+    /// 아티팩트의 모델 식별자 — HF id(source) 우선, 없으면 family.
+    fn artifact_model_id(a: &crate::collect::ModelArtifact) -> String {
+        if a.source.contains('/') && !a.source.starts_with('/') {
+            a.source.clone()
+        } else {
+            a.family.clone()
+        }
+    }
+    fn opt_or<'a>(a: &'a crate::collect::ModelArtifact, k: &str, def: &'a str) -> String {
+        a.opts.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone()).unwrap_or_else(|| def.to_string())
+    }
+
+    /// `[c] compile` — 선택 모델의 NPU 컴파일 Job 매니페스트를 생성해 미리보기(dry-run)로.
+    /// 컴파일은 NPU(RBLN/Furiosa) 개념 — GPU 는 컴파일 불필요.
+    pub fn compile_preview(&mut self) {
+        let Some(a) = self.selected_artifact() else { return };
+        let rbln = a.engine.contains("RBLN");
+        let furiosa = a.engine.contains("Furiosa");
+        let model_id = Self::artifact_model_id(a);
+        if !rbln && !furiosa {
+            self.preview = Some((
+                format!("compile · {}", a.model),
+                format!("# {}\n# 엔진 '{}' 는 GPU 계열 — 사전 컴파일이 필요 없습니다.\n# vLLM 이 HF 가중치를 직접 로드합니다. [d] deploy 를 사용하세요.\n", model_id, a.engine),
+            ));
+            self.preview_scroll = 0;
+            return;
+        }
+        let tp = Self::opt_or(a, "tp", "4");
+        let maxlen = Self::opt_or(a, "max-len", "8192");
+        let vendor = if rbln { "rbln" } else { "furiosa" };
+        let target = if rbln { format!("rbln-ca22-tp{}-s{}", tp, maxlen) } else { format!("rngd-tp{}-s{}", tp, maxlen) };
+        let repo_dir = model_id.replace('/', "--");
+        let yaml = format!(
+            "# 컴파일 Job (dry-run 미리보기) — 검토 후 `kubectl apply -f -` 로 적용.\n\
+             # 모델 {model_id} → {vendor} 컴파일 → 공유 스토어 저장(compiled/{repo_dir}/{vendor}/{target}).\n\
+             # TODO: image(벤더 툴체인), nodeSelector(NPU+스토어 마운트 가능 노드), 디바이스 resources 채우기.\n\
+             apiVersion: batch/v1\n\
+             kind: Job\n\
+             metadata: {{ name: compile-{repo_dir_lc}, namespace: {ns} }}\n\
+             spec:\n\
+             \x20 backoffLimit: 0\n\
+             \x20 template:\n\
+             \x20   spec:\n\
+             \x20     restartPolicy: Never\n\
+             \x20     nodeSelector: {{ kubernetes.io/hostname: TODO-npu-node }}\n\
+             \x20     volumes:\n\
+             \x20       - {{ name: store, persistentVolumeClaim: {{ claimName: model-store }} }}\n\
+             \x20     containers:\n\
+             \x20       - name: compile\n\
+             \x20         image: TODO-{vendor}-toolchain\n\
+             \x20         env:\n\
+             \x20           - {{ name: MODEL_STORE, value: /mnt/store }}\n\
+             \x20           - {{ name: MODEL_ID, value: \"{model_id}\" }}\n\
+             \x20           - {{ name: OUTPUT, value: /mnt/store/compiled/{repo_dir}/{vendor}/{target} }}\n\
+             \x20         # resources: {{ limits: {{ {res}: {tp} }} }}\n\
+             \x20         volumeMounts:\n\
+             \x20           - {{ name: store, mountPath: /mnt/store }}\n\
+             \x20         command: [\"python3\", \"/scripts/compile.py\"]   # manifests/compile-*.py (MODEL_STORE/OUTPUT 대응)\n",
+            model_id = model_id,
+            vendor = vendor,
+            repo_dir = repo_dir,
+            repo_dir_lc = repo_dir.to_lowercase().replace('.', "-"),
+            target = target,
+            ns = "llm-serving",
+            res = if rbln { "rebellions.ai/ATOM" } else { "furiosa.ai/rngd" },
+            tp = tp,
+        );
+        self.preview = Some((format!("compile · {} → {}", a.model, target), yaml));
+        self.preview_scroll = 0;
+    }
+
+    /// `[d] deploy` — 선택 모델을 스토어 아티팩트로 서빙하는 매니페스트 미리보기(dry-run).
+    pub fn deploy_preview(&mut self) {
+        let Some(a) = self.selected_artifact() else { return };
+        let model_id = Self::artifact_model_id(a);
+        let repo_dir = model_id.replace('/', "--");
+        let name = a.family.replace('/', "-");
+        let mount = if a.mount.is_empty() { format!("/mnt/store/compiled/{}", repo_dir) } else { a.mount.split(" ← ").next().unwrap_or("/mnt/store").to_string() };
+        let yaml = format!(
+            "# 배포 매니페스트 (dry-run 미리보기) — 검토 후 `kubectl apply -f -`.\n\
+             # 모델 {model_id} 를 공유 스토어({mount})에서 서빙. 엔진: {engine}.\n\
+             # TODO: image(서빙 런타임), args/포트, 디바이스 resources, ModelService 사용 시 CRD 로 대체.\n\
+             apiVersion: apps/v1\n\
+             kind: Deployment\n\
+             metadata: {{ name: {name}, namespace: {ns} }}\n\
+             spec:\n\
+             \x20 replicas: 1\n\
+             \x20 selector: {{ matchLabels: {{ app: {name} }} }}\n\
+             \x20 template:\n\
+             \x20   metadata: {{ labels: {{ app: {name} }} }}\n\
+             \x20   spec:\n\
+             \x20     volumes:\n\
+             \x20       - {{ name: store, persistentVolumeClaim: {{ claimName: model-store }} }}\n\
+             \x20     containers:\n\
+             \x20       - name: server\n\
+             \x20         image: TODO-serving-image   # {engine}\n\
+             \x20         args: [\"--model\", \"{mount}\"]\n\
+             \x20         volumeMounts:\n\
+             \x20           - {{ name: store, mountPath: /mnt/store, readOnly: true }}\n",
+            model_id = model_id,
+            mount = mount,
+            engine = a.engine,
+            name = name,
+            ns = "llm-serving",
+        );
+        self.preview = Some((format!("deploy · {}", a.model), yaml));
+        self.preview_scroll = 0;
+    }
+
     /// 로그 대상 pod 이름(현재 선택 기준).
     pub fn logs_target_pod(&self) -> Option<String> {
         match self.view {
@@ -1101,6 +1214,40 @@ mod tests {
         let before = a.view.idx();
         a.prev_tab();
         assert_eq!(a.view.idx(), (before + View::ALL.len() - 1) % View::ALL.len());
+    }
+
+    #[test]
+    fn compile_deploy_preview_generates_manifests() {
+        use crate::collect::ModelArtifact;
+        let mut a = App::new();
+        a.snap = Snapshot {
+            artifacts: vec![ModelArtifact {
+                model: "koni-rbln".into(),
+                family: "kisti-koni/koni-llama3.1-8b".into(),
+                engine: "vLLM-RBLN".into(),
+                node: "etri-001".into(),
+                image: String::new(),
+                source: "KISTI-KONI/KONI-Llama3.1-8B-Instruct".into(),
+                mount: "/mnt/store ← PVC:model-store".into(),
+                opts: vec![("tp".into(), "4".into()), ("max-len".into(), "8192".into())],
+            }],
+            ..Default::default()
+        };
+        a.view = View::Launch;
+        a.panel_focus = 0;
+        a.selected = 0;
+        // compile: NPU(RBLN) → Job 매니페스트에 모델 id/타깃/스토어 경로 포함.
+        a.compile_preview();
+        let (title, yaml) = a.preview.clone().expect("compile preview");
+        assert!(title.contains("compile"));
+        assert!(yaml.contains("kind: Job"));
+        assert!(yaml.contains("KISTI-KONI/KONI-Llama3.1-8B-Instruct"));
+        assert!(yaml.contains("compiled/KISTI-KONI--KONI-Llama3.1-8B-Instruct/rbln/rbln-ca22-tp4-s8192"));
+        // deploy: 스토어 마운트를 서빙하는 매니페스트.
+        a.deploy_preview();
+        let (_, dyaml) = a.preview.clone().expect("deploy preview");
+        assert!(dyaml.contains("kind: Deployment"));
+        assert!(dyaml.contains("model-store"));
     }
 
     #[test]
