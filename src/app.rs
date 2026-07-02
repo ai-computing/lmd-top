@@ -1890,6 +1890,14 @@ impl App {
                 numeric: false,
                 help: "노드 배치 — any=제약 없음, spread=여러 노드 분산(topologySpread), 특정=hostname 고정".into(),
             },
+            CompileField {
+                key: "routing".into(),
+                label: "routing".into(),
+                value: "llm-d".into(),
+                choices: ["llm-d", "direct"].iter().map(|s| s.to_string()).collect(),
+                numeric: false,
+                help: "llm-d=게이트웨이 라우팅(InferencePool+EPP+HTTPRoute /accel/model)까지 생성 · direct=Deployment 만".into(),
+            },
         ];
         self.deploy_form = Some(DeployForm {
             model: a.model.clone(),
@@ -2130,9 +2138,129 @@ impl App {
             container_spec = container_spec,
             image = image,
         );
+        // routing=llm-d → 게이트웨이 라우팅 리소스(InferencePool+EPP+HTTPRoute)를 뒤에 동봉.
+        let yaml = if form.get("routing") == "llm-d" {
+            format!("{}{}", yaml, self.routing_docs(&name, form.vendor, &served))
+        } else {
+            yaml
+        };
         self.preview = Some((format!("deploy · {} ×{}", form.model, replicas), yaml));
         self.preview_scroll = 0;
         self.preview_apply = true;
+    }
+
+    /// llm-d 게이트웨이 라우팅 리소스 문서들(서빙 Deployment 뒤에 붙임).
+    /// 실기 배선 그대로: SA + RoleBinding×2(공유 Role llmd-router-epp-{sa,non-sa} 참조)
+    ///   + plugins ConfigMap + EPP Deployment/Service + InferencePool(app={name} 선택) + HTTPRoute.
+    /// 경로 = /{accel}/{model}. EPP 는 pool 멤버 파드로 model/부하 인지 라우팅.
+    fn routing_docs(&self, name: &str, vendor: &str, served: &str) -> String {
+        let accel = match vendor {
+            "furiosa" => "rngd",
+            "rbln" => "atom",
+            _ => "gpu",
+        };
+        let slug = served.rsplit('/').next().unwrap_or(served).to_lowercase().replace(['.', '_'], "-");
+        let path = format!("/{}/{}", accel, slug);
+        let ns = &self.ns;
+        format!(
+            "---\n\
+             # ── llm-d 라우팅: 게이트웨이 {path} → InferencePool({name}-pool) → EPP → 이 서빙 ──\n\
+             # (공유 Role llmd-router-epp-sa/-non-sa 는 클러스터에 이미 존재한다고 가정)\n\
+             apiVersion: v1\n\
+             kind: ServiceAccount\n\
+             metadata: {{ name: {name}-epp, namespace: {ns} }}\n\
+             ---\n\
+             apiVersion: rbac.authorization.k8s.io/v1\n\
+             kind: RoleBinding\n\
+             metadata: {{ name: {name}-epp-sa, namespace: {ns} }}\n\
+             roleRef: {{ apiGroup: rbac.authorization.k8s.io, kind: Role, name: llmd-router-epp-sa }}\n\
+             subjects:\n\
+             \x20 - {{ kind: ServiceAccount, name: {name}-epp, namespace: {ns} }}\n\
+             ---\n\
+             apiVersion: rbac.authorization.k8s.io/v1\n\
+             kind: RoleBinding\n\
+             metadata: {{ name: {name}-epp-non-sa, namespace: {ns} }}\n\
+             roleRef: {{ apiGroup: rbac.authorization.k8s.io, kind: Role, name: llmd-router-epp-non-sa }}\n\
+             subjects:\n\
+             \x20 - {{ kind: ServiceAccount, name: {name}-epp, namespace: {ns} }}\n\
+             ---\n\
+             apiVersion: v1\n\
+             kind: ConfigMap\n\
+             metadata: {{ name: {name}-epp, namespace: {ns} }}\n\
+             data:\n\
+             \x20 default-plugins.yaml: |\n\
+             \x20\x20\x20 apiVersion: inference.networking.x-k8s.io/v1alpha1\n\
+             \x20\x20\x20 kind: EndpointPickerConfig\n\
+             \x20\x20\x20 plugins:\n\
+             \x20\x20\x20 - type: queue-scorer\n\
+             \x20\x20\x20 - type: kv-cache-utilization-scorer\n\
+             \x20\x20\x20 - type: prefix-cache-scorer\n\
+             \x20\x20\x20 schedulingProfiles:\n\
+             \x20\x20\x20 - name: default\n\
+             \x20\x20\x20\x20\x20 plugins:\n\
+             \x20\x20\x20\x20\x20 - {{ pluginRef: queue-scorer, weight: 2 }}\n\
+             \x20\x20\x20\x20\x20 - {{ pluginRef: kv-cache-utilization-scorer, weight: 2 }}\n\
+             \x20\x20\x20\x20\x20 - {{ pluginRef: prefix-cache-scorer, weight: 3 }}\n\
+             ---\n\
+             apiVersion: apps/v1\n\
+             kind: Deployment\n\
+             metadata: {{ name: {name}-epp, namespace: {ns} }}\n\
+             spec:\n\
+             \x20 replicas: 1\n\
+             \x20 selector: {{ matchLabels: {{ app: {name}-epp }} }}\n\
+             \x20 template:\n\
+             \x20   metadata: {{ labels: {{ app: {name}-epp }} }}\n\
+             \x20   spec:\n\
+             \x20     serviceAccountName: {name}-epp\n\
+             \x20     containers:\n\
+             \x20       - name: epp\n\
+             \x20         image: ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:main\n\
+             \x20         args: [\"--pool-name\", \"{name}-pool\", \"--pool-namespace\", \"{ns}\", \"--pool-group\", \"inference.networking.k8s.io\", \"--config-file\", \"/config/default-plugins.yaml\", \"--zap-encoder\", \"json\", \"--tracing=false\"]\n\
+             \x20         ports:\n\
+             \x20           - {{ name: grpc, containerPort: 9002 }}\n\
+             \x20           - {{ name: grpc-health, containerPort: 9003 }}\n\
+             \x20           - {{ name: metrics, containerPort: 9090 }}\n\
+             \x20         env:\n\
+             \x20           - {{ name: NAMESPACE, valueFrom: {{ fieldRef: {{ fieldPath: metadata.namespace }} }} }}\n\
+             \x20           - {{ name: POD_NAME, valueFrom: {{ fieldRef: {{ fieldPath: metadata.name }} }} }}\n\
+             \x20         volumeMounts:\n\
+             \x20           - {{ name: plugins, mountPath: /config }}\n\
+             \x20     volumes:\n\
+             \x20       - {{ name: plugins, configMap: {{ name: {name}-epp }} }}\n\
+             ---\n\
+             apiVersion: v1\n\
+             kind: Service\n\
+             metadata: {{ name: {name}-epp, namespace: {ns} }}\n\
+             spec:\n\
+             \x20 selector: {{ app: {name}-epp }}\n\
+             \x20 ports:\n\
+             \x20   - {{ name: grpc-ext-proc, port: 9002, targetPort: 9002 }}\n\
+             \x20   - {{ name: http-metrics, port: 9090, targetPort: 9090 }}\n\
+             ---\n\
+             apiVersion: inference.networking.k8s.io/v1\n\
+             kind: InferencePool\n\
+             metadata: {{ name: {name}-pool, namespace: {ns} }}\n\
+             spec:\n\
+             \x20 selector: {{ matchLabels: {{ app: {name} }} }}\n\
+             \x20 targetPorts:\n\
+             \x20   - {{ number: 8000 }}\n\
+             \x20 endpointPickerRef: {{ group: \"\", kind: Service, name: {name}-epp, port: {{ number: 9002 }}, failureMode: FailClose }}\n\
+             ---\n\
+             apiVersion: gateway.networking.k8s.io/v1\n\
+             kind: HTTPRoute\n\
+             metadata: {{ name: {name}-route, namespace: {ns} }}\n\
+             spec:\n\
+             \x20 parentRefs:\n\
+             \x20   - {{ name: llm-d-gateway }}\n\
+             \x20 rules:\n\
+             \x20   - matches:\n\
+             \x20       - {{ path: {{ type: PathPrefix, value: {path} }} }}\n\
+             \x20     filters:\n\
+             \x20       - {{ type: URLRewrite, urlRewrite: {{ path: {{ type: ReplacePrefixMatch, replacePrefixMatch: /v1 }} }} }}\n\
+             \x20     backendRefs:\n\
+             \x20       - {{ group: inference.networking.k8s.io, kind: InferencePool, name: {name}-pool }}\n",
+            name = name, ns = ns, path = path
+        )
     }
 
     /// 로그 대상 pod 이름(현재 선택 기준).
@@ -2331,12 +2459,19 @@ mod tests {
         // RBLN 서빙은 vllm_rbln 런타임 + VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK (제네릭 --model 아님).
         assert!(dyaml.contains("\"serve\""), "vllm serve subcommand");
         assert!(dyaml.contains("VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK"));
+        // routing=llm-d(기본) → 게이트웨이 라우팅 리소스 동봉.
+        assert!(dyaml.contains("kind: InferencePool"), "generates InferencePool");
+        assert!(dyaml.contains("kind: HTTPRoute"), "generates HTTPRoute");
+        assert!(dyaml.contains("llm-d-router-endpoint-picker"), "generates EPP");
+        assert!(dyaml.contains("value: /atom/"), "rbln → /atom/<model> path");
         // 구조 유효성: 생성 매니페스트가 실제 파싱되는 YAML 인지 테스트 시점에 검증(들여쓰기 실수 조기 검출).
-        // RBLN 컴파일은 다중 문서(ConfigMap---Job)라 문서별로 파싱.
+        // 컴파일(ConfigMap---Job)·배포(Deployment---라우팅) 모두 다중 문서라 문서별로 파싱.
         for doc in yaml.split("\n---\n") {
             serde_yaml::from_str::<serde_yaml::Value>(doc).expect("compile manifest doc is valid YAML");
         }
-        serde_yaml::from_str::<serde_yaml::Value>(&dyaml).expect("deploy manifest is valid YAML");
+        for doc in dyaml.split("\n---\n") {
+            serde_yaml::from_str::<serde_yaml::Value>(doc).expect("deploy manifest doc is valid YAML");
+        }
     }
 
     #[test]
@@ -2402,7 +2537,10 @@ mod tests {
         assert!(fy.contains("--tensor-parallel-size"));
         assert!(fy.contains("hf-token"), "furiosa needs HF_TOKEN secret");
         assert!(fy.contains("furiosa.ai/rngd:"));
-        serde_yaml::from_str::<serde_yaml::Value>(&fy).expect("furiosa deploy is valid YAML");
+        assert!(fy.contains("value: /rngd/"), "furiosa → /rngd/<model> route");
+        for doc in fy.split("\n---\n") {
+            serde_yaml::from_str::<serde_yaml::Value>(doc).expect("furiosa deploy doc is valid YAML");
+        }
 
         // GPU: `vllm serve <path>` on nvidia.com/gpu, 컴파일 불필요.
         let mut gp = mk("vLLM", "Qwen/Qwen2.5-7B-Instruct");
@@ -2411,7 +2549,21 @@ mod tests {
         let (_, gy) = gp.preview.clone().expect("gpu deploy");
         assert!(gy.contains("\"serve\""));
         assert!(gy.contains("nvidia.com/gpu:"));
-        serde_yaml::from_str::<serde_yaml::Value>(&gy).expect("gpu deploy is valid YAML");
+        assert!(gy.contains("value: /gpu/"), "gpu → /gpu/<model> route");
+        for doc in gy.split("\n---\n") {
+            serde_yaml::from_str::<serde_yaml::Value>(doc).expect("gpu deploy doc is valid YAML");
+        }
+
+        // routing=direct 이면 라우팅 리소스 없음(Deployment 만).
+        let mut d = mk("vLLM", "Qwen/Qwen2.5-7B-Instruct");
+        d.open_deploy_form();
+        if let Some(f) = d.deploy_form.as_mut() {
+            if let Some(fld) = f.fields.iter_mut().find(|x| x.key == "routing") { fld.value = "direct".into(); }
+        }
+        d.deploy_form_submit();
+        let (_, dy) = d.preview.clone().expect("direct deploy");
+        assert!(!dy.contains("kind: InferencePool"), "direct = no routing resources");
+        assert!(!dy.contains("kind: HTTPRoute"));
     }
 
     #[test]
