@@ -4,6 +4,7 @@
 
 mod agent;
 mod app;
+mod cast;
 mod catalog;
 mod collect;
 mod config;
@@ -58,6 +59,13 @@ async fn main() -> Result<()> {
     if args.iter().any(|a| a == "--render") {
         let snap = collect(&cfg).await;
         render_dump(snap);
+        return Ok(());
+    }
+
+    // 데모 asciicast 생성(agg 로 GIF 변환용). --cast [out.cast]
+    if let Some(pos) = args.iter().position(|a| a == "--cast") {
+        let out = args.get(pos + 1).filter(|s| !s.starts_with('-')).cloned().unwrap_or_else(|| "docs/demo.cast".to_string());
+        cast::run(&cfg, &out).await;
         return Ok(());
     }
 
