@@ -439,43 +439,58 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                     }
                     // 변경 작업 확인(y/n) — 다른 키 무시. 실행은 여기서(권한 검증은 트리거 시점).
                     if let Some(pending) = app.confirm.clone() {
-                        match k.code {
-                            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                match pending {
-                                    Pending::Scale { name, target } => match kube::scale_deploy(&ns, &name, target) {
-                                        Ok(_) => app.notify(format!("scaled {} → {}", name, target)),
-                                        Err(e) => app.notify(format!("scale failed: {}", e)),
-                                    },
-                                    Pending::Restart { name } => match kube::rollout_restart(&ns, &name) {
-                                        Ok(_) => app.notify(format!("rollout restart {}", name)),
-                                        Err(e) => app.notify(format!("restart failed: {}", e)),
-                                    },
-                                    Pending::Stop { name } => match kube::scale_deploy(&ns, &name, 0) {
-                                        Ok(_) => app.notify(format!("stopped {} (scaled → 0)", name)),
-                                        Err(e) => app.notify(format!("stop failed: {}", e)),
-                                    },
-                                    Pending::Cordon { node, on } => match kube::cordon(&node, on) {
-                                        Ok(_) => app.notify(format!("{} {}", if on { "cordoned" } else { "uncordoned" }, node)),
-                                        Err(e) => app.notify(format!("cordon failed: {}", e)),
-                                    },
-                                    Pending::DeletePod { name } => match kube::delete_pod(&ns, &name) {
-                                        Ok(_) => app.notify(format!("deleted pod {}", name)),
-                                        Err(e) => app.notify(format!("delete failed: {}", e)),
-                                    },
-                                    Pending::Apply { yaml, .. } => match kube::apply_manifest(&ns, &yaml, false) {
-                                        Ok(o) => {
-                                            app.preview = None;
-                                            app.notify(format!("applied — {}", o.lines().next().unwrap_or("ok")));
-                                        }
-                                        Err(e) => app.notify(format!("apply failed: {}", e.to_string().lines().next().unwrap_or(""))),
-                                    },
+                        // ←→/h/l 로 Yes/No 토글, Enter 로 선택 결정, y 즉시 실행, n/esc 취소.
+                        let execute = match k.code {
+                            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Tab => {
+                                app.confirm_yes = !app.confirm_yes;
+                                continue;
+                            }
+                            KeyCode::Char('y') | KeyCode::Char('Y') => true,
+                            KeyCode::Enter => app.confirm_yes,
+                            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => false,
+                            _ => continue, // 그 외 키는 무시(팝업 유지)
+                        };
+                        app.confirm = None;
+                        app.confirm_yes = true; // 다음 팝업 기본값 Yes(엔터로 진행)
+                        if !execute {
+                            app.notify("cancelled".to_string());
+                            continue;
+                        }
+                        // 실패 시 전체 이유를 preview(스크롤 가능)로 표시 — 토스트로 사라지지 않게.
+                        fn show_fail(app: &mut App, what: &str, detail: String) {
+                            app.notify(format!("{} 실패 — 자세한 이유는 창 참고", what));
+                            app.preview = Some((format!("⚠ {} 실패 — 이유 (q 닫기)", what), detail));
+                            app.preview_scroll = 0;
+                            app.preview_apply = false;
+                        }
+                        match pending {
+                            Pending::Scale { name, target } => match kube::scale_deploy(&ns, &name, target) {
+                                Ok(_) => app.notify(format!("scaled {} → {}", name, target)),
+                                Err(e) => show_fail(&mut app, "scale", e.to_string()),
+                            },
+                            Pending::Restart { name } => match kube::rollout_restart(&ns, &name) {
+                                Ok(_) => app.notify(format!("rollout restart {}", name)),
+                                Err(e) => show_fail(&mut app, "restart", e.to_string()),
+                            },
+                            Pending::Stop { name } => match kube::scale_deploy(&ns, &name, 0) {
+                                Ok(_) => app.notify(format!("stopped {} (scaled → 0)", name)),
+                                Err(e) => show_fail(&mut app, "stop", e.to_string()),
+                            },
+                            Pending::Cordon { node, on } => match kube::cordon(&node, on) {
+                                Ok(_) => app.notify(format!("{} {}", if on { "cordoned" } else { "uncordoned" }, node)),
+                                Err(e) => show_fail(&mut app, "cordon", e.to_string()),
+                            },
+                            Pending::DeletePod { name } => match kube::delete_pod(&ns, &name) {
+                                Ok(_) => app.notify(format!("deleted pod {}", name)),
+                                Err(e) => show_fail(&mut app, "delete", e.to_string()),
+                            },
+                            Pending::Apply { yaml, .. } => match kube::apply_manifest(&ns, &yaml, false) {
+                                Ok(o) => {
+                                    app.preview = None;
+                                    app.notify(format!("applied — {}", o.lines().next().unwrap_or("ok")));
                                 }
-                                app.confirm = None;
-                            }
-                            _ => {
-                                app.confirm = None;
-                                app.notify("cancelled".to_string());
-                            }
+                                Err(e) => show_fail(&mut app, "apply", e.to_string()),
+                            },
                         }
                         continue;
                     }

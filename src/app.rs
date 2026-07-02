@@ -211,7 +211,8 @@ pub struct App {
     prev_restarts: HashMap<String, i64>, // pod 재시작 델타 추적
     // ── 권한 모드 ──
     pub mode: Mode,                 // observe(기본)/debug/admin/danger — 기동 시 --mode
-    pub confirm: Option<Pending>,   // y/n 확인 대기 중인 변경 작업
+    pub confirm: Option<Pending>,   // 확인 대기 중인 변경 작업(팝업)
+    pub confirm_yes: bool,          // 확인 팝업의 Yes/No 선택 상태(기본 No=안전)
     // ── 크로스레이어 드릴 ──
     pub nav_stack: Vec<NavState>,   // pivot 브레드크럼(esc 로 되짚음)
     // ── Perf 드릴 ──
@@ -290,6 +291,7 @@ impl App {
             prev_restarts: HashMap::new(),
             mode: Mode::Observe,
             confirm: None,
+            confirm_yes: true, // 기본 Yes — 팝업에서 Enter 만 눌러도 진행(←→ 로 No 선택 가능)
             nav_stack: Vec::new(),
             perf_detail: None,
             epp_weights: HashMap::new(),
