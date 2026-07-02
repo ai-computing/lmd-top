@@ -831,22 +831,56 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
 }
 
 // ── Topology (구성/라우팅/분배 한눈에) ──────────────────
+// Flow 컴포넌트 타입별 색(구별용): 게이트웨이/EPP/모델/직결서비스/인프라.
+fn c_gw() -> Color {
+    C_ACC()
+}
+fn c_epp() -> Color {
+    Color::Magenta
+}
+fn c_svc() -> Color {
+    C_WARN()
+}
+/// `[TAG]` 형태의 타입 배지 span.
+fn tag(t: &str, c: Color) -> Span<'static> {
+    Span::styled(format!("[{}]", t), Style::default().fg(c).add_modifier(Modifier::BOLD))
+}
+
 fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     let s = &app.snap;
     let mut lines: Vec<Line> = Vec::new();
     let mut sel_line = 0usize; // 선택 route 의 줄 위치(스크롤용)
 
-    // Gateway → HTTPRoute → backend (모델 상태/가속기/노드 주석)
+    // 범례 — 각 계층 컴포넌트 타입을 색으로 구별.
+    lines.push(Line::from(vec![
+        Span::styled("layers: ", Style::default().fg(C_DIM())),
+        tag("GW", c_gw()),
+        Span::styled(" gateway  ", Style::default().fg(C_DIM())),
+        tag("EPP", c_epp()),
+        Span::styled(" picker  ", Style::default().fg(C_DIM())),
+        tag("MODEL", C_OK()),
+        Span::styled(" serving  ", Style::default().fg(C_DIM())),
+        tag("SVC", c_svc()),
+        Span::styled(" direct  ", Style::default().fg(C_DIM())),
+        tag("INFRA", C_DIM()),
+        Span::styled(" pod/node", Style::default().fg(C_DIM())),
+    ]));
+
+    // [GW] Gateway → [ROUTE] HTTPRoute → 각 route
     let gw = if s.gw_addr.is_empty() {
-        "llm-d-gateway (—)".to_string()
+        "llm-d-gateway  (—)".to_string()
     } else {
-        format!("llm-d-gateway  {}  {}", s.gw_addr, if s.gw_ok { "●Programmed" } else { "○" })
+        format!("llm-d-gateway  {}  {}", s.gw_addr, if s.gw_ok { "●Programmed" } else { "○ pending" })
     };
-    lines.push(Line::from(Span::styled(gw, Style::default().fg(C_OK()).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(vec![
+        tag("GW", c_gw()),
+        Span::raw(" "),
+        Span::styled(gw, Style::default().fg(c_gw()).add_modifier(Modifier::BOLD)),
+    ]));
     lines.push(Line::from(vec![
         Span::styled("└─ ", Style::default().fg(C_DIM())),
-        Span::styled("HTTPRoute ", Style::default().fg(C_DIM())),
-        Span::styled("openai-route", Style::default().fg(Color::White)),
+        tag("ROUTE", Color::White),
+        Span::styled(" openai-route", Style::default().fg(Color::White)),
     ]));
     let n = s.routes.len();
     for (i, r) in s.routes.iter().enumerate() {
@@ -854,27 +888,37 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         let rbr = if last { "   └─ " } else { "   ├─ " };
         let m = s.models.iter().find(|m| m.name == r.backend);
         let up = m.map(|m| m.ready > 0).unwrap_or(false);
-        let annot = match m {
-            Some(m) => format!("{}/{} {} [{}]", m.ready, m.desired, m.accel, m.engine),
-            None => "?".into(),
-        };
+        let is_pool = r.kind == "InferencePool";
+        // backend 계층 배지: InferencePool → [EPP], Service → [SVC](직결).
+        let (btag, bcol) = if is_pool { ("EPP", c_epp()) } else { ("SVC", c_svc()) };
         let sel = app.panel_focus == 0 && i == app.selected; // routes 패널 포커스일 때만 강조
         if sel {
             sel_line = lines.len();
         }
-        let mut rl = Line::from(vec![
+        let mut spans = vec![
             Span::styled(rbr, Style::default().fg(C_DIM())),
             dot(up),
-            Span::styled(format!("{:<9}", truncw(&r.path, 9)), Style::default().fg(Color::White)),
-            Span::styled("→ ", Style::default().fg(C_DIM())),
-            Span::styled(format!("{}:{}  ", r.kind, truncw(&r.backend, 22)), Style::default().fg(if up { C_OK() } else { C_DIM() })),
-            Span::styled(annot, Style::default().fg(C_DIM())),
-        ]);
+            Span::styled(format!("{:<13} ", truncw(&r.path, 13)), Style::default().fg(Color::White)),
+            Span::styled("→", Style::default().fg(C_DIM())),
+            tag(btag, bcol),
+            Span::styled(format!("{} ", truncw(&r.backend, 20)), Style::default().fg(bcol)),
+        ];
+        // 모델 계층 배지 + 상태/가속기/엔진.
+        spans.push(Span::styled("→", Style::default().fg(C_DIM())));
+        spans.push(tag("MODEL", if up { C_OK() } else { C_DIM() }));
+        match m {
+            Some(m) => spans.push(Span::styled(
+                format!("{} {}/{} {} [{}]", truncw(&m.name, 16), m.ready, m.desired, m.accel, m.engine),
+                Style::default().fg(if up { C_OK() } else { C_DIM() }),
+            )),
+            None => spans.push(Span::styled("(no serving)", Style::default().fg(C_WARN()))),
+        }
+        let mut rl = Line::from(spans);
         if sel {
             rl = rl.style(Style::default().bg(C_HL()).add_modifier(Modifier::BOLD)); // 선택 route(정렬 유지 위해 배경만)
         }
         lines.push(rl);
-        // 하위: 이 backend 의 파드들(트리 자식)
+        // 하위: [INFRA] 이 backend 의 파드들(트리 자식)
         let cont = if last { "      " } else { "   │  " };
         let pods: Vec<&crate::collect::PodRow> = s.pods.iter().filter(|p| p.name.starts_with(&r.backend)).collect();
         for (j, p) in pods.iter().enumerate() {
@@ -882,7 +926,8 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
             let pc = if p.phase == "Running" { C_OK() } else { C_DIM() };
             lines.push(Line::from(vec![
                 Span::styled(format!("{}{}", cont, pbr), Style::default().fg(C_TRACK())),
-                Span::styled(format!("{} ", truncw(&p.name, 32)), Style::default().fg(Color::Gray)),
+                tag("INFRA", C_DIM()),
+                Span::styled(format!(" {} ", truncw(&p.name, 30)), Style::default().fg(Color::Gray)),
                 Span::styled(format!("{} @{}", p.phase, p.node), Style::default().fg(pc)),
             ]));
         }
@@ -890,10 +935,10 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     // EPP 경유 여부 진단
     if !s.routes.is_empty() {
         if s.epp_in_path {
-            lines.push(Line::from(Span::styled("  ✓ routes go through InferencePool (EPP)", Style::default().fg(C_OK()))));
+            lines.push(Line::from(Span::styled("  ✓ routes go through InferencePool (EPP-routed)", Style::default().fg(C_OK()))));
         } else {
             lines.push(Line::from(Span::styled(
-                "  ⚠ HTTPRoute points to Service directly → InferencePool/EPP bypassed (EPP metrics empty)",
+                "  ⚠ some HTTPRoutes point to Service directly → EPP bypassed (no model-aware routing)",
                 Style::default().fg(C_WARN()),
             )));
         }
@@ -920,19 +965,46 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         pl.push(Line::from(Span::styled("(no InferencePool)", Style::default().fg(C_DIM()))));
     }
     for (pi, p) in s.pools.iter().enumerate() {
+        let sel = pfocus && pi == app.selected;
+        let epc = if p.ep_total == 0 { C_WARN() } else { C_OK() };
+        // 이 pool 을 가리키는 route 경로(들어오는 트래픽 입구).
+        let route_path = s
+            .routes
+            .iter()
+            .find(|r| r.kind == "InferencePool" && r.backend == p.name)
+            .map(|r| r.path.clone())
+            .unwrap_or_else(|| "(no route)".into());
+        // 메트릭 요약(값 있을 때만).
+        let mut metrics = String::new();
+        if p.kv.is_finite() && p.kv > 0.0 {
+            metrics.push_str(&format!("kv{:.0}% ", p.kv * 100.0));
+        }
+        if p.sat.is_finite() && p.sat > 0.0 {
+            metrics.push_str(&format!("sat{:.2} ", p.sat));
+        }
+        if p.queue.is_finite() && p.queue > 0.0 {
+            metrics.push_str(&format!("q{:.0}", p.queue));
+        }
         let mut pline = Line::from(vec![
-            Span::styled(format!("{:<18}", truncw(&p.name, 18)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!("ep {}/{} ", p.ep_ready, p.ep_total),
-                Style::default().fg(if p.ep_total == 0 { C_WARN() } else { C_OK() }),
-            ),
-            Span::styled(format!("EPP:{} ", if p.epp.is_empty() { "–" } else { &p.epp }), Style::default().fg(C_ACC())),
-            Span::styled(format!("sel={}", if p.selector.is_empty() { "–" } else { &p.selector }), Style::default().fg(C_DIM())),
+            tag("EPP", c_epp()),
+            Span::styled(format!(" {:<18}", truncw(&p.name, 18)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("●{}/{} ep ", p.ep_ready, p.ep_total), Style::default().fg(epc)),
+            Span::styled(format!("←{} ", truncw(&route_path, 14)), Style::default().fg(c_gw())),
+            Span::styled(format!("picker:{} ", if p.epp.is_empty() { "–" } else { &p.epp }), Style::default().fg(c_epp())),
+            Span::styled(metrics, Style::default().fg(C_DIM())),
         ]);
-        if pfocus && pi == app.selected {
+        if sel {
             pline.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
         }
         pl.push(pline);
+        // 선택된 pool 은 selector 상세 한 줄 더(어떤 파드를 고르는지).
+        if sel {
+            pl.push(Line::from(vec![
+                Span::styled("    selector ", Style::default().fg(C_DIM())),
+                Span::styled(if p.selector.is_empty() { "–".into() } else { p.selector.clone() }, Style::default().fg(Color::Gray)),
+                Span::styled("   ⏎ actions (rename/retarget/delete)", Style::default().fg(C_DIM())),
+            ]));
+        }
     }
     if !s.objectives.is_empty() {
         let so: Vec<String> = s.objectives.iter().map(|o| format!("{}(p{}→{})", o.name, o.priority, o.pool)).collect();
