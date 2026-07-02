@@ -139,6 +139,7 @@ struct Node {
     disk_used_gb: Option<f64>,
     disk_total_gb: Option<f64>,
     load1: Option<f64>,
+    npu: Option<String>, // NPU 드라이버/SDK 요약(라벨 기반) — 컴파일 가능 노드 판별
 }
 
 /// Deploy 컴파일 변형(아티팩트) — 모델 소스·저장 위치·컴파일/서빙 옵션.
@@ -215,6 +216,7 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             disk_used_gb: if nd.disk_total_gb > 0.0 { Some(nd.disk_used_gb) } else { None },
             disk_total_gb: if nd.disk_total_gb > 0.0 { Some(nd.disk_total_gb) } else { None },
             load1: opt(nd.load1),
+            npu: if nd.npu.is_empty() { None } else { Some(nd.npu.clone()) },
         })
         .collect();
 
