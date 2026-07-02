@@ -43,7 +43,7 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
         tabs(f, c[2], app);
         (c[3], c[4], Some(c[1]))
     };
-    if app.detail && matches!(app.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events) {
+    if app.detail && matches!(app.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events | View::Store) {
         detail_panel(f, body, app);
     } else {
         match app.view {
@@ -57,6 +57,7 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
             View::Launch => view_launch(f, body, app),
             View::Events => view_events(f, body, app),
             View::Nodes => view_nodes(f, body, app),
+            View::Store => view_store(f, body, app),
         }
     }
     fxs.body(f, body, dt); // 본문 트랜지션(오버레이 전에)
@@ -346,7 +347,9 @@ fn tabs(f: &mut Frame, area: Rect, app: &App) {
         } else {
             Style::default().fg(C_DIM())
         };
-        let label = if sel || !compact {
+        let label = if i >= 10 {
+            format!(" {} ", v.title()) // 숫자키(0-9) 밖 — Tab 으로 접근
+        } else if sel || !compact {
             format!(" {}:{} ", i, v.title())
         } else {
             format!(" {} ", i)
@@ -405,12 +408,12 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     let mut parts: Vec<String> = Vec::new();
     parts.push("↑↓ sel".into());
     match v {
-        Accel | Models | Overview | Pods | Nodes | Events => parts.push("⏎ detail".into()),
+        Accel | Models | Overview | Pods | Nodes | Events | Store => parts.push("⏎ detail".into()),
         Perf => parts.push("⏎ p50/95/99".into()),
         Routing => parts.push("⏎ model".into()),
         _ => {}
     }
-    if matches!(v, Accel | Models | Overview | Pods | Launch | Epp | Events | Nodes) {
+    if matches!(v, Accel | Models | Overview | Pods | Launch | Epp | Events | Nodes | Store) {
         parts.push("/ filter".into());
     }
     if app.sort_modes() > 1 {
@@ -1246,6 +1249,34 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    // Model artifact 상세 — 저장 위치 + 컴파일/서빙 옵션 전체.
+    if let Some(a) = app.selected_artifact() {
+        let mut lines = vec![
+            kv("model", &a.model, Color::White),
+            kv("engine", &a.engine, C_ACC()),
+            kv("image", if a.image.is_empty() { "–" } else { &a.image }, C_DIM()),
+            Line::from(""),
+            kv("source", if a.source.is_empty() { "– (not in container args/env)" } else { &a.source }, Color::White),
+            kv("storage", if a.mount.is_empty() { "– (no volume mount)" } else { &a.mount }, Color::White),
+            Line::from(""),
+            Line::from(Span::styled("compile / serve options", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))),
+        ];
+        if a.opts.is_empty() {
+            lines.push(Line::from(Span::styled("  (none detected in the container spec)", Style::default().fg(C_DIM()))));
+        }
+        for (k, v) in &a.opts {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<18} ", k), Style::default().fg(C_DIM())),
+                Span::styled(v.clone(), Style::default().fg(Color::White)),
+            ]));
+        }
+        f.render_widget(
+            Paragraph::new(lines).scroll((app.detail_scroll, 0)).wrap(Wrap { trim: false }).block(block(&format!("Model artifact{}", nav))),
+            area,
+        );
+        return;
+    }
+
     // Model 상세 — 정보 + per-model perf 지표 시계열(있으면 하단에 타임라인 그리드).
     if let Some(m) = app.selected_model() {
         let mut lines: Vec<Line> = Vec::new();
@@ -1902,6 +1933,53 @@ fn view_events(f: &mut Frame, area: Rect, app: &App) {
         f, area, rows, &widths,
         &["TYPE", "REASON", "OBJECT", "CNT", "MESSAGE"],
         "Events (k8s + llm-d, newest first)", app.selected, order.len(),
+    );
+}
+
+// ── Store (모델 저장 위치 + 컴파일/서빙 옵션) ───────────
+fn view_store(f: &mut Frame, area: Rect, app: &App) {
+    let order = app.order();
+    if order.is_empty() {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled("no model artifacts", Style::default().fg(C_DIM()))),
+                Line::from(Span::styled("source path / storage / compile options are read from each deployment's container spec.", Style::default().fg(C_DIM()))),
+            ])
+            .block(block("Store · model files & compile options")),
+            area,
+        );
+        return;
+    }
+    let rows: Vec<Row> = order
+        .iter()
+        .map(|&i| {
+            let a = &app.snap.artifacts[i];
+            let opts = if a.opts.is_empty() {
+                "–".to_string()
+            } else {
+                a.opts.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(" ")
+            };
+            let npu = a.opts.iter().any(|(k, _)| { let k = k.to_lowercase(); k.starts_with("rbln") || k.starts_with("furiosa") || k.contains("compile") });
+            Row::new(vec![
+                cellw(a.model.clone(), 20),
+                Cell::from(Span::styled(truncw(&a.engine, 12), Style::default().fg(C_ACC()))),
+                Cell::from(Span::styled(if a.source.is_empty() { "–".into() } else { truncw(&a.source, 28) }, Style::default().fg(Color::White))),
+                Cell::from(Span::styled(if a.mount.is_empty() { "–".into() } else { truncw(&a.mount, 30) }, Style::default().fg(C_DIM()))),
+                Cell::from(Span::styled(opts, Style::default().fg(if npu { C_WARN() } else { C_DIM() }))),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Min(14),
+        Constraint::Length(12),
+        Constraint::Length(28),
+        Constraint::Length(30),
+        Constraint::Min(18),
+    ];
+    render_list_table(
+        f, area, rows, &widths,
+        &["MODEL", "ENGINE", "SOURCE", "STORAGE", "COMPILE / SERVE OPTS"],
+        "Store · model files & compile options · ⏎ full", app.selected, order.len(),
     );
 }
 
