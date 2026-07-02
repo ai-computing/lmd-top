@@ -1991,29 +1991,55 @@ impl App {
     /// 배포 사전 점검(preflight) — apply 전에 서빙 전제조건 확인(사전 방어).
     pub fn deploy_preflight(&self, form: &DeployForm) -> Vec<(bool, String)> {
         let mut out: Vec<(bool, String)> = Vec::new();
-        // 서빙 이미지 지정 여부(미지정이면 TODO placeholder → apply 차단).
-        let has_img = self.img_serving.is_some() || form.vendor == "gpu"; // gpu 는 vLLM 기본 이미지 가정 아님 — 그래도 명시 권장
-        out.push((
-            self.img_serving.is_some(),
-            if self.img_serving.is_some() {
-                "image: LMD_SERVING_IMAGE 지정됨".into()
-            } else {
-                "image: 미지정 — TODO placeholder 라 apply 차단. LMD_SERVING_IMAGE 로 서빙 런타임 지정".into()
+        // 이미지 — deploy_form_submit 의 벤더별 기본값과 동일 판정(불일치로 오탐 방지).
+        //   furiosa=furiosaai/furiosa-llm:latest, gpu=vllm/vllm-openai:latest 기본 존재 → OK.
+        //   rbln 은 vllm_rbln 런타임이 든 이미지가 필요(기본 없음) → LMD_SERVING_IMAGE 미지정이면 차단.
+        let (img_ok, img_msg) = match form.vendor {
+            "furiosa" => (true, "이미지 준비됨 — furiosaai/furiosa-llm:latest (furiosa-llm serve)".to_string()),
+            "gpu" => {
+                let img = self.img_serving.clone().unwrap_or_else(|| "vllm/vllm-openai:latest".into());
+                (true, format!("이미지 준비됨 — {} (vLLM serve)", img))
+            }
+            _ => match &self.img_serving {
+                Some(img) => (true, format!("이미지 준비됨 — {} (vllm_rbln 런타임)", img)),
+                None => (false, "이미지 없음 — RBLN 서빙엔 vllm_rbln 런타임 이미지가 필요. LMD_SERVING_IMAGE 로 지정(또는 호스트 RBLN 스택 hostPath 방식)".into()),
             },
+        };
+        out.push((img_ok, format!("① 서빙 이미지: {}", img_msg)));
+        // ② 모델 아티팩트 경로 — 스토어/컴파일본이 있어야 서빙이 로드.
+        out.push((
+            !form.mount.is_empty(),
+            format!(
+                "② 모델 위치: {}",
+                if form.mount.is_empty() { "경로 미상 — 먼저 [c]로 컴파일하거나 스토어 경로 확인".into() } else { form.mount.clone() }
+            ),
         ));
-        let _ = has_img;
-        // 아티팩트 경로(스토어/컴파일본) 존재.
-        out.push((!form.mount.is_empty(), format!("artifact: {}", if form.mount.is_empty() { "경로 미상 — 컴파일/스토어 확인".into() } else { form.mount.clone() })));
-        // NPU 벤더면 타깃 노드에 드라이버.
+        // ③ NPU 벤더면 타깃 노드에 드라이버가 깔려 있어야 스케줄됨.
         if form.vendor != "gpu" {
             let want = if form.vendor == "rbln" { "RBLN" } else { "RNGD" };
             let any = self.snap.nodes.iter().any(|n| n.npu.to_uppercase().contains(want));
-            out.push((any, format!("node: {} 드라이버 노드 {}", want, if any { "있음" } else { "없음" })));
+            out.push((
+                any,
+                format!(
+                    "③ 가속기 드라이버: {} 드라이버가 있는 노드 {}",
+                    want,
+                    if any { "있음 — 스케줄 가능" } else { "없음 — 해당 노드가 클러스터에 없어 Pending 됨" }
+                ),
+            ));
         }
-        // 용량(deploy_fit 재사용).
+        // ④ 용량 — 요청 디바이스 수가 실제 유휴(리소스 기준)에 들어가야 함.
         let fit = self.deploy_fit(form);
         let cap_ok = matches!(fit.verdict, FitVerdict::Fits);
-        out.push((cap_ok, format!("capacity: 수요 {} · 리소스유휴 {} → {}", fit.demand, fit.resource_free, fit.verdict.label())));
+        out.push((
+            cap_ok,
+            format!(
+                "④ 용량: 디바이스 {}개 필요 · 유휴 {}개 → {}{}",
+                fit.demand,
+                fit.resource_free,
+                fit.verdict.label(),
+                if cap_ok { "" } else { " (서빙 stop 으로 확보하거나 replicas/devices↓)" }
+            ),
+        ));
         out
     }
 
