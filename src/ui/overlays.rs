@@ -91,7 +91,7 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
     let title = if form.editing {
         format!("compile · {} · TYPING custom — Enter/Esc confirm · Backspace del", form.vendor)
     } else {
-        format!("compile · {} · ↑↓ row · ←→ pick · e custom · Enter → manifest · q cancel", form.vendor)
+        format!("compile · {} · ↑↓ 항목 · ←→ 값 · e 직접입력 · Enter→적용확인(vi로 YAML 편집 가능) · q 취소", form.vendor)
     };
     f.render_widget(Paragraph::new(lines).block(block(&title)), area);
 }
@@ -174,9 +174,9 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
     let title = if form.editing {
         "deploy · 직접입력 중 — Enter/Esc 확인 · Backspace 삭제".to_string()
     } else if pf_ok {
-        "deploy · ↑↓ 항목 · ←→ 값 · e 직접입력 · Enter→매니페스트 미리보기 · q 취소".to_string()
+        "deploy · ↑↓ 항목 · ←→ 값 · e 직접입력 · Enter→적용확인(vi로 YAML 편집 가능) · q 취소".to_string()
     } else {
-        "deploy · preflight ✗ 있음(미리보기는 가능, apply 는 막힐 수 있음) · Enter→미리보기 · q 취소".to_string()
+        "deploy · preflight ✗ 있음 · Enter→적용확인(적용은 막힐 수 있음) · q 취소".to_string()
     };
     f.render_widget(Paragraph::new(lines).block(block(&title)), area);
 }
