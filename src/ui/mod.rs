@@ -908,6 +908,12 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         sp.push(Span::styled(format!("│ util {:.0}% ", avg), Style::default().fg(util_color(avg))));
         sp.push(Span::styled(format!("temp {:.0}°C ", avg_temp), Style::default().fg(temp_color(avg_temp))));
         sp.push(Span::styled(format!("│ VRAM {:.0}/{:.0}GB {:.0}% ", mu, mt, mempct), Style::default().fg(mem_color(mempct))));
+        // 노드 루트 디스크 집계(존재하는 노드만)
+        let (du, dt): (f64, f64) = s.nodes.iter().fold((0.0, 0.0), |(u, t), n| (u + n.disk_used_gb, t + n.disk_total_gb));
+        if dt > 0.0 {
+            let dp = du / dt * 100.0;
+            sp.push(Span::styled(format!("disk {:.0}% ", dp), Style::default().fg(mem_color(dp))));
+        }
         sp.push(Span::styled(format!("⚡{:.0}W ", pw), Style::default().fg(C_DIM())));
         sp.push(Span::styled(format!("│ models {}/{} ", ready, s.models.len()), Style::default().fg(if ready > 0 { C_OK() } else { C_DIM() })));
         // 세션 에너지 총합(R 리셋)
@@ -1140,7 +1146,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     if let Some(n) = app.selected_node() {
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(9), Constraint::Min(4), Constraint::Length(8)])
+            .constraints([Constraint::Length(10), Constraint::Min(4), Constraint::Length(8)])
             .split(area);
         let (hg, hc) = if n.cordoned {
             ("⊘ cordoned", C_WARN())
@@ -1162,6 +1168,10 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             Line::from(""),
             gauge_row("cpu", if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct }, &if n.cpu_pct.is_nan() { "–".into() } else { format!("{:.0} %", n.cpu_pct) }, util_color(n.cpu_pct.max(0.0)), barw),
             gauge_row("memory", mempct, &if n.mem_total_gb <= 0.0 { "–".into() } else { format!("{:.0} / {:.0} GB  ({:.0}%)", n.mem_used_gb, n.mem_total_gb, mempct) }, mem_color(mempct), barw),
+            {
+                let dp = if n.disk_total_gb > 0.0 { n.disk_used_gb / n.disk_total_gb * 100.0 } else { 0.0 };
+                gauge_row("disk /", dp, &if n.disk_total_gb <= 0.0 { "–".into() } else { format!("{:.0} / {:.0} GB  ({:.0}%)", n.disk_used_gb, n.disk_total_gb, dp) }, mem_color(dp), barw)
+            },
             Line::from(vec![
                 Span::styled(format!("{:<8} ", "load1"), Style::default().fg(C_DIM())),
                 Span::styled(if n.load1.is_nan() { "–".into() } else { format!("{:.2}", n.load1) }, Style::default().fg(C_WARN()).add_modifier(Modifier::BOLD)),
@@ -1191,13 +1201,21 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             format!("devices on {} ({}) · ↑↓ move · ▸#{} history below", truncw(&n.name, 16), devs.len(), app.dev_sel)
         };
         f.render_widget(Paragraph::new(dl).block(block(&dtitle)), rows[1]);
-        // 하단 타임라인: dev_sel==0 → 노드 host cpu/mem 요약, 아니면 선택 device 의 util/VRAM.
-        let (l, r) = two_panes(rows[2], 50);
+        // 하단 타임라인: dev_sel==0 → 노드 host cpu/mem/disk 요약, 아니면 선택 device 의 util/VRAM.
         if app.dev_sel == 0 || devs.is_empty() {
             let k = format!("nod:{}", n.name);
-            bar_timeline(f, l, app, &format!("{}:cpu", k), "host cpu", "%", Some(100.0));
-            bar_timeline(f, r, app, &format!("{}:mem", k), "host mem", "%", Some(100.0));
+            let mut dash = Dashboard::new().min_width(24);
+            let kc = k.clone();
+            dash = dash.cell(move |f, r| bar_timeline(f, r, app, &format!("{}:cpu", kc), "host cpu", "%", Some(100.0)));
+            let km = k.clone();
+            dash = dash.cell(move |f, r| bar_timeline(f, r, app, &format!("{}:mem", km), "host mem", "%", Some(100.0)));
+            if n.disk_total_gb > 0.0 {
+                let kd = k.clone();
+                dash = dash.cell(move |f, r| bar_timeline(f, r, app, &format!("{}:disk", kd), "disk /", "%", Some(100.0)));
+            }
+            dash.render(f, rows[2]);
         } else if let Some(a) = devs.get(app.dev_sel - 1) {
+            let (l, r) = two_panes(rows[2], 50);
             let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
             let name = format!("{} {}", a.disp(), a.id);
             bar_timeline(f, l, app, &format!("{}:util", k), &format!("{} util", name), "%", Some(100.0));
@@ -1816,6 +1834,11 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
         h.push(Span::styled(
             if n.mem_total_gb <= 0.0 { "  mem       –   ".into() } else { format!("  mem {:>4.0}/{:>4.0}GB", n.mem_used_gb, n.mem_total_gb) },
             Style::default().fg(mem_color(memp)),
+        ));
+        let diskp = if n.disk_total_gb > 0.0 { n.disk_used_gb / n.disk_total_gb * 100.0 } else { 0.0 };
+        h.push(Span::styled(
+            if n.disk_total_gb <= 0.0 { "  disk      –  ".into() } else { format!("  disk {:>3.0}%", diskp) },
+            Style::default().fg(mem_color(diskp)),
         ));
         h.push(Span::styled(
             if n.load1.is_nan() { "  load –".into() } else { format!("  load {:.1}", n.load1) },

@@ -2,6 +2,12 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.22.0]
+### Added — 노드 디스크 사용량 모니터링
+- 루트 파일시스템(`mountpoint="/"`) 사용량을 `node_filesystem_*` 로 수집(NodeInfo.disk_used/total).
+- 표시: Nodes 행(`disk NN%`), Node 상세 게이지 + 요약 타임라인(cpu/mem/disk 3-up), Overview 클러스터 라인 집계(`disk NN%`).
+- 디스크 90% 초과 시 알림(`node X disk NN% full`). 히스토리 키 `nod:{node}:disk`.
+
 ## [0.21.1]
 ### Added — Events 상세(Enter)
 - 이벤트 표에서 잘리던 **전체 메시지**를 Enter 로 열어 읽음: type/count/reason/object + 전체 message(줄바꿈). 깊이 갭 보완.
