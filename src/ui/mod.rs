@@ -324,7 +324,7 @@ fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
     let mut para = Paragraph::new(Line::from(spans));
     // 신규 알림 플래시: flash_until 이전이면 ~0.6s 주기로 요약바 전체를 반전.
     let now = crate::collect::now_secs();
-    if now < app.flash_until && (app.tick / 3) % 2 == 0 {
+    if now < app.flash_until && (app.tick / 3).is_multiple_of(2) {
         para = para.style(Style::default().bg(C_BAD()).fg(Color::Black).add_modifier(Modifier::BOLD));
     }
     f.render_widget(para, area);
@@ -1031,6 +1031,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     );
 
     // 가속기: (종류,노드)별 집계 — 한눈에 + 절대 메모리(GB) + health 아이콘
+    #[allow(clippy::type_complexity)]
     let mut groups: Vec<(AccelKind, String, usize, f64, f64, f64, bool, bool, String)> = Vec::new();
     for a in &s.accel {
         if let Some(g) = groups.iter_mut().find(|g| g.0 == a.kind && g.1 == a.node) {
@@ -1515,6 +1516,7 @@ fn rate(v: f64) -> String {
 }
 /// htop 식 braille 영역 그래프 타임라인 — 셀당 2×4 점으로 고해상도, 시점 값별 색(초록→빨강).
 /// 최신값 오른쪽(now) 고정. 외부 크레이트 없이 프레임 버퍼 직접 렌더. ymax_opt=Some(100)→0~100.
+#[allow(clippy::needless_range_loop)] // DOTS[dr][dc] 2D 인덱싱이 더 명확
 fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, unit: &str, ymax_opt: Option<f64>) {
     let raw = app.hist_for(key);
     let cur = raw.last().copied().unwrap_or(0);

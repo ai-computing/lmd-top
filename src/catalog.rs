@@ -51,6 +51,7 @@ pub fn load() -> Vec<CatModel> {
 }
 
 /// 배치 준비 상태.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq)]
 pub enum Ready {
     Ready,         // 즉시 배포 가능(용량 충분 + 가중치/아티팩트 준비)

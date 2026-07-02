@@ -12,18 +12,24 @@ llm-d = Kubernetes-native distributed inference stack (vLLM/SGLang 를 클러스
 
 ---
 
-## 현재 상태 — Phase 1 (Monitor) ✅ 완료 (v0.5.1)
+## 현재 상태 — Phase 1 (Monitor) ✅ 완료 (v0.31)
 
-10개 상관 뷰 + 능동 알림 + 액션까지 갖춘 **성숙한 관측 도구**. 더는 "폴리시"가 병목이 아니며,
-다음 노력은 **차별화 기능(아래)과 컨트롤 플레인**으로 옮겨간다.
+10개 상관 뷰 + 능동 알림 + 액션 + 배포 라이프사이클 관측까지 갖춘 **성숙한 관측 도구**.
+더는 "폴리시"가 병목이 아니며, 다음 노력은 **차별화 기능(아래)과 컨트롤 플레인**으로 옮겨간다.
 
-**출시된 뷰(0–9)**: Overview(Σ·LED 그리드·VRAM 구성 바·EPP 경로·진단) · Accel(per-device + area-fill 타임라인) ·
-Models(deploy 기반, `service` 조인) · EPP(scorer/weight/picker + 요청분배) · Topo(Gateway→route→pool + SLO/autoscale + **EPP 우회 진단**) ·
-Pods · Perf(구간별 p95 **QUEUE→PREFILL→DECODE→TPOT→E2E** + preempt, **런칭 모델 전부 표시**) · Launch(카탈로그×재고, read-only) · Events(k8s+llm-d) · Nodes(health/placement).
+**출시된 뷰(0–9)**: Overview(Σ·LED 그리드·VRAM 구성 바·**Status 진단 밴드**·EPP 경로) · Accel(per-device + braille 타임라인) ·
+Models(deploy 기반, `service` 조인) · EPP(scorer/weight/picker + 요청분배) · **Flow**(Gateway→route→pool + SLO/autoscale + **EPP 우회 진단**) ·
+Pods · Perf(구간별 p95 **QUEUE→PREFILL→DECODE→TPOT→E2E** + preempt, **active 모델만 + 정렬**) ·
+**Deploy**(모델 계열→컴파일 변형 트리 + 저장 노드/disk + 배치 타깃 + 카탈로그 가능성; Launch 승격) · Events(k8s+llm-d, `⏎` 전체) · Nodes(health/placement + **disk**).
 
-**출시된 교차 기능**: 능동 알림(`A` — 임계/헬스 감지 → 요약바 플래시 + 토스트 + 히스토리) ·
-로그 오버레이(`l`) · scale 액션(`s`) · Grafana 열기(`g`) · 필터(`/`) · 정렬(`o`) · 드릴다운(`⏎`) ·
-스크롤바+위치 카운터 · **데이터 freshness 시계** · 반응형 탭 · 활성 패널 포커스 · 3테마(default/고대비/**색맹**) · zoom(`z`) · pause(space) · 마우스.
+**출시된 교차 기능**: 능동 알림(`A`) · 로그(`l`) · scale(`s`)/rollout(`S`) · Grafana(`g`) · 필터(`/`) · 정렬(`o`) · 드릴다운(`⏎`) ·
+**멀티 패널 포커스(`w`, Deploy/EPP/Flow/Perf)** · Tab/**Shift+Tab** 뷰 순환 · 스크롤바+카운터 · **오버플로 처리(스크롤/+N more)** ·
+데이터 freshness 시계 · 반응형 탭 · **4테마(soft 기본/classic/고대비/색맹)** · **은은한 애니메이션(`f`, tachyonfx)** · zoom(`z`) · pause · 마우스 ·
+**노드 disk 모니터링** · **모델 정체성 정규화(HF id 계열 그룹)**.
+
+**Phase 1.5 브리지(Phase 2 준비)**: 공유 **모델 스토어**(SMB RWX PVC) + 디스커버리 CronJob(`model-inventory`) →
+lmd-top 이 배포 안 된(스토어) 모델·컴파일본까지 Deploy 에 표시. 컴파일 스크립트도 스토어-aware(`MODEL_STORE`).
+*(→ Track A 의 compile/deploy 자동화로 이어짐)*
 
 ---
 
