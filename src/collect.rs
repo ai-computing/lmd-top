@@ -1542,4 +1542,47 @@ mod tests {
         assert_eq!(strip_variant_tags("vllm-koni-rbln"), "koni");
         assert_eq!(strip_variant_tags("Model-BF16-Instruct"), "model");
     }
+
+    #[test]
+    fn to_gb_and_norm_pct() {
+        assert_eq!(to_gb(2.0e9), 2.0);
+        assert_eq!(to_gb(f64::NAN), 0.0); // NaN → 0
+        assert_eq!(norm_pct(0.82), 82.0); // 0..1 비율 → %
+        assert_eq!(norm_pct(82.0), 82.0); // 이미 % 면 그대로
+        assert_eq!(norm_pct(f64::NAN), 0.0);
+        assert_eq!(norm_pct(0.0), 0.0); // 0 은 0 (비율 확대 안 함)
+    }
+
+    #[test]
+    fn match_model_fuzzy() {
+        let mut m: BTreeMap<String, Series> = BTreeMap::new();
+        m.insert("koni-llama3.1-8b".into(), Series { labels: BTreeMap::new(), value: 1.0 });
+        // 비영숫자 무시 매칭: "koni-llama31-8b-rbln" ⊃ "konillama318b"
+        assert_eq!(match_model("koni-llama31-8b-rbln", &m).as_deref(), Some("koni-llama3.1-8b"));
+        assert_eq!(match_model("totally-different", &m), None);
+    }
+
+    #[test]
+    fn parse_epp_scorers() {
+        let yaml = "schedulingProfiles:\n  - name: default\n    plugins:\n      - pluginRef: kv-cache-scorer\n        weight: 2\n      - pluginRef: queue-scorer\n        weight: 1\n";
+        let cfg = parse_epp(yaml).expect("parses");
+        assert_eq!(cfg.profile, "default");
+        assert_eq!(cfg.scorers.len(), 2);
+        assert_eq!(cfg.scorers[0], ("kv-cache-scorer".to_string(), 2.0));
+        // 프로파일 없는 입력은 graceful — scorers 빈 EppCfg.
+        assert_eq!(parse_epp("42").map(|c| c.scorers.len()), Some(0));
+    }
+
+    #[test]
+    fn model_container_skips_sidecar() {
+        // 프록시 사이드카가 [0], vLLM 모델서버가 [1] → 모델서버 선택.
+        let spec = serde_json::json!({
+            "containers": [
+                { "name": "proxy", "image": "envoyproxy/envoy:v1", "args": [] },
+                { "name": "server", "image": "vllm/vllm-openai", "args": ["--model", "/models/x"] }
+            ]
+        });
+        let c = model_container(&spec);
+        assert_eq!(c["name"].as_str(), Some("server"));
+    }
 }

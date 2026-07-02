@@ -215,4 +215,33 @@ mod tests {
     fn dechunk_size_zero_terminates() {
         assert_eq!(dechunk("0\r\n\r\n"), "");
     }
+
+    #[test]
+    fn parse_success_and_labels() {
+        let body = r#"{"status":"success","data":{"result":[
+            {"metric":{"service":"koni","le":"1"},"value":[1.0,"3.5"]}
+        ]}}"#;
+        let v = parse(body).expect("ok");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].value, 3.5);
+        assert_eq!(v[0].l("service"), "koni");
+    }
+
+    #[test]
+    fn parse_plus_inf_and_missing() {
+        // Prometheus 는 histogram_quantile 무데이터 시 "+Inf"/"NaN" 문자열을 반환.
+        let body = r#"{"status":"success","data":{"result":[
+            {"metric":{},"value":[1.0,"+Inf"]},
+            {"metric":{},"value":[1.0,"NaN"]}
+        ]}}"#;
+        let v = parse(body).expect("ok");
+        assert!(v[0].value.is_infinite());
+        assert!(v[1].value.is_nan());
+    }
+
+    #[test]
+    fn parse_non_success_is_err() {
+        assert!(parse(r#"{"status":"error","error":"boom"}"#).is_err());
+        assert!(parse("not json").is_err());
+    }
 }
