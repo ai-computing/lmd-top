@@ -1,0 +1,57 @@
+# 컴파일 Job (dry-run 미리보기) — 검토 후 `kubectl apply -f -` 로 적용.
+# 모델 Qwen/Qwen2.5-0.5B-Instruct → rbln 컴파일 → 공유 스토어(compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/rbln-ca22-tp4-s8192).
+# 옵션(컴파일 타임 고정): tp=4  max-len=8192  batch=1  attn=flash_attn  kvpart=4096  quant=none  npu=RBLN-CA22  devices=4  node=etri-001(4)
+# RBLN 컴파일 스크립트(인라인) — create_runtimes=False + 로컬빌드→스토어복사(실기 검증).
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: compile-qwen--qwen2-5-0-5b-instruct-script, namespace: llm-serving }
+data:
+  compile.py: |
+    import os, shutil
+    from optimum.rbln import RBLNAutoModelForCausalLM as M
+    g = os.environ.get; o = os.environ["OUTPUT"]; loc = "/work/out"
+    m = M.from_pretrained(os.environ["MODEL_ID"], export=True, rbln_create_runtimes=False,
+      rbln_npu=g("RBLN_NPU", "RBLN-CA22"),
+      rbln_tensor_parallel_size=int(g("RBLN_TENSOR_PARALLEL_SIZE", "1")),
+      rbln_max_seq_len=int(g("RBLN_MAX_SEQ_LEN", "4096")),
+      rbln_batch_size=int(g("RBLN_BATCH_SIZE", "1")))
+    m.save_pretrained(loc)
+    os.makedirs(o, exist_ok=True)
+    for f in os.listdir(loc):
+      s = os.path.join(loc, f); d = os.path.join(o, f)
+      shutil.copytree(s, d, dirs_exist_ok=True) if os.path.isdir(s) else shutil.copy2(s, d)
+    print("COMPILE_DONE", os.listdir(o))
+---
+# RBLN: optimum-rbln 인라인 스크립트(create_runtimes=False). 이미지 placeholder(TODO-)면 LMD_COMPILE_IMAGE_RBLN 필요.
+apiVersion: batch/v1
+kind: Job
+metadata: { name: compile-qwen--qwen2-5-0-5b-instruct, namespace: llm-serving }
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector: { kubernetes.io/hostname: etri-001 }
+      volumes:
+        - { name: store, persistentVolumeClaim: { claimName: model-store } }
+        - { name: script, configMap: { name: compile-qwen--qwen2-5-0-5b-instruct-script } }
+        - { name: work, emptyDir: {} }
+      containers:
+        - name: compile
+          image: TODO-rbln-compiler-image
+          resources: { limits: { rebellions.ai/ATOM: 4 } }
+          env:
+                         - { name: MODEL_STORE, value: "/mnt/store" }
+                         - { name: MODEL_ID, value: "Qwen/Qwen2.5-0.5B-Instruct" }
+                         - { name: OUTPUT, value: "/mnt/store/compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/rbln-ca22-tp4-s8192" }
+                         - { name: RBLN_TENSOR_PARALLEL_SIZE, value: "4" }
+                         - { name: RBLN_MAX_SEQ_LEN, value: "8192" }
+                         - { name: RBLN_BATCH_SIZE, value: "1" }
+                         - { name: RBLN_ATTN_IMPL, value: "flash_attn" }
+                         - { name: RBLN_KVCACHE_PARTITION_LEN, value: "4096" }
+                         - { name: RBLN_NPU, value: "RBLN-CA22" }
+          volumeMounts:
+            - { name: store, mountPath: /mnt/store }
+            - { name: script, mountPath: /scripts, readOnly: true }
+            - { name: work, mountPath: /work }
+          command: ["python3", "/scripts/compile.py"]

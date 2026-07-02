@@ -109,6 +109,105 @@ pub fn resource_yaml(kind: &str, ns: Option<&str>, name: &str) -> Result<String>
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+// ── HTTPRoute 편집(라우트 관리) — get→JSON 수정→server-side apply ──
+fn route_load(ns: &str, name: &str) -> Result<serde_json::Value> {
+    let out = std::process::Command::new("kubectl")
+        .args(["get", "httproute", name, "-n", ns, "-o", "json", "--request-timeout=8s"])
+        .output()?;
+    if !out.status.success() {
+        return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(serde_json::from_slice(&out.stdout)?)
+}
+
+fn route_save(ns: &str, mut v: serde_json::Value) -> Result<String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    // SSA 를 위해 서버 관리 필드 제거(resourceVersion/managedFields/status 등).
+    if let Some(m) = v.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+        for k in ["managedFields", "resourceVersion", "uid", "creationTimestamp", "generation"] {
+            m.remove(k);
+        }
+    }
+    if let Some(o) = v.as_object_mut() {
+        o.remove("status");
+    }
+    let body = serde_json::to_string(&v)?;
+    let mut cmd = std::process::Command::new("kubectl");
+    cmd.args(["apply", "--server-side", "--force-conflicts", "-n", ns, "-f", "-", "--request-timeout=8s"]);
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?.write_all(body.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// 라우트 경로 변경(rename) — HTTPRoute 내 matches[].path.value == old 를 new 로.
+pub fn route_set_path(ns: &str, route: &str, old: &str, new: &str) -> Result<String> {
+    let mut v = route_load(ns, route)?;
+    let mut found = false;
+    if let Some(rules) = v["spec"]["rules"].as_array_mut() {
+        for rule in rules.iter_mut() {
+            if let Some(ms) = rule["matches"].as_array_mut() {
+                for m in ms.iter_mut() {
+                    if m["path"]["value"].as_str() == Some(old) {
+                        m["path"]["value"] = serde_json::Value::String(new.to_string());
+                        found = true;
+                    }
+                }
+            }
+        }
+    }
+    if !found {
+        return Err(anyhow!("path {} not found in httproute {}", old, route));
+    }
+    route_save(ns, v)
+}
+
+/// 라우트 규칙 삭제(delete) — 해당 path 를 가진 rule 제거.
+pub fn route_delete_rule(ns: &str, route: &str, path: &str) -> Result<String> {
+    let mut v = route_load(ns, route)?;
+    if let Some(rules) = v["spec"]["rules"].as_array_mut() {
+        let before = rules.len();
+        rules.retain(|rule| {
+            rule["matches"]
+                .as_array()
+                .map(|ms| !ms.iter().any(|m| m["path"]["value"].as_str() == Some(path)))
+                .unwrap_or(true)
+        });
+        if rules.len() == before {
+            return Err(anyhow!("path {} not found in httproute {}", path, route));
+        }
+    }
+    route_save(ns, v)
+}
+
+/// 라우트 백엔드 변경(retarget) — 해당 path 의 backendRefs 를 새 backend/kind 로.
+pub fn route_retarget(ns: &str, route: &str, path: &str, backend: &str, kind: &str) -> Result<String> {
+    let mut v = route_load(ns, route)?;
+    let group = if kind == "InferencePool" { "inference.networking.k8s.io" } else { "" };
+    let mut found = false;
+    if let Some(rules) = v["spec"]["rules"].as_array_mut() {
+        for rule in rules.iter_mut() {
+            let hit = rule["matches"]
+                .as_array()
+                .map(|ms| ms.iter().any(|m| m["path"]["value"].as_str() == Some(path)))
+                .unwrap_or(false);
+            if hit {
+                rule["backendRefs"] = serde_json::json!([{ "group": group, "kind": kind, "name": backend }]);
+                found = true;
+            }
+        }
+    }
+    if !found {
+        return Err(anyhow!("path {} not found in httproute {}", path, route));
+    }
+    route_save(ns, v)
+}
+
 /// 노드 cordon/uncordon — 스케줄 차단/해제. admin 액션(네임스페이스 무관).
 pub fn cordon(node: &str, on: bool) -> Result<()> {
     let verb = if on { "cordon" } else { "uncordon" };

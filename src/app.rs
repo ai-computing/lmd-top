@@ -57,6 +57,9 @@ pub enum Pending {
     Apply { title: String, yaml: String }, // 미리보기 매니페스트를 실제 kubectl apply
     Cordon { node: String, on: bool }, // 노드 스케줄 차단/해제
     DeletePod { name: String },        // 파드 삭제
+    RouteRename { route: String, old: String, new: String }, // HTTPRoute 경로 변경
+    RouteRetarget { route: String, path: String, backend: String, kind: String }, // 백엔드 변경
+    RouteDelete { route: String, path: String }, // 라우트 규칙 삭제
 }
 impl Pending {
     /// 확인 프롬프트 문구.
@@ -68,6 +71,9 @@ impl Pending {
             Pending::Apply { title, .. } => format!("apply manifest to cluster — {}?", title),
             Pending::Cordon { node, on } => format!("{} node {}?", if *on { "cordon (block scheduling on)" } else { "uncordon (allow scheduling on)" }, node),
             Pending::DeletePod { name } => format!("delete pod {} (reschedules)?", name),
+            Pending::RouteRename { old, new, .. } => format!("rename route {} → {}?", old, new),
+            Pending::RouteRetarget { path, backend, kind, .. } => format!("retarget {} → {}:{}?", path, kind, backend),
+            Pending::RouteDelete { path, route } => format!("delete route {} from {}?", path, route),
         }
     }
 }
@@ -213,6 +219,7 @@ pub struct App {
     pub mode: Mode,                 // observe(기본)/debug/admin/danger — 기동 시 --mode
     pub confirm: Option<Pending>,   // 확인 대기 중인 변경 작업(팝업)
     pub confirm_yes: bool,          // 확인 팝업의 Yes/No 선택 상태(기본 No=안전)
+    pub route_form: Option<RouteForm>, // 라우트 편집 폼(rename/retarget)
     // ── 크로스레이어 드릴 ──
     pub nav_stack: Vec<NavState>,   // pivot 브레드크럼(esc 로 되짚음)
     // ── Perf 드릴 ──
@@ -292,6 +299,7 @@ impl App {
             mode: Mode::Observe,
             confirm: None,
             confirm_yes: true, // 기본 Yes — 팝업에서 Enter 만 눌러도 진행(←→ 로 No 선택 가능)
+            route_form: None,
             nav_stack: Vec::new(),
             perf_detail: None,
             epp_weights: HashMap::new(),
@@ -349,6 +357,46 @@ impl App {
         } else {
             None
         }
+    }
+
+    /// Flow 에서 선택된 route(패널 0 포커스일 때만).
+    pub fn selected_route(&self) -> Option<crate::collect::Route> {
+        if self.view == View::Routing && self.panel_focus == 0 {
+            self.sel_orig().and_then(|i| self.snap.routes.get(i)).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// 라우트 rename 폼 열기 — 현재 경로를 초기값으로, 텍스트 편집.
+    pub fn open_route_rename(&mut self) {
+        let Some(r) = self.selected_route() else { return };
+        if r.route.is_empty() {
+            self.notify("route: HTTPRoute 이름 미상 — 편집 불가".into());
+            return;
+        }
+        self.route_form = Some(RouteForm { route: r.route, path: r.path.clone(), rename: true, value: r.path, choices: vec![], cursor: 0 });
+    }
+
+    /// 라우트 retarget 폼 열기 — 후보 백엔드(InferencePool/Service) 목록에서 선택.
+    pub fn open_route_retarget(&mut self) {
+        let Some(r) = self.selected_route() else { return };
+        if r.route.is_empty() {
+            self.notify("route: HTTPRoute 이름 미상 — 편집 불가".into());
+            return;
+        }
+        // 후보: 현재 InferencePool 들 + 서빙 Service 들(kind:name).
+        let mut choices: Vec<String> = self.snap.pools.iter().map(|p| format!("InferencePool:{}", p.name)).collect();
+        for m in &self.snap.models {
+            let s = format!("Service:{}", m.name);
+            if !choices.contains(&s) {
+                choices.push(s);
+            }
+        }
+        let cur = format!("{}:{}", r.kind, r.backend);
+        let cursor = choices.iter().position(|c| *c == cur).unwrap_or(0);
+        let value = choices.get(cursor).cloned().unwrap_or_default();
+        self.route_form = Some(RouteForm { route: r.route, path: r.path, rename: false, value, choices, cursor });
     }
 
     /// 선택된 per-model perf 행의 모델(서비스)명 — Perf 드릴용. sel_orig 경유(정렬/필터 안전).
@@ -1738,6 +1786,14 @@ impl App {
                 items.push(ActionItem { key: 'D', label: "Delete", desc: "delete pod (reschedules)", action: Action::Delete });
                 (format!("actions · {}", p.name), p.name.clone())
             }
+            View::Routing if self.panel_focus == 0 => {
+                // Flow 의 선택된 라우트 — 경로 관리.
+                let Some(r) = self.selected_route() else { return };
+                items.push(ActionItem { key: 'r', label: "Rename", desc: "change gateway path (/accel/model)", action: Action::RouteRename });
+                items.push(ActionItem { key: 't', label: "Retarget", desc: "point path at another pool/service", action: Action::RouteRetarget });
+                items.push(ActionItem { key: 'D', label: "Delete", desc: "remove this route rule", action: Action::RouteDelete });
+                (format!("route · {}", r.path), r.path.clone())
+            }
             _ => return,
         };
         self.action_menu = Some(ActionMenu { title, subject, items, cursor: 0 });
@@ -2798,7 +2854,7 @@ mod tests {
         a.snap = Snapshot {
             models: vec![model("m1")],
             pods: vec![pod("m1-abc")],
-            routes: vec![Route { path: "/v1".into(), backend: "m1".into(), kind: "InferencePool".into() }],
+            routes: vec![Route { path: "/v1".into(), backend: "m1".into(), kind: "InferencePool".into(), route: "openai-route".into() }],
             ..Default::default()
         };
         a.view = View::Routing;
