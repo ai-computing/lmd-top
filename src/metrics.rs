@@ -35,6 +35,8 @@ pub const NODE_LOAD1: &str = "node_load1";
 pub const NODE_MEM_TOTAL: &str = "node_memory_MemTotal_bytes";
 pub const NODE_MEM_AVAIL: &str = "node_memory_MemAvailable_bytes";
 pub const NODE_CPU_SECONDS: &str = "node_cpu_seconds_total";
+pub const NODE_FS_SIZE: &str = "node_filesystem_size_bytes";
+pub const NODE_FS_AVAIL: &str = "node_filesystem_avail_bytes";
 
 // ── vLLM (model server) ──────────────────────────────
 pub const VLLM_REQ_SUCCESS: &str = "vllm:request_success_total";
@@ -83,6 +85,7 @@ pub const DEPS: &[(&str, &str, &str)] = &[
     ("Host (node)", NODE_MEM_TOTAL, "node/unified mem total unavailable"),
     ("Host (node)", NODE_MEM_AVAIL, "node/unified mem used unavailable"),
     ("Host (node)", NODE_CPU_SECONDS, "host CPU% unavailable"),
+    ("Host (node)", NODE_FS_SIZE, "node disk usage unavailable"),
     ("vLLM (model server)", VLLM_RUNNING, "Models run/wait empty"),
     ("vLLM (model server)", VLLM_WAITING, "Models run/wait empty"),
     ("vLLM (model server)", VLLM_KV, "KV% empty"),

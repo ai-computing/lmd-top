@@ -587,6 +587,10 @@ impl App {
                 }
                 let memp = if n.mem_total_gb > 0.0 { n.mem_used_gb / n.mem_total_gb * 100.0 } else { 0.0 };
                 self.push_hist(&format!("{}:mem", k), memp.round().clamp(0.0, 100.0) as u64);
+                if n.disk_total_gb > 0.0 {
+                    let dp = n.disk_used_gb / n.disk_total_gb * 100.0;
+                    self.push_hist(&format!("{}:disk", k), dp.round().clamp(0.0, 100.0) as u64);
+                }
                 if !n.load1.is_nan() {
                     self.push_hist(&format!("{}:load", k), (n.load1 * 10.0).round().max(0.0) as u64);
                 }
@@ -939,6 +943,13 @@ pub fn snapshot_alerts(snap: &Snapshot) -> Vec<Alert> {
             out.push(Alert { ts: now, sev: Sev::Bad, key: format!("notready:{}", n.name), msg: format!("node {} NotReady", n.name) });
         } else if n.pressure {
             out.push(Alert { ts: now, sev: Sev::Warn, key: format!("pressure:{}", n.name), msg: format!("node {} under pressure", n.name) });
+        }
+        // 루트 디스크 고갈 경보(90% 초과).
+        if n.disk_total_gb > 0.0 {
+            let dp = n.disk_used_gb / n.disk_total_gb * 100.0;
+            if dp > 90.0 {
+                out.push(Alert { ts: now, sev: Sev::Warn, key: format!("disk:{}", n.name), msg: format!("node {} disk {:.0}% full", n.name, dp) });
+            }
         }
     }
     for p in &snap.pods {

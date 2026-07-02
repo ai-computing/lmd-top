@@ -78,6 +78,8 @@ pub struct NodeInfo {
     pub mem_used_gb: f64,
     pub mem_total_gb: f64,
     pub cpu_pct: f64,
+    pub disk_used_gb: f64,  // 루트 파일시스템(mountpoint="/")
+    pub disk_total_gb: f64,
     pub ready: bool,
     pub cordoned: bool,
     pub pressure: bool, // Memory/Disk/PID pressure 중 하나라도
@@ -517,11 +519,15 @@ async fn collect_gpu(p: &str) -> Vec<Accel> {
 }
 
 async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
-    let (load, mt, ma, cpu, node_res) = tokio::join!(
+    let fs_size_q = format!("{}{{mountpoint=\"/\"}}", metrics::NODE_FS_SIZE);
+    let fs_avail_q = format!("{}{{mountpoint=\"/\"}}", metrics::NODE_FS_AVAIL);
+    let (load, mt, ma, cpu, ds, da, node_res) = tokio::join!(
         prom::query(p, metrics::NODE_LOAD1),
         prom::query(p, "node_memory_MemTotal_bytes"),
         prom::query(p, "node_memory_MemAvailable_bytes"),
         prom::query(p, "100 - (avg by (instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)"),
+        prom::query(p, &fs_size_q),
+        prom::query(p, &fs_avail_q),
         node_kube(),
     );
     let (node_ip, node_meta) = node_res;
@@ -529,6 +535,8 @@ async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
     let n_mt = map_by(mt.unwrap_or_default(), "instance");
     let n_ma = map_by(ma.unwrap_or_default(), "instance");
     let n_cpu = map_by(cpu.unwrap_or_default(), "instance");
+    let n_ds = map_by(ds.unwrap_or_default(), "instance");
+    let n_da = map_by(da.unwrap_or_default(), "instance");
     let resolve = |inst: &str| -> String {
         let ip = inst.split(':').next().unwrap_or(inst);
         node_ip.get(ip).cloned().unwrap_or_else(|| ip.to_string())
@@ -549,11 +557,14 @@ async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
         let inst = inst_by.get(&name).cloned().unwrap_or_default();
         let mt = n_mt.get(inst.as_str()).map(|x| x.value).unwrap_or(0.0);
         let ma = n_ma.get(inst.as_str()).map(|x| x.value).unwrap_or(0.0);
+        let dsz = n_ds.get(inst.as_str()).map(|x| x.value).unwrap_or(0.0);
+        let dav = n_da.get(inst.as_str()).map(|x| x.value).unwrap_or(0.0);
         let meta = node_meta.get(&name).cloned().unwrap_or_default();
         nodes.push(NodeInfo {
             load1: load_by.get(&name).copied().unwrap_or(f64::NAN),
             mem_used_gb: to_gb(mt - ma), mem_total_gb: to_gb(mt),
             cpu_pct: n_cpu.get(inst.as_str()).map(|x| x.value).unwrap_or(f64::NAN),
+            disk_used_gb: to_gb(dsz - dav), disk_total_gb: to_gb(dsz),
             ready: meta.0, cordoned: meta.1, pressure: meta.2, version: meta.3, name,
         });
     }
