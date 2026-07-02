@@ -181,6 +181,45 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines).block(block(&title)), area);
 }
 
+/// 라우트 편집 폼 — rename(경로 텍스트) 또는 retarget(백엔드 선택).
+pub(super) fn route_form_overlay(f: &mut Frame, app: &App) {
+    let Some(form) = &app.route_form else { return };
+    let full = f.area();
+    let h = if form.rename { 8 } else { (form.choices.len() as u16).min(10) + 8 };
+    let area = centered(full, 76, h.min(full.height.saturating_sub(2)));
+    f.render_widget(Clear, area);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("  route  ", Style::default().fg(C_DIM())),
+        Span::styled(form.path.clone(), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("   in {}", form.route), Style::default().fg(C_DIM())),
+    ]));
+    lines.push(Line::from(""));
+    let title = if form.rename {
+        lines.push(Line::from(Span::styled("  새 경로(gateway path) 입력:", Style::default().fg(C_DIM()))));
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(format!("{}_", form.value), Style::default().fg(C_WARN()).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("  예: /gpu/qwen · /rngd/exaone · /atom/gemma  (URLRewrite 가 /v1 로 치환)", Style::default().fg(C_DIM()))));
+        "route rename · 타이핑 · Enter 확인 · Backspace 삭제 · Esc 취소"
+    } else {
+        lines.push(Line::from(Span::styled("  이 경로를 보낼 백엔드 선택(↑↓ · Enter):", Style::default().fg(C_DIM()))));
+        for (i, c) in form.choices.iter().enumerate() {
+            let active = i == form.cursor;
+            let (g, st) = if active {
+                ("▶ ", Style::default().fg(Color::Black).bg(C_ACC()).add_modifier(Modifier::BOLD))
+            } else {
+                ("  ", Style::default().fg(Color::Gray))
+            };
+            lines.push(Line::from(vec![Span::styled(format!("  {}{}", g, c), st)]));
+        }
+        "route retarget · ↑↓ 선택 · Enter 확인 · Esc 취소"
+    };
+    f.render_widget(Paragraph::new(lines).block(block(title).border_style(Style::default().fg(C_WARN()))), area);
+}
+
 /// Enter 컨텍스트 액션 메뉴 오버레이 — 가능한 동작을 라벨+설명+단축키로. 발견 가능한 UX.
 pub(super) fn action_menu_overlay(f: &mut Frame, app: &App) {
     let Some(menu) = &app.action_menu else { return };

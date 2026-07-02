@@ -105,6 +105,7 @@ pub struct Route {
     pub path: String,
     pub backend: String,
     pub kind: String, // Service | InferencePool
+    pub route: String, // 소속 HTTPRoute 이름(편집 대상 지정용)
 }
 
 #[derive(Clone)]
@@ -1171,6 +1172,7 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     if let Ok(v) = kube::get_json(&["get", "httproute", "-n", &cfg.ns, "-o", "json"]).await {
         if let Some(items) = v["items"].as_array() {
             for r in items {
+                let route_name = r["metadata"]["name"].as_str().unwrap_or("").to_string();
                 if let Some(rules) = r["spec"]["rules"].as_array() {
                     for rule in rules {
                         let backend = rule["backendRefs"][0]["name"].as_str().unwrap_or("").to_string();
@@ -1185,6 +1187,7 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                                         path: p.to_string(),
                                         backend: backend.clone(),
                                         kind: kind.clone(),
+                                        route: route_name.clone(),
                                     });
                                 }
                             }

@@ -164,6 +164,20 @@ pub enum Action {
     Yaml,      // live YAML 보기(읽기전용)
     Delete,    // 파드 삭제(재스케줄)
     Objective, // 서빙 목표(SLO) 설정
+    RouteRename,   // 라우트 경로 변경(HTTPRoute path)
+    RouteRetarget, // 라우트 백엔드 변경
+    RouteDelete,   // 라우트 규칙 삭제
+}
+
+/// 라우트 편집 폼 — rename(경로 텍스트) 또는 retarget(백엔드 선택).
+#[derive(Clone)]
+pub struct RouteForm {
+    pub route: String,   // 소속 HTTPRoute 이름
+    pub path: String,    // 현재 경로(대상)
+    pub rename: bool,    // true=rename(텍스트 편집) · false=retarget(선택)
+    pub value: String,   // 새 경로 또는 선택된 "kind:name"
+    pub choices: Vec<String>, // retarget 후보(kind:name)
+    pub cursor: usize,   // retarget 선택 인덱스
 }
 #[derive(Clone)]
 pub struct ActionItem {

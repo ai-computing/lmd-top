@@ -82,6 +82,9 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
     if app.objective_form.is_some() {
         objective_form_overlay(f, app);
     }
+    if app.route_form.is_some() {
+        route_form_overlay(f, app);
+    }
     if app.preview.is_some() {
         preview_overlay(f, app);
     }

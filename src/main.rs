@@ -254,6 +254,27 @@ fn dispatch_action(app: &mut App, action: app::Action, subject: &str, ns: &str, 
                 app.confirm = Some(Pending::Cordon { node: subject.to_string(), on: matches!(action, Action::Cordon) });
             }
         }
+        Action::RouteRename => {
+            if !app.can(Mode::Admin) {
+                app.notify(format!("route edit needs --mode admin+ (current: {})", app.mode.name()));
+            } else {
+                app.open_route_rename();
+            }
+        }
+        Action::RouteRetarget => {
+            if !app.can(Mode::Admin) {
+                app.notify(format!("route edit needs --mode admin+ (current: {})", app.mode.name()));
+            } else {
+                app.open_route_retarget();
+            }
+        }
+        Action::RouteDelete => {
+            if !app.can(Mode::Admin) {
+                app.notify(format!("route edit needs --mode admin+ (current: {})", app.mode.name()));
+            } else if let Some(r) = app.selected_route() {
+                app.confirm = Some(Pending::RouteDelete { route: r.route, path: r.path });
+            }
+        }
         Action::Logs => {
             if !app.can(Mode::Debug) {
                 app.notify(format!("logs needs --mode debug+ (current: {})", app.mode.name()));
@@ -484,6 +505,18 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                                 Ok(_) => app.notify(format!("deleted pod {}", name)),
                                 Err(e) => show_fail(&mut app, "delete", e.to_string()),
                             },
+                            Pending::RouteRename { route, old, new } => match kube::route_set_path(&ns, &route, &old, &new) {
+                                Ok(_) => app.notify(format!("renamed route {} → {}", old, new)),
+                                Err(e) => show_fail(&mut app, "route rename", e.to_string()),
+                            },
+                            Pending::RouteRetarget { route, path, backend, kind } => match kube::route_retarget(&ns, &route, &path, &backend, &kind) {
+                                Ok(_) => app.notify(format!("retargeted {} → {}", path, backend)),
+                                Err(e) => show_fail(&mut app, "route retarget", e.to_string()),
+                            },
+                            Pending::RouteDelete { route, path } => match kube::route_delete_rule(&ns, &route, &path) {
+                                Ok(_) => app.notify(format!("deleted route {}", path)),
+                                Err(e) => show_fail(&mut app, "route delete", e.to_string()),
+                            },
                             Pending::Apply { yaml, .. } => match kube::apply_manifest(&ns, &yaml, false) {
                                 Ok(o) => {
                                     app.preview = None;
@@ -553,6 +586,54 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                                 KeyCode::Enter => app.objective_form_submit(),
                                 _ => {}
                             }
+                        }
+                        continue;
+                    }
+                    // 라우트 편집 폼(rename 텍스트 / retarget 선택)
+                    if app.route_form.is_some() {
+                        let rename = app.route_form.as_ref().unwrap().rename;
+                        match k.code {
+                            KeyCode::Esc => app.route_form = None,
+                            KeyCode::Char('q') if !rename => app.route_form = None,
+                            KeyCode::Enter => {
+                                let form = app.route_form.take().unwrap();
+                                if rename {
+                                    let new = form.value.trim().to_string();
+                                    if new.is_empty() || new == form.path {
+                                        app.notify("route: 변경 없음".to_string());
+                                    } else {
+                                        app.confirm = Some(Pending::RouteRename { route: form.route, old: form.path, new });
+                                    }
+                                } else if let Some((kind, name)) = form.value.split_once(':') {
+                                    app.confirm = Some(Pending::RouteRetarget {
+                                        route: form.route,
+                                        path: form.path,
+                                        backend: name.to_string(),
+                                        kind: kind.to_string(),
+                                    });
+                                }
+                            }
+                            KeyCode::Backspace if rename => {
+                                app.route_form.as_mut().unwrap().value.pop();
+                            }
+                            KeyCode::Char(c) if rename => {
+                                app.route_form.as_mut().unwrap().value.push(c);
+                            }
+                            KeyCode::Up if !rename => {
+                                let f = app.route_form.as_mut().unwrap();
+                                if f.cursor > 0 {
+                                    f.cursor -= 1;
+                                    f.value = f.choices[f.cursor].clone();
+                                }
+                            }
+                            KeyCode::Down if !rename => {
+                                let f = app.route_form.as_mut().unwrap();
+                                if f.cursor + 1 < f.choices.len() {
+                                    f.cursor += 1;
+                                    f.value = f.choices[f.cursor].clone();
+                                }
+                            }
+                            _ => {}
                         }
                         continue;
                     }
