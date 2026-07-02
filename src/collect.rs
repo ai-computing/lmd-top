@@ -1062,43 +1062,39 @@ type NodeMeta = (bool, bool, bool, String); // (ready, cordoned, pressure, versi
 async fn node_kube() -> (BTreeMap<String, String>, BTreeMap<String, NodeMeta>) {
     let mut ip = BTreeMap::new();
     let mut meta = BTreeMap::new();
-    match kube::get_json(&["get", "nodes", "-o", "json"]).await {
-        Ok(v) => {
-            if let Some(items) = v["items"].as_array() {
-                for it in items {
-                    let name = it["metadata"]["name"].as_str().unwrap_or("").to_string();
-                    if let Some(addrs) = it["status"]["addresses"].as_array() {
-                        for a in addrs {
-                            if a["type"] == "InternalIP" {
-                                if let Some(x) = a["address"].as_str() {
-                                    ip.insert(x.to_string(), name.clone());
-                                }
+    if let Ok(v) = kube::get_json(&["get", "nodes", "-o", "json"]).await {
+        if let Some(items) = v["items"].as_array() {
+            for it in items {
+                let name = it["metadata"]["name"].as_str().unwrap_or("").to_string();
+                if let Some(addrs) = it["status"]["addresses"].as_array() {
+                    for a in addrs {
+                        if a["type"] == "InternalIP" {
+                            if let Some(x) = a["address"].as_str() {
+                                ip.insert(x.to_string(), name.clone());
                             }
                         }
                     }
-                    let ver = it["status"]["nodeInfo"]["kubeletVersion"].as_str().unwrap_or("").to_string();
-                    let cordoned = it["spec"]["unschedulable"].as_bool().unwrap_or(false);
-                    let (mut ready, mut pressure) = (false, false);
-                    if let Some(cs) = it["status"]["conditions"].as_array() {
-                        for c in cs {
-                            let t = c["type"].as_str().unwrap_or("");
-                            let st = c["status"] == "True";
-                            match t {
-                                "Ready" => ready = st,
-                                "MemoryPressure" | "DiskPressure" | "PIDPressure" => {
-                                    if st {
-                                        pressure = true
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    meta.insert(name, (ready, cordoned, pressure, ver));
                 }
+                let ver = it["status"]["nodeInfo"]["kubeletVersion"].as_str().unwrap_or("").to_string();
+                let cordoned = it["spec"]["unschedulable"].as_bool().unwrap_or(false);
+                let (mut ready, mut pressure) = (false, false);
+                if let Some(cs) = it["status"]["conditions"].as_array() {
+                    for c in cs {
+                        let t = c["type"].as_str().unwrap_or("");
+                        let st = c["status"] == "True";
+                        match t {
+                            "Ready" => ready = st,
+                            "MemoryPressure" | "DiskPressure" | "PIDPressure"
+                                if st => {
+                                    pressure = true
+                                }
+                            _ => {}
+                        }
+                    }
+                }
+                meta.insert(name, (ready, cordoned, pressure, ver));
             }
         }
-        Err(_) => {}
     }
     (ip, meta)
 }
@@ -1331,7 +1327,7 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
             }
         }
     }
-    snap.objectives.sort_by(|a, b| b.priority.cmp(&a.priority));
+    snap.objectives.sort_by_key(|o| std::cmp::Reverse(o.priority));
 
     // 오토스케일링 (KEDA ScaledObject + 상태)
     if let Ok(v) = kube::get_json(&["get", "scaledobject", "-n", &cfg.ns, "-o", "json"]).await {
@@ -1445,4 +1441,35 @@ pub fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn family_normalizes_hf_and_paths() {
+        // HF id: org 유지 + 변형태그(quant/instruct) 제거, 소문자.
+        assert_eq!(model_family("Qwen/Qwen2.5-0.5B-Instruct", "vllm-qwen05b-gb10"), "qwen/qwen2.5-0.5b");
+        assert_eq!(model_family("furiosa-ai/K-EXAONE-236B-A23B-NVFP4A16", "k-exaone-236b"), "furiosa-ai/exaone-236b-a23b");
+        // 로컬 경로: leaf 디렉터리.
+        assert_eq!(model_family("/models/exaone35", "vllm-exaone"), "exaone35");
+        // 소스 없음(셸 래퍼 등): deploy 이름에서 엔진/HW 접사 제거.
+        assert_eq!(model_family("", "vllm-v4flash"), "v4flash");
+    }
+
+    #[test]
+    fn same_model_different_builds_share_family() {
+        // 같은 HF 모델의 두 배포(다른 양자화/HW)는 한 family 로 묶임.
+        let a = model_family("meta-llama/Llama-3.1-8B-Instruct", "llama31-rbln");
+        let b = model_family("meta-llama/Llama-3.1-8B-Instruct-FP8", "llama31-gpu");
+        assert_eq!(a, b);
+        assert_eq!(a, "meta-llama/llama-3.1-8b");
+    }
+
+    #[test]
+    fn strip_variant_tags_drops_hw_and_precision() {
+        assert_eq!(strip_variant_tags("vllm-koni-rbln"), "koni");
+        assert_eq!(strip_variant_tags("Model-BF16-Instruct"), "model");
+    }
 }

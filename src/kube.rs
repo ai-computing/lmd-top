@@ -37,7 +37,7 @@ pub fn logs(ns: &str, pod: &str, tail: u32) -> Result<Vec<String>> {
         ])
         .output()?;
     if !out.status.success() {
-        return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim().to_string()));
+        return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).lines().map(|l| l.to_string()).collect())
 }

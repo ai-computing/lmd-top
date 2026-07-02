@@ -1078,6 +1078,32 @@ mod tests {
     }
 
     #[test]
+    fn panel_cycle_and_reverse_tab() {
+        let mut a = App::new();
+        a.set_view_idx(View::Launch.idx()); // Deploy: 3 패널
+        assert_eq!(a.panel_count(), 3);
+        a.selected = 2;
+        a.cycle_panel();
+        assert_eq!(a.panel_focus, 1);
+        assert_eq!(a.selected, 0, "패널 전환 시 선택 리셋");
+        a.cycle_panel();
+        a.cycle_panel();
+        assert_eq!(a.panel_focus, 0, "3패널 순환");
+        // 단일 패널 뷰는 순환 무시.
+        a.set_view_idx(View::Nodes.idx());
+        assert_eq!(a.panel_count(), 1);
+        a.cycle_panel();
+        assert_eq!(a.panel_focus, 0);
+        // 뷰 전환하면 포커스 리셋.
+        a.set_view_idx(View::Epp.idx());
+        assert_eq!(a.panel_focus, 0);
+        // Shift+Tab = 이전 뷰.
+        let before = a.view.idx();
+        a.prev_tab();
+        assert_eq!(a.view.idx(), (before + View::ALL.len() - 1) % View::ALL.len());
+    }
+
+    #[test]
     fn unsupported_pivot_key_is_noop() {
         let mut a = app_with(vec![model("m1")], vec![pod("m1-abc")]);
         a.pivot('x'); // pivot 키 아님
