@@ -13,7 +13,7 @@ use ratatui::Terminal;
 
 const W: u16 = 148;
 const H: u16 = 42;
-const DT: f64 = 0.10; // 프레임 간격(초) → 10fps
+const DT: f64 = 0.13; // 프레임 간격(초) — 전환을 살짝 느긋하게(≈7.7fps)
 
 pub async fn run(cfg: &Config, out: &str) {
     let mut base = crate::collect::collect(cfg).await;

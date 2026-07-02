@@ -2,6 +2,12 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.25.0]
+### Changed — Store 뷰를 Models 관점 토글로 통합(뷰 10개로 복귀)
+- 별도 Store 탭 제거 → Models 뷰에 **관점 토글 `v`** 추가: **serving**(런타임: ready/run/wait/kv/tps) ⇄ **artifacts**(모델 정체성 중심: HF/local 소스·format(quant/dtype)·컴파일 옵션·저장 노드).
+- 번호키 0-9 로 정리(11번째 뷰 없앰). `⏎` 는 관점에 따라 모델 상세 / 아티팩트 상세.
+- artifacts 관점은 HF 여부 태그·포맷을 앞세워 "어떤 모델인지"를 강조.
+
 ## [0.24.1]
 ### Changed — 넘치는 뷰 오버플로 처리(무언의 잘림 제거)
 - Flow 트리에 선택 route 로의 세로 스크롤 추가(길어도 잘리지 않음).
