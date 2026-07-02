@@ -12,3 +12,7 @@ config/local.toml
 .DS_Store
 *.swp
 *~
+
+# demo artifacts (regenerate with `lmd-top --cast` / agg)
+docs/demo.cast
+*Demo recording omitted from the public export.*
