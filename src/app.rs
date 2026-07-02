@@ -1236,15 +1236,19 @@ impl App {
             numeric: true,
             help: "요청할 NPU 디바이스 수(resources.limits). 보통 = TP(RBLN) / ceil(TP/8)×PP(Furiosa)".into(),
         });
+        // 노드 선택지에 그 노드의 NPU 드라이버/SDK 요약을 붙임(컴파일은 드라이버 설치 노드에서만 가능).
+        let node_drv = |n: &str| -> String {
+            self.snap.nodes.iter().find(|x| x.name == n).map(|x| x.npu.clone()).filter(|s| !s.is_empty()).map(|s| format!(" {}", s)).unwrap_or_default()
+        };
         let mut node_choices = vec!["any".to_string()];
-        node_choices.extend(cand_nodes.iter().map(|n| format!("{}({})", n, per_node[n])));
+        node_choices.extend(cand_nodes.iter().map(|n| format!("{}({}){}", n, per_node[n], node_drv(n))));
         fields.push(CompileField {
             key: "node".into(),
             label: "target-node".into(),
             value: "any".into(),
             choices: node_choices,
             numeric: false,
-            help: "컴파일 실행 노드. any=제품 라벨 매칭, 특정 노드=hostname 고정. 괄호=그 노드의 디바이스 수".into(),
+            help: "컴파일 실행 노드(NPU 드라이버 설치 노드만). any=제품 라벨 매칭. 괄호=디바이스 수, 뒤=드라이버 버전".into(),
         });
         CompileForm {
             model: a.model.clone(),

@@ -1249,6 +1249,10 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled(format!("{}  ", truncw(&n.name, 30)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
                 Span::styled(hg, Style::default().fg(hc).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("   kubelet {}", n.version), Style::default().fg(C_DIM())),
+                Span::styled(
+                    if n.npu.is_empty() { String::new() } else { format!("   NPU {}", n.npu) },
+                    Style::default().fg(C_ACC()),
+                ),
             ]),
             Line::from(""),
             gauge_row("cpu", if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct }, &if n.cpu_pct.is_nan() { "–".into() } else { format!("{:.0} %", n.cpu_pct) }, util_color(n.cpu_pct.max(0.0)), barw),

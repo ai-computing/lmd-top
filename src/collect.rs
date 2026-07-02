@@ -84,6 +84,7 @@ pub struct NodeInfo {
     pub cordoned: bool,
     pub pressure: bool, // Memory/Disk/PID pressure 중 하나라도
     pub version: String,
+    pub npu: String, // NPU 드라이버/SDK 요약(노드 라벨 기반, 예: "RNGD drv2026.3.0 · RBLN drv3.0.0"). 컴파일 가능 노드 판별용.
 }
 
 #[derive(Clone, Default)]
@@ -833,6 +834,7 @@ async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
             cpu_pct: n_cpu.get(inst.as_str()).map(|x| x.value).unwrap_or(f64::NAN),
             disk_used_gb: to_gb(dsz - dav), disk_total_gb: to_gb(dsz),
             ready: meta.0, cordoned: meta.1, pressure: meta.2, version: meta.3, name,
+            npu: String::new(), // collect_node_npu 가 라벨에서 채움(full tier)
         });
     }
     nodes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -872,6 +874,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     let (accel, nodes) = collect_fast(cfg).await;
     snap.accel = accel;
     snap.nodes = nodes;
+    collect_node_npu(&mut snap.nodes).await; // 노드 라벨에서 NPU 드라이버/SDK 요약 채움
 
     // ---------- EPP pools (독립 쿼리 — 병렬 배칭으로 순차 라운드트립 제거) ----------
     let dec_q = "sum by (pod_name) (inference_extension_scheduler_attempts_total)";
@@ -1410,6 +1413,30 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
         .collect();
     for (a, n) in snap.artifacts.iter_mut().zip(nodes) {
         a.node = n;
+    }
+}
+
+/// 노드 라벨에서 NPU 드라이버/SDK 존재·버전을 읽어 NodeInfo.npu 채움.
+/// 컴파일은 해당 NPU 드라이버가 설치된 노드에서만 가능 → 타깃 선택·경고에 사용.
+async fn collect_node_npu(nodes: &mut [NodeInfo]) {
+    let Ok(v) = kube::get_json(&["get", "nodes", "-o", "json"]).await else { return };
+    let Some(items) = v["items"].as_array() else { return };
+    for n in items {
+        let name = n["metadata"]["name"].as_str().unwrap_or("");
+        let Some(node) = nodes.iter_mut().find(|x| x.name == name) else { continue };
+        let l = &n["metadata"]["labels"];
+        let mut parts = Vec::new();
+        if let Some(prod) = l["furiosa.ai/npu.product"].as_str() {
+            let drv = l["furiosa.ai/driver.version"].as_str().unwrap_or("?");
+            parts.push(format!("{} drv{}", prod.to_uppercase(), drv));
+        }
+        if l["rebellions.ai/npu.present"].as_str() == Some("true") || l.get("rebellions.ai/npu.product").is_some() {
+            let prod = l["rebellions.ai/npu.product"].as_str().unwrap_or("RBLN");
+            let drv = l["rebellions.ai/driver-version.full"].as_str().unwrap_or("?");
+            let installed = l["rebellions.ai/npu.driver.status"].as_str() == Some("installed");
+            parts.push(format!("{} drv{}{}", prod, drv, if installed { "" } else { "(!drv)" }));
+        }
+        node.npu = parts.join(" · ");
     }
 }
 
