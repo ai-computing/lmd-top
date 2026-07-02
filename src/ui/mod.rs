@@ -15,6 +15,8 @@ mod fx;
 pub use fx::FxState;
 mod panel;
 pub(crate) use panel::Dashboard;
+mod overlays;
+use overlays::*;
 
 
 pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
@@ -57,6 +59,7 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
             View::Launch => view_deploy(f, body, app),
             View::Events => view_events(f, body, app),
             View::Nodes => view_nodes(f, body, app),
+            View::Topo => view_topo(f, body, app),
         }
     }
     fxs.body(f, body, dt); // 본문 트랜지션(오버레이 전에)
@@ -66,6 +69,18 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
     }
     if app.logs_mode {
         logs_overlay(f, app);
+    }
+    if app.action_menu.is_some() {
+        action_menu_overlay(f, app);
+    }
+    if app.compile_form.is_some() {
+        compile_form_overlay(f, app);
+    }
+    if app.deploy_form.is_some() {
+        deploy_form_overlay(f, app);
+    }
+    if app.objective_form.is_some() {
+        objective_form_overlay(f, app);
     }
     if app.preview.is_some() {
         preview_overlay(f, app);
@@ -122,7 +137,7 @@ fn two_panes(area: Rect, left_pct: u16) -> (Rect, Rect) {
     (c[0], c[1])
 }
 
-fn centered(area: Rect, w: u16, h: u16) -> Rect {
+pub(super) fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect { x, y, width: w.min(area.width), height: h.min(area.height) }
@@ -140,16 +155,16 @@ fn help_overlay(f: &mut Frame) {
     let sec = |t: &str| Line::from(Span::styled(format!(" {}", t), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD)));
     let lines = vec![
         sec("navigation"),
-        g("0-9 Tab ⇧Tab", "switch view (Overview/Accel/Models/EPP/Flow/Pods/Perf/Deploy/Events/Nodes)"),
+        g("0-7 Tab ⇧Tab", "switch view (Overview/Nodes/Models/EPP/Flow/Pods/Deploy/Events)"),
         g("up/dn j k", "select row (mouse scroll works too)"),
-        g("Enter", "detail (drill-down)"),
-        g("w", "focus panel (multi-panel views: Deploy/EPP/Flow/Perf)"),
+        g("Enter", "actions menu (Deploy/Models/Pods/Overview) · detail on other views"),
+        g("w", "Nodes hub: nodes→devices→serving→map · focus panel (Deploy/EPP/Flow)"),
         g("p i r e m", "cross-layer pivot (model↔pods↔infra↔route↔epp), esc retraces"),
         g("o", "cycle sort"),
-        g("/", "filter (substring)"),
-        g("l", "logs (selected pod/model, scroll+refresh)"),
-        g("s", "scale selected model (needs --mode admin+, confirms y/n)"),
-        g("S", "rollout restart selected model (admin+, confirms y/n)"),
+        g("/", "filter (substring) — list header shows Σ aggregate of shown rows"),
+        g("actions", "Enter menu: Info/Compile→RBLN·Furiosa/Deploy/Stop/Scale/Restart/Logs/YAML/Delete/Cordon/Objective"),
+        g("Objective", "set per-model SLO (TTFT/TPOT/E2E/tok·s) → Perf shows met/violated + data-driven advice"),
+        g("l s S x y", "accelerators (also in the actions menu): logs/scale/restart/stop/yaml"),
         g("A", "alert history (threshold/health events)"),
         g("R", "reset energy session (per-accel Wh)"),
         g("t", "cycle theme (soft/classic/high-contrast/colorblind)"),
@@ -194,30 +209,6 @@ fn help_overlay(f: &mut Frame) {
     );
 }
 
-/// 매니페스트 미리보기 오버레이(compile/deploy dry-run) — YAML 을 그대로 표시. `q`/esc 닫기, ↑↓ 스크롤.
-fn preview_overlay(f: &mut Frame, app: &App) {
-    let Some((title, body)) = &app.preview else { return };
-    let full = f.area();
-    let area = centered(full, 92, 30);
-    f.render_widget(Clear, area);
-    let lines: Vec<Line> = body
-        .lines()
-        .map(|l| {
-            let col = if l.trim_start().starts_with("# TODO") || l.contains("TODO-") {
-                C_WARN()
-            } else if l.trim_start().starts_with('#') {
-                C_DIM()
-            } else {
-                Color::Gray
-            };
-            Line::from(Span::styled(l.to_string(), Style::default().fg(col)))
-        })
-        .collect();
-    f.render_widget(
-        Paragraph::new(lines).scroll((app.preview_scroll, 0)).block(block(&format!("{} · dry-run · ↑↓ scroll · q close · review then `kubectl apply`", title))),
-        area,
-    );
-}
 
 fn logs_overlay(f: &mut Frame, app: &App) {
     let full = f.area();
@@ -344,6 +335,10 @@ fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!("VRAM {:.0}%  ", mempct), Style::default().fg(mem_color(mempct))),
         Span::styled(format!("⚡{:.0}W", pw), Style::default().fg(C_DIM())),
     ];
+    // Prometheus 도달 불가 — 빈 테이블이 "장비 없음"이 아니라 연결 문제임을 명시.
+    if !s.prom_ok {
+        spans.push(Span::styled("  ⚠ Prometheus unreachable (check LMD_PROM)", Style::default().fg(C_BAD()).add_modifier(Modifier::BOLD)));
+    }
     // 활성 알림 카운트(A 로 히스토리)
     let nalert = app.active_alerts.len();
     if nalert > 0 {
@@ -369,7 +364,7 @@ fn tabs(f: &mut Frame, area: Rect, app: &App) {
     // 앞머리 마커 — Tab/0-9 로 탭 전환됨을 명시(안 그러면 전환 방법이 안 보임).
     let mut spans: Vec<Span> = vec![Span::styled("⇥ ", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD))];
     for (i, v) in View::ALL.iter().enumerate() {
-        let sel = *v == app.view;
+        let sel = i == app.view.idx(); // 허브 하위 뷰(Accel/Perf)도 Nodes 슬롯을 하이라이트
         let st = if sel {
             Style::default().fg(Color::Black).bg(C_ACC()).add_modifier(Modifier::BOLD)
         } else {
@@ -434,7 +429,8 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     let mut parts: Vec<String> = Vec::new();
     parts.push("↑↓ sel".into());
     match v {
-        Accel | Models | Overview | Pods | Nodes | Events | Launch => parts.push("⏎ detail".into()),
+        // Models/Overview/Pods/Launch 은 Enter=액션 메뉴(아래 "⏎ actions") 라 여기선 제외.
+        Accel | Nodes | Events => parts.push("⏎ detail".into()),
         Perf => parts.push("⏎ p50/95/99".into()),
         Routing => parts.push("⏎ model".into()),
         _ => {}
@@ -448,6 +444,23 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     if app.panel_count() > 1 {
         parts.push(format!("w panel {}/{}", app.panel_focus + 1, app.panel_count()));
     }
+    // Nodes 허브: w 로 하위 뷰 전환(하드웨어 노드 → 디바이스 → 서빙 성능).
+    if v.is_hub() {
+        let sub = match v {
+            Nodes => "nodes",
+            Accel => "devices",
+            Perf => "serving",
+            Topo => "map",
+            _ => "",
+        };
+        parts.push(format!("w hub:{} (nodes→devices→serving→map)", sub));
+    }
+    // Enter 동작 — 액션 메뉴가 있는 뷰는 개별 키(l/y/s/S/x/c/d) 를 푸터에서 빼고 "⏎ actions" 로 모음(과밀 방지, 발견성↑).
+    let has_menu = matches!(v, Models | Overview | Pods | Launch);
+    if has_menu {
+        parts.push("⏎ actions".into());
+    }
+    // pivot(액션 메뉴 밖 — 크로스레이어 점프).
     match v {
         Models | Overview => parts.push("p/i/r/e pivot".into()),
         Accel => parts.push("p/m/n pivot".into()),
@@ -456,22 +469,19 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         Perf => parts.push("p/i/e pivot".into()),
         Routing => parts.push("p/i/m/e pivot".into()),
         Epp => parts.push("+/- weight".into()),
-        Launch => parts.push("c compile · d deploy".into()),
         _ => {}
     }
-    if matches!(v, Pods | Models | Overview | Accel) {
+    // 액션 메뉴가 없는 뷰의 개별 액션만 표기.
+    if matches!(v, Accel) {
         parts.push("l logs".into());
     }
-    if matches!(v, Models | Overview) {
-        parts.push("s scale".into());
-        parts.push("S restart".into());
+    if matches!(v, Nodes) {
+        parts.push("y yaml".into());
     }
     // 전역
-    parts.push("⇥/⇧⇥/0-9 view".into());
+    parts.push("⇥/⇧⇥/0-7 view".into());
     parts.push("A alerts".into());
     parts.push("t theme".into());
-    parts.push("z zoom".into());
-    parts.push("g grafana↗".into());
     parts.push("? help".into());
     parts.push("q quit".into());
     spans.push(Span::styled(parts.join("  "), Style::default().fg(C_DIM())));
@@ -535,10 +545,14 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(13),
         Constraint::Min(8),
     ];
+    let title = match app.agg_summary() {
+        Some(a) => format!("Accelerators · ⏎ timeline  —  {}", a),
+        None => "Accelerators · UTIL=compute% MEM=VRAM · ⏎ timeline".to_string(),
+    };
     render_list_table(
         f, area, rows, &widths,
         &["KIND", "ID", "NODE", "UTIL", "MEM", "TEMP", "PWR", "TREND(util)", "MODEL/POD"],
-        "Accelerators · UTIL=compute% MEM=VRAM · ⏎ timeline", app.selected, order.len(),
+        &title, app.selected, order.len(),
     );
 }
 
@@ -547,7 +561,11 @@ fn view_models(f: &mut Frame, area: Rect, app: &App) {
     let mut st = TableState::default();
     st.select(Some(app.selected));
     let total = app.order().len();
-    f.render_stateful_widget(models_table(app, "Models · ⏎ detail"), area, &mut st);
+    let title = match app.agg_summary() {
+        Some(a) => format!("Models · ⏎ detail  —  {}", a),
+        None => "Models · ⏎ detail".to_string(),
+    };
+    f.render_stateful_widget(models_table(app, &title), area, &mut st);
     list_scrollbar(f, area, total, app.selected, 1);
 }
 
@@ -1732,8 +1750,23 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     Cell::from(Span::styled(format!("{:.2}", r.preempt), Style::default().fg(C_BAD())))
                 };
+                // SLO 상태 글리프(목표 대비): ●충족 ◐부분 ✗위반 ·목표없음.
+                let adv = app.perf_advice(r);
+                let (sg, sc) = if !adv.has_obj {
+                    ("·", C_DIM())
+                } else if adv.all_met() {
+                    ("●", C_OK())
+                } else if adv.checks.iter().any(|(_, ok)| !*ok) {
+                    ("✗", C_BAD())
+                } else {
+                    ("◐", C_WARN())
+                };
+                let model_cell = Cell::from(Line::from(vec![
+                    Span::styled(format!("{} ", sg), Style::default().fg(sc)),
+                    Span::styled(truncw(&r.model, 14), Style::default().fg(Color::White)),
+                ]));
                 Row::new(vec![
-                    cellw(r.model.clone(), 16),
+                    model_cell,
                     Cell::from(Span::styled(rate(r.req), Style::default().fg(C_OK()))),
                     Cell::from(Span::styled(rate(r.tps), Style::default().fg(C_OK()))),
                     cellw(ms(r.ttft_p95), 7),
@@ -1762,17 +1795,51 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             ],
         )
         .header(hrow(&["MODEL", "req/s", "tok/s", "TTFT", "QUEUE", "PFILL", "DECODE", "TPOT", "E2E", "premt"]));
-        let title = format!("Per-model perf · active · o sort:{} · ⏎ drill{}", app.sort_label(), if mfocus { count_suffix(app.selected, order.len()) } else { String::new() });
+        let title = match app.agg_summary() {
+            Some(a) => format!("Per-model perf · ⏎ drill  —  {}", a),
+            None => format!("Per-model perf · active · o sort:{} · ⏎ drill{}", app.sort_label(), if mfocus { count_suffix(app.selected, order.len()) } else { String::new() }),
+        };
+        // per-model 표 + 하단 SLO 어드바이저(선택 모델).
+        let lc = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(4), Constraint::Length(5)])
+            .split(bodyc_l);
+        let (tbl_area, adv_area) = (lc[0], lc[1]);
         let mut mt = mt.column_spacing(1).block(if mfocus { block_active(&title) } else { block(&title) });
         if mfocus {
             mt = mt.row_highlight_style(hl_style()).highlight_symbol("▎");
         }
         let mut st = TableState::default();
         st.select(if mfocus { Some(app.selected) } else { None });
-        f.render_stateful_widget(mt, bodyc_l, &mut st);
+        f.render_stateful_widget(mt, tbl_area, &mut st);
         if mfocus {
-            list_scrollbar(f, bodyc_l, order.len(), app.selected, 1);
+            list_scrollbar(f, tbl_area, order.len(), app.selected, 1);
         }
+        // 선택 모델 SLO 판정 + 조정 제안.
+        let mut al: Vec<Line> = Vec::new();
+        if let Some(&si) = order.get(app.selected) {
+            let r = &app.snap.perf_rows[si];
+            let adv = app.perf_advice(r);
+            if !adv.has_obj {
+                al.push(Line::from(Span::styled("no objective — set via Models → ⏎ Objective (target TTFT/TPOT/E2E/tok·s)", Style::default().fg(C_DIM()))));
+            } else {
+                let mut sp = vec![Span::styled("SLO  ", Style::default().fg(C_DIM()))];
+                for (m, ok) in &adv.checks {
+                    sp.push(Span::styled(format!("{}{}  ", if *ok { "✓" } else { "✗" }, m), Style::default().fg(if *ok { C_OK() } else { C_BAD() })));
+                }
+                if adv.checks.is_empty() {
+                    sp.push(Span::styled("(no observed metrics yet)", Style::default().fg(C_DIM())));
+                }
+                al.push(Line::from(sp));
+                for t in adv.tips.iter().take(2) {
+                    al.push(Line::from(Span::styled(format!("→ {}", t), Style::default().fg(C_WARN()))));
+                }
+                if adv.all_met() {
+                    al.push(Line::from(Span::styled("→ meets objective ✓", Style::default().fg(C_OK()))));
+                }
+            }
+        }
+        f.render_widget(Paragraph::new(al).block(block("SLO advisor (data-driven)")), adv_area);
     }
 
     // per-pod queue (요청 분배 — 절대 큐 깊이). focus 1 이면 선택 강조.
@@ -1901,30 +1968,48 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
     let scroll = if sel_line + 2 > vis { (sel_line + 3).saturating_sub(vis) as u16 } else { 0 };
     let vtotal = app.snap.artifacts.len();
     f.render_widget(
-        Paragraph::new(lines).scroll((scroll, 0)).block(blk(&format!("compiled variants (family → build · @node) · ⏎ full{}", if focus == 0 { count_suffix(app.selected, vtotal) } else { String::new() }), focus == 0)),
+        Paragraph::new(lines).scroll((scroll, 0)).block(blk(&format!("compiled variants (family → build · @node) · ⏎ actions{}", if focus == 0 { count_suffix(app.selected, vtotal) } else { String::new() }), focus == 0)),
         rows[0],
     );
 
-    // ── 2) 배치 타깃: 노드별 여유 가속기(focus 1 일 때 선택/강조) ──
+    // ── 2) 배치 타깃: 노드별 디바이스 점유(focus 1 일 때 선택/강조) ──
     let nodes = app.target_nodes();
-    let mut free_by: std::collections::BTreeMap<String, std::collections::BTreeMap<String, (i64, i64)>> = std::collections::BTreeMap::new();
-    for a in &app.snap.accel {
-        let e = free_by.entry(a.node.clone()).or_default().entry(a.disp().to_string()).or_insert((0, 0));
-        e.1 += 1;
-        if a.alive && a.busy_model.is_empty() {
-            e.0 += 1;
-        }
-    }
     let mut tl: Vec<Line> = Vec::new();
     if nodes.is_empty() {
         tl.push(Line::from(Span::styled("(no accelerators)", Style::default().fg(C_DIM()))));
     }
+    // 노드 → (kind → 그 노드의 해당 kind 디바이스들). LED 로 점유(●=busy, ○=free, ✗=dead) 표시.
     for (j, node) in nodes.iter().enumerate() {
-        let mut sp = vec![Span::styled(format!("{:<18} ", truncw(node, 18)), Style::default().fg(Color::White))];
-        if let Some(kinds) = free_by.get(node) {
-            for (k, (free, total)) in kinds {
-                sp.push(Span::styled(format!("{} {}/{} free  ", k, free, total), Style::default().fg(if *free > 0 { C_OK() } else { C_DIM() })));
+        let mut sp = vec![Span::styled(format!("{:<17} ", truncw(node, 17)), Style::default().fg(Color::White))];
+        // kind 별로 디바이스 모음(정렬 유지 위해 disp 순).
+        let mut by_kind: std::collections::BTreeMap<String, Vec<&crate::collect::Accel>> = std::collections::BTreeMap::new();
+        for a in app.snap.accel.iter().filter(|a| &a.node == node) {
+            by_kind.entry(a.disp().to_string()).or_default().push(a);
+        }
+        for (k, devs) in &by_kind {
+            sp.push(Span::styled(format!("{} ", k), Style::default().fg(C_DIM())));
+            sp.push(Span::styled("[", Style::default().fg(C_TRACK())));
+            for a in devs {
+                let (g, c) = if !a.alive {
+                    ("✗", C_BAD())
+                } else if a.busy_model.is_empty() {
+                    ("○", C_TRACK())
+                } else {
+                    ("●", model_color(&a.busy_model))
+                };
+                sp.push(Span::styled(g, Style::default().fg(c)));
             }
+            sp.push(Span::styled("] ", Style::default().fg(C_TRACK())));
+            // 이 kind 를 점유한 모델 요약(모델명×점유수).
+            let mut hold: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
+            for a in devs.iter().filter(|a| !a.busy_model.is_empty()) {
+                *hold.entry(a.busy_model.as_str()).or_insert(0) += 1;
+            }
+            for (m, cnt) in &hold {
+                sp.push(Span::styled(format!("{}×{} ", truncw(m, 14), cnt), Style::default().fg(model_color(m))));
+            }
+            let free = devs.iter().filter(|a| a.alive && a.busy_model.is_empty()).count();
+            sp.push(Span::styled(format!("({} free)  ", free), Style::default().fg(if free > 0 { C_OK() } else { C_DIM() })));
         }
         let mut line = Line::from(sp);
         if focus == 1 && app.selected == j {
@@ -1932,7 +2017,7 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
         }
         tl.push(line);
     }
-    f.render_widget(Paragraph::new(tl).block(blk(&format!("deploy targets · free capacity per node{}", if focus == 1 { count_suffix(app.selected, nodes.len()) } else { String::new() }), focus == 1)), rows[1]);
+    f.render_widget(Paragraph::new(tl).block(blk(&format!("deploy targets · device occupancy ●busy ○free per node{}", if focus == 1 { count_suffix(app.selected, nodes.len()) } else { String::new() }), focus == 1)), rows[1]);
 
     // ── 3) 카탈로그(배포 가능 모델 × 재고 가능성)(focus 2 일 때 선택/강조) + 예정 액션 ──
     let mut cl: Vec<Line> = Vec::new();
@@ -2065,9 +2150,115 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(lines)
             .scroll((scroll, 0))
-            .block(block(&format!("Nodes · node → devices · ⏎ detail{}", count_suffix(sel, order.len())))),
+            .block(block(&match app.agg_summary() {
+                Some(a) => format!("Nodes · ⏎ detail  —  {}", a),
+                None => format!("Nodes · node → devices · ⏎ detail{}", count_suffix(sel, order.len())),
+            })),
         area,
     );
+}
+
+// ── Topology / device pressure 맵 (Canvas) ─────────────────────────
+// 서빙 요청 경로(Gateway→EPP→Pool)와 노드별 가속기 pressure(util 히트, ●=점유 모델)를 2D 로.
+fn view_topo(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::canvas::{Canvas, Line as CLine, Rectangle};
+    // 노드(가속기 보유) 목록.
+    let mut node_names: Vec<String> = app.snap.accel.iter().map(|a| a.node.clone()).filter(|n| !n.is_empty()).collect();
+    node_names.sort();
+    node_names.dedup();
+    let epp_present = app.snap.epp.is_some() || !app.snap.pools.is_empty();
+    let gw = !app.snap.gw_addr.is_empty();
+    let cols = 2usize;
+    let bw = 38.0; // box width(간격 포함)
+    let bh = 20.0; // box height
+    let x0 = 18.0; // 노드 그리드 시작 x(왼쪽 flow 컬럼 뒤)
+    let y_top = 84.0;
+    let canvas = Canvas::default()
+        .marker(ratatui::symbols::Marker::HalfBlock)
+        .x_bounds([0.0, 100.0])
+        .y_bounds([0.0, 100.0])
+        .block(block("Topology · request flow → device pressure · util heat ●busy ·free · w hub"))
+        .paint(move |ctx| {
+            // ── 서빙 경로 체인(왼쪽 세로) ──
+            let chain = [("Gateway", gw, C_ACC()), ("EPP", epp_present, C_OK()), ("Pool", epp_present, C_OK())];
+            let mut cy = 80.0;
+            let mut prev: Option<f64> = None;
+            for (label, on, col) in chain {
+                let c = if on { col } else { C_DIM() };
+                let g = if on { "●" } else { "○" };
+                ctx.print(2.0, cy, Line::from(Span::styled(format!("{} {}", g, label), Style::default().fg(c).add_modifier(Modifier::BOLD))));
+                if let Some(py) = prev {
+                    ctx.draw(&CLine { x1: 3.0, y1: py - 2.0, x2: 3.0, y2: cy + 1.0, color: C_TRACK() });
+                }
+                prev = Some(cy);
+                cy -= 14.0;
+            }
+            // Pool 앵커(서빙 흐름선 시작점).
+            let pool_x = 4.0;
+            let pool_y = 80.0 - 2.0 * 14.0; // 체인 3번째(Pool) y
+            // ── 서빙 흐름선(Pool → 실제 서빙 중인 노드), 모델색 — 박스보다 먼저 그려 아래 깔림 ──
+            for (i, node) in node_names.iter().enumerate() {
+                let busy: Vec<&crate::collect::Accel> = app.snap.accel.iter().filter(|a| &a.node == node && !a.busy_model.is_empty()).collect();
+                if busy.is_empty() {
+                    continue;
+                }
+                let bx = x0 + (i % cols) as f64 * bw;
+                let by = y_top - (i / cols) as f64 * (bh + 4.0);
+                let col = model_color(&busy[0].busy_model);
+                if epp_present {
+                    ctx.draw(&CLine { x1: pool_x, y1: pool_y, x2: bx, y2: by - bh / 2.0, color: col });
+                }
+            }
+            // ── 노드 박스 + 디바이스 pressure ──
+            for (i, node) in node_names.iter().enumerate() {
+                let bx = x0 + (i % cols) as f64 * bw;
+                let by = y_top - (i / cols) as f64 * (bh + 4.0);
+                ctx.draw(&Rectangle { x: bx, y: by - bh, width: bw - 4.0, height: bh, color: C_TRACK() });
+                // 노드명.
+                ctx.print(bx + 1.0, by - 2.0, Line::from(Span::styled(truncw(node, 18), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))));
+                // 디바이스들 — kind 별 줄, 각 디바이스는 util 히트 블록.
+                let devs: Vec<&crate::collect::Accel> = app.snap.accel.iter().filter(|a| &a.node == node).collect();
+                let mut by_kind: std::collections::BTreeMap<&str, Vec<&crate::collect::Accel>> = std::collections::BTreeMap::new();
+                for d in &devs {
+                    by_kind.entry(d.kind.label()).or_default().push(d);
+                }
+                let mut ry = by - 6.0;
+                for (k, ds) in &by_kind {
+                    let mut sp = vec![Span::styled(format!("{:<5} ", k), Style::default().fg(C_DIM()))];
+                    for d in ds {
+                        let (g, c) = if !d.alive {
+                            ("✗", C_BAD())
+                        } else if d.busy_model.is_empty() {
+                            ("·", C_TRACK())
+                        } else {
+                            ("█", util_color(d.util))
+                        };
+                        sp.push(Span::styled(g, Style::default().fg(c)));
+                    }
+                    let live: Vec<&&crate::collect::Accel> = ds.iter().filter(|d| d.alive).collect();
+                    let avg = if live.is_empty() { 0.0 } else { live.iter().map(|d| d.util).sum::<f64>() / live.len() as f64 };
+                    let free = ds.iter().filter(|d| d.alive && d.busy_model.is_empty()).count();
+                    sp.push(Span::styled(format!("  {:>3.0}%  {}free", avg, free), Style::default().fg(C_DIM())));
+                    ctx.print(bx + 1.0, ry, Line::from(sp));
+                    ry -= 4.0;
+                }
+                // 서빙 중인 모델명(어느 pod/모델이 이 노드를 점유하는지) — 모델색.
+                let mut serving: Vec<&str> = devs.iter().filter(|d| !d.busy_model.is_empty()).map(|d| d.busy_model.as_str()).collect();
+                serving.sort();
+                serving.dedup();
+                if !serving.is_empty() {
+                    let mut msp: Vec<Span> = vec![Span::styled("⇢ ", Style::default().fg(C_DIM()))];
+                    for m in serving.iter().take(2) {
+                        msp.push(Span::styled(format!("{} ", truncw(m, 16)), Style::default().fg(model_color(m))));
+                    }
+                    ctx.print(bx + 1.0, by - bh + 2.0, Line::from(msp));
+                }
+            }
+            if node_names.is_empty() {
+                ctx.print(20.0, 50.0, Line::from(Span::styled("(no accelerators detected)", Style::default().fg(C_DIM()))));
+            }
+        });
+    f.render_widget(canvas, area);
 }
 
 // ── Events (k8s + llm-d 이벤트) ─────────────────────────

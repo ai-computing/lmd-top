@@ -2,6 +2,23 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.34.0]
+### Added — 관리(k9s 식) + SLO 어드바이저 + NPU 컴파일 가능성
+- **Enter 액션 메뉴**: Deploy 변형/노드/카탈로그·Models·Pods 에서 Enter → 컨텍스트 액션(Info/Compile→RBLN·Furiosa/Deploy/Stop/Scale/Restart/Logs/YAML/Delete/Cordon/Objective). 단축키를 몰라도 발견 가능.
+- **옵션 그리드 폼**: compile/deploy 옵션을 모든 후보 인라인 표시(선택 강조), `e` 커스텀 입력. compile 은 fit(OOM/tight) 추정, deploy 는 노드 패킹 기반 용량 판정.
+- **디바이스 점유**: Deploy targets 에 노드별 `[●●●○]` LED(모델색). Topology 맵(Canvas): Gateway→EPP→Pool + 서빙 노드 흐름선 + util pressure.
+- **NPU 컴파일 가능성**: `src/npu-compat.json`(벤더 공식 목록) 으로 HF/GPU 모델도 RBLN/Furiosa 컴파일 가능 여부 판별 → GPU→NPU 경로 노출.
+- **서빙 목표(SLO)**: 모델별 TTFT/TPOT/E2E/tok·s 목표 → Perf 뷰가 충족/위반 + 관측 병목 기반 조정 제안(값싼 런타임 노브).
+- **리소스 YAML(`y`)**·매니페스트 저장(`w`)·apply(`a`, admin)·검증(`v`).
+### Changed — 뷰 통합 + CLI
+- Accel·Perf·Nodes·Topology → **Nodes 허브**(슬롯 1, `w` 로 전환). 탭 10→8. 리스트 뷰에 Σ 집계.
+- `--help`/`-h`·잘못된 플래그 처리(exit 2 + help).
+### Fixed — 하드닝
+- 매니페스트 namespace 를 LMD_NS 에서 주입(하드코딩 제거). 이미지 env(`LMD_COMPILE_IMAGE_*`/`LMD_SERVING_IMAGE`) → apply 도달 가능.
+- kubectl `--request-timeout`(UI 프리즈 방지), 사이드카 탐지, prom HTTP/1.1+chunked+재시도, `dechunk` 패닉 안전, `prom_ok` 프로브.
+### Internal
+- 모듈 분리: `src/ops.rs`(폼/액션 타입), `src/ui/overlays.rs`, `collect_kube` leaf 파서 추출. 테스트 24개.
+
 ## [0.26.1]
 ### Changed — 데모 GIF 재촬영(느린 전환 + 새 뷰)
 - cast 전환 속도 완화(DT 0.10→0.13)로 각 뷰를 더 느긋하게. 스토리보드에 Nodes(disk)·Deploy 추가.
