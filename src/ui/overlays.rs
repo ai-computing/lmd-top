@@ -12,7 +12,7 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
     let fit = app.compile_fit(form);
     let full = f.area();
     // 높이: 헤더3 + family1 + 필드 + 도움말1 + fit 2 + 추정근거1 + tips + 여백.
-    let h = (form.fields.len() as u16) + (fit.tips.len() as u16) + 13;
+    let h = (form.fields.len() as u16) + (fit.tips.len() as u16) + (app.compile_preflight(form).len() as u16) + 14;
     let area = centered(full, 92, h.min(full.height.saturating_sub(2)));
     f.render_widget(Clear, area);
     let mut lines: Vec<Line> = Vec::new();
@@ -81,6 +81,17 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
     for tip in &fit.tips {
         let tcol = if tip.starts_with('⚠') { C_BAD() } else { C_WARN() };
         lines.push(Line::from(Span::styled(format!("   → {}", tip), Style::default().fg(tcol))));
+    }
+    // ── preflight: 컴파일 전 전제조건 사전 점검(누락 툴체인·레지스트리·드라이버 등 사전 방어) ──
+    let pf = app.compile_preflight(form);
+    let pf_ok = pf.iter().all(|(ok, _)| *ok);
+    lines.push(Line::from(Span::styled(
+        format!("  preflight {}", if pf_ok { "● ready" } else { "✗ blocked" }),
+        Style::default().fg(if pf_ok { C_OK() } else { C_BAD() }).add_modifier(Modifier::BOLD),
+    )));
+    for (ok, msg) in &pf {
+        let (g, c) = if *ok { ("✓", C_DIM()) } else { ("✗", C_BAD()) };
+        lines.push(Line::from(Span::styled(format!("   {} {}", g, msg), Style::default().fg(c))));
     }
     let title = if form.editing {
         format!("compile · {} · TYPING custom — Enter/Esc confirm · Backspace del", form.vendor)
