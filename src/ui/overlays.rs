@@ -106,9 +106,12 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
     let Some(form) = &app.deploy_form else { return };
     let fit = app.deploy_fit(form);
     let full = f.area();
-    let h = (form.fields.len() as u16) + (fit.tips.len() as u16) + (app.deploy_preflight(form).len() as u16) + 13;
-    let area = centered(full, 92, h.min(full.height.saturating_sub(2)));
+    let h = (form.fields.len() as u16) + (fit.tips.len() as u16) + (app.deploy_preflight(form).len() as u16) + 17;
+    let w = full.width.saturating_sub(6).clamp(72, 104);
+    let area = centered(full, w, h.min(full.height.saturating_sub(2)));
     f.render_widget(Clear, area);
+    // 섹션 헤더 헬퍼(구획을 명확히).
+    let section = |t: &str| Line::from(Span::styled(format!("── {} ", t), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)));
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("  model  ", Style::default().fg(C_DIM())),
@@ -116,18 +119,20 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
         Span::styled(format!("   engine {}", form.engine), Style::default().fg(C_DIM())),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  serve  ", Style::default().fg(C_DIM())),
+        Span::styled("  serve   ", Style::default().fg(C_DIM())),
         Span::styled(form.mount.clone(), Style::default().fg(C_ACC())),
     ]));
     lines.push(Line::from(""));
+    lines.push(section("설정  (↑↓ 항목 · ←→ 값 선택 · e 직접입력)"));
     for (i, fld) in form.fields.iter().enumerate() {
         let active = i == form.cursor;
         lines.push(choice_row(fld, active, active && form.editing));
     }
-    lines.push(Line::from(""));
     if let Some(fld) = form.fields.get(form.cursor) {
-        lines.push(Line::from(Span::styled(format!("  {}", fld.help), Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled(format!("   ↳ {}", fld.help), Style::default().fg(C_DIM()))));
     }
+    lines.push(Line::from(""));
+    lines.push(section("용량  (요청 디바이스가 유휴에 들어가는지)"));
     let vcol = match fit.verdict {
         crate::app::FitVerdict::Fits => C_OK(),
         crate::app::FitVerdict::Tight => C_WARN(),
@@ -152,21 +157,31 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
         let tcol = if tip.starts_with('⚠') { C_BAD() } else { C_WARN() };
         lines.push(Line::from(Span::styled(format!("   → {}", tip), Style::default().fg(tcol))));
     }
-    // ── preflight: apply 전 서빙 전제조건 사전 점검 ──
+    // ── preflight: apply 전에 "이 배포가 실패할 조건"을 미리 검사(사전 방어) ──
     let pf = app.deploy_preflight(form);
     let pf_ok = pf.iter().all(|(ok, _)| *ok);
-    lines.push(Line::from(Span::styled(
-        format!("  preflight {}", if pf_ok { "● ready" } else { "✗ check" }),
-        Style::default().fg(if pf_ok { C_OK() } else { C_BAD() }).add_modifier(Modifier::BOLD),
-    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("── preflight ", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+        Span::styled("(apply 전 실패 조건 미리 검사) ", Style::default().fg(C_DIM())),
+        Span::styled(
+            if pf_ok { "● 모두 통과 — apply 가능" } else { "✗ 아래 ✗ 항목 해결 필요" },
+            Style::default().fg(if pf_ok { C_OK() } else { C_BAD() }).add_modifier(Modifier::BOLD),
+        ),
+    ]));
     for (ok, msg) in &pf {
-        let (g, c) = if *ok { ("✓", C_DIM()) } else { ("✗", C_BAD()) };
-        lines.push(Line::from(Span::styled(format!("   {} {}", g, msg), Style::default().fg(c))));
+        let (g, c) = if *ok { ("✓", C_OK()) } else { ("✗", C_BAD()) };
+        lines.push(Line::from(vec![
+            Span::styled(format!("   {} ", g), Style::default().fg(c).add_modifier(Modifier::BOLD)),
+            Span::styled(msg.clone(), Style::default().fg(if *ok { C_DIM() } else { C_WARN() })),
+        ]));
     }
     let title = if form.editing {
-        "deploy · TYPING custom — Enter/Esc confirm · Backspace del".to_string()
+        "deploy · 직접입력 중 — Enter/Esc 확인 · Backspace 삭제".to_string()
+    } else if pf_ok {
+        "deploy · ↑↓ 항목 · ←→ 값 · e 직접입력 · Enter→매니페스트 미리보기 · q 취소".to_string()
     } else {
-        "deploy · ↑↓ row · ←→ pick · e custom · Enter → manifest · q cancel".to_string()
+        "deploy · preflight ✗ 있음(미리보기는 가능, apply 는 막힐 수 있음) · Enter→미리보기 · q 취소".to_string()
     };
     f.render_widget(Paragraph::new(lines).block(block(&title)), area);
 }
