@@ -109,11 +109,10 @@ pub enum View {
     Launch,
     Events,
     Nodes,
-    Store,
 }
 
 impl View {
-    pub const ALL: [View; 11] = [
+    pub const ALL: [View; 10] = [
         View::Overview,
         View::Accel,
         View::Models,
@@ -124,7 +123,6 @@ impl View {
         View::Launch,
         View::Events,
         View::Nodes,
-        View::Store,
     ];
     pub fn idx(&self) -> usize {
         View::ALL.iter().position(|v| v == self).unwrap_or(0)
@@ -141,7 +139,6 @@ impl View {
             View::Launch => "Launch",
             View::Events => "Events",
             View::Nodes => "Nodes",
-            View::Store => "Store",
         }
     }
 }
@@ -164,6 +161,7 @@ pub struct App {
     pub paused: bool,     // 화면 갱신 일시정지(데이터 고정, 읽기용)
     pub detail_scroll: u16, // detail 내부 세로 스크롤
     pub dev_sel: usize,     // Node 상세 내 device 커서: 0=노드요약, 1..=n=해당 device 히스토리
+    pub models_persp: usize, // Models 뷰 관점: 0=serving(런타임) · 1=artifacts(모델 정체성/저장/컴파일)
     pub logs_mode: bool,      // 로그 오버레이
     pub logs_target: String,  // 로그 대상 pod
     pub logs: Vec<String>,    // 로그 줄
@@ -230,6 +228,7 @@ impl App {
             paused: false,
             detail_scroll: 0,
             dev_sel: 0,
+            models_persp: 0,
             logs_mode: false,
             logs_target: String::new(),
             logs: Vec::new(),
@@ -501,14 +500,13 @@ impl App {
             View::Nodes => self.snap.nodes.get(i).map(|n| n.name.clone()).unwrap_or_default(),
             View::Routing => self.snap.routes.get(i).map(|r| format!("{} {}", r.path, r.backend)).unwrap_or_default(),
             View::Perf => self.snap.perf_rows.get(i).map(|r| r.model.clone()).unwrap_or_default(),
-            View::Store => self.snap.artifacts.get(i).map(|a| format!("{} {} {}", a.model, a.source, a.engine)).unwrap_or_default(),
         }
     }
 
     /// 상세 패널을 가진 뷰인지(detail=true 가 실제로 렌더에 반영되는 뷰).
     /// 없는 뷰(Routing/Epp/Launch/Events)에서 detail=true 로 두면 ↑↓ 가 스크롤로 빠져 네비가 잠김.
     pub fn view_has_detail(&self) -> bool {
-        matches!(self.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events | View::Store)
+        matches!(self.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events)
     }
 
     pub fn toggle_detail(&mut self) {
@@ -868,7 +866,6 @@ impl App {
                 idx
             }
             View::Routing => (0..self.snap.routes.len()).collect(),
-            View::Store => (0..self.snap.artifacts.len()).collect(),
         };
         if !self.filter.is_empty() {
             let fl = self.filter.to_lowercase();
@@ -912,10 +909,20 @@ impl App {
             _ => None,
         }
     }
+    /// Models 뷰의 artifacts 관점에서만 — 선택 모델명에 대응하는 아티팩트.
     pub fn selected_artifact(&self) -> Option<&crate::collect::ModelArtifact> {
-        match self.view {
-            View::Store => self.sel_orig().and_then(|i| self.snap.artifacts.get(i)),
-            _ => None,
+        if self.view != View::Models || self.models_persp != 1 {
+            return None;
+        }
+        let i = self.sel_orig()?;
+        let name = self.snap.models.get(i)?.name.clone();
+        self.snap.artifacts.iter().find(|a| a.model == name)
+    }
+    /// Models 뷰 관점 토글(serving ⇄ artifacts).
+    pub fn toggle_models_persp(&mut self) {
+        if self.view == View::Models {
+            self.models_persp ^= 1;
+            self.detail = false;
         }
     }
 

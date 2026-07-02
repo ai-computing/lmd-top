@@ -43,7 +43,7 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
         tabs(f, c[2], app);
         (c[3], c[4], Some(c[1]))
     };
-    if app.detail && matches!(app.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events | View::Store) {
+    if app.detail && matches!(app.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events) {
         detail_panel(f, body, app);
     } else {
         match app.view {
@@ -57,7 +57,6 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
             View::Launch => view_launch(f, body, app),
             View::Events => view_events(f, body, app),
             View::Nodes => view_nodes(f, body, app),
-            View::Store => view_store(f, body, app),
         }
     }
     fxs.body(f, body, dt); // 본문 트랜지션(오버레이 전에)
@@ -347,9 +346,7 @@ fn tabs(f: &mut Frame, area: Rect, app: &App) {
         } else {
             Style::default().fg(C_DIM())
         };
-        let label = if i >= 10 {
-            format!(" {} ", v.title()) // 숫자키(0-9) 밖 — Tab 으로 접근
-        } else if sel || !compact {
+        let label = if sel || !compact {
             format!(" {}:{} ", i, v.title())
         } else {
             format!(" {} ", i)
@@ -408,13 +405,16 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     let mut parts: Vec<String> = Vec::new();
     parts.push("↑↓ sel".into());
     match v {
-        Accel | Models | Overview | Pods | Nodes | Events | Store => parts.push("⏎ detail".into()),
+        Accel | Models | Overview | Pods | Nodes | Events => parts.push("⏎ detail".into()),
         Perf => parts.push("⏎ p50/95/99".into()),
         Routing => parts.push("⏎ model".into()),
         _ => {}
     }
-    if matches!(v, Accel | Models | Overview | Pods | Launch | Epp | Events | Nodes | Store) {
+    if matches!(v, Accel | Models | Overview | Pods | Launch | Epp | Events | Nodes) {
         parts.push("/ filter".into());
+    }
+    if v == Models {
+        parts.push(format!("v {}", if app.models_persp == 1 { "→serving" } else { "→artifacts" }));
     }
     if app.sort_modes() > 1 {
         parts.push(format!("o sort:{}", app.sort_label()));
@@ -514,11 +514,73 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
 
 // ── Models ─────────────────────────────────────────────
 fn view_models(f: &mut Frame, area: Rect, app: &App) {
+    if app.models_persp == 1 {
+        view_models_artifacts(f, area, app);
+        return;
+    }
     let mut st = TableState::default();
     st.select(Some(app.selected));
     let total = app.order().len();
-    f.render_stateful_widget(models_table(app, "Models · ⏎ detail"), area, &mut st);
+    f.render_stateful_widget(models_table(app, "Models · serving · v→artifacts · ⏎ detail"), area, &mut st);
     list_scrollbar(f, area, total, app.selected, 1);
+}
+
+/// Models 뷰 artifacts 관점 — 모델 정체성(HF/local 소스·포맷) 중심 + 컴파일 옵션 + 저장 노드.
+fn view_models_artifacts(f: &mut Frame, area: Rect, app: &App) {
+    let order = app.order(); // models 인덱스
+    let rows: Vec<Row> = order
+        .iter()
+        .map(|&i| {
+            let m = &app.snap.models[i];
+            let a = app.snap.artifacts.iter().find(|a| a.model == m.name);
+            let (src, is_hf) = match a {
+                Some(a) if !a.source.is_empty() => {
+                    let hf = a.source.contains('/') && !a.source.starts_with('/');
+                    (a.source.clone(), hf)
+                }
+                _ => ("–".to_string(), false),
+            };
+            let src_cell = if src == "–" {
+                Cell::from(Span::styled("–", Style::default().fg(C_DIM())))
+            } else {
+                Cell::from(Line::from(vec![
+                    Span::styled(if is_hf { "HF " } else { "local " }, Style::default().fg(if is_hf { C_ACC() } else { C_DIM() })),
+                    Span::styled(truncw(&src, 30), Style::default().fg(Color::White)),
+                ]))
+            };
+            // 포맷: quant/dtype
+            let fmt = a
+                .map(|a| {
+                    let q = a.opts.iter().find(|(k, _)| k == "quant").map(|(_, v)| v.clone());
+                    let d = a.opts.iter().find(|(k, _)| k == "dtype").map(|(_, v)| v.clone());
+                    [q, d].into_iter().flatten().collect::<Vec<_>>().join("/")
+                })
+                .unwrap_or_default();
+            let opts = a.map(opts_summary).unwrap_or_default();
+            let npu = matches!(m.engine.as_str(), "vLLM-RBLN" | "Furiosa-LLM") || m.engine.contains("RBLN");
+            Row::new(vec![
+                cellw(m.name.clone(), 20),
+                Cell::from(Span::styled(truncw(&m.engine, 11), Style::default().fg(C_ACC()))),
+                src_cell,
+                Cell::from(Span::styled(if fmt.is_empty() { "–".into() } else { fmt }, Style::default().fg(C_WARN()))),
+                Cell::from(Span::styled(if opts.is_empty() { "–".into() } else { opts }, Style::default().fg(if npu { C_WARN() } else { Color::Gray }))),
+                Cell::from(Span::styled(a.map(|a| if a.node.is_empty() { "?".into() } else { a.node.clone() }).unwrap_or_else(|| "?".into()), Style::default().fg(C_DIM()))),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Min(14),
+        Constraint::Length(11),
+        Constraint::Length(34),
+        Constraint::Length(10),
+        Constraint::Min(16),
+        Constraint::Length(12),
+    ];
+    render_list_table(
+        f, area, rows, &widths,
+        &["MODEL", "ENGINE", "SOURCE", "FORMAT", "COMPILE / SERVE OPTS", "NODE"],
+        "Models · artifacts · v→serving · ⏎ full", app.selected, order.len(),
+    );
 }
 
 const MODEL_COLS: [&str; 10] = ["name", "engine", "accel", "ready", "run", "wait", "kv", "tps", "path", "status"];
@@ -561,7 +623,6 @@ fn model_cell(k: &str, m: &crate::collect::ModelRow, selected: bool, tick: u64) 
 }
 
 fn models_table<'a>(app: &'a App, title: &'a str) -> Table<'static> {
-    let _ = title;
     let cols = app.columns("models", &MODEL_COLS); // 설정파일 columns.models 순서/표시
     let order = app.order();
     let rows: Vec<Row> = order
@@ -579,7 +640,7 @@ fn models_table<'a>(app: &'a App, title: &'a str) -> Table<'static> {
         .column_spacing(1)
         .row_highlight_style(hl_style())
         .highlight_symbol("▎")
-        .block(block("Models · ⏎ detail"))
+        .block(block(title))
 }
 
 // ── Pods ───────────────────────────────────────────────
@@ -1267,11 +1328,13 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     if let Some(a) = app.selected_artifact() {
         let mut lines = vec![
             kv("model", &a.model, Color::White),
+            kv("family", &a.family, C_DIM()),
             kv("engine", &a.engine, C_ACC()),
             kv("image", if a.image.is_empty() { "–" } else { &a.image }, C_DIM()),
             Line::from(""),
             kv("source", if a.source.is_empty() { "– (not in container args/env)" } else { &a.source }, Color::White),
-            kv("storage", if a.mount.is_empty() { "– (no volume mount)" } else { &a.mount }, Color::White),
+            kv("storage node", if a.node.is_empty() { "–" } else { &a.node }, Color::White),
+            kv("storage path", if a.mount.is_empty() { "– (no volume mount)" } else { &a.mount }, Color::White),
             Line::from(""),
             Line::from(Span::styled("compile / serve options", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))),
         ];
@@ -1950,7 +2013,7 @@ fn view_events(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-// ── Store (모델 계열 → 변형 트리: 저장 노드 + 컴파일 옵션) ───────────
+// ── Models artifacts 관점 헬퍼 ───────────
 /// 변형 한 줄에 넣을 컴파일 옵션 요약 — 중요 순으로 몇 개만.
 fn opts_summary(a: &crate::collect::ModelArtifact) -> String {
     const PRI: [&str; 12] = ["tp", "pp", "dp", "max-len", "batch", "bucket", "quant", "dtype", "kv-dtype", "npu", "devices", "device"];
@@ -1972,76 +2035,6 @@ fn opts_summary(a: &crate::collect::ModelArtifact) -> String {
     out.join(" ")
 }
 
-fn view_store(f: &mut Frame, area: Rect, app: &App) {
-    let order = app.order();
-    if order.is_empty() {
-        f.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled("no model artifacts", Style::default().fg(C_DIM()))),
-                Line::from(Span::styled("source / storage node / compile options are read from each deployment's container spec.", Style::default().fg(C_DIM()))),
-            ])
-            .block(block("Store · model family → variants")),
-            area,
-        );
-        return;
-    }
-    let sel_orig = app.sel_orig();
-    // family 별 그룹(최초 등장 순 유지).
-    let mut fams: Vec<(String, Vec<usize>)> = Vec::new();
-    for &i in &order {
-        let fam = app.snap.artifacts[i].family.clone();
-        if let Some(e) = fams.iter_mut().find(|(k, _)| *k == fam) {
-            e.1.push(i);
-        } else {
-            fams.push((fam, vec![i]));
-        }
-    }
-    let mut lines: Vec<Line> = Vec::new();
-    let mut sel_line = 0usize;
-    for (fam, idxs) in &fams {
-        lines.push(Line::from(vec![
-            Span::styled("▪ ", Style::default().fg(C_ACC())),
-            Span::styled(fam.clone(), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  ({} variant{})", idxs.len(), if idxs.len() == 1 { "" } else { "s" }), Style::default().fg(C_DIM())),
-        ]));
-        let last = idxs.len();
-        for (j, &i) in idxs.iter().enumerate() {
-            let a = &app.snap.artifacts[i];
-            let selected = sel_orig == Some(i);
-            if selected {
-                sel_line = lines.len();
-            }
-            let br = if j + 1 == last { "  └─ " } else { "  ├─ " };
-            let opts = opts_summary(a);
-            let mut sp = vec![
-                Span::styled(br.to_string(), Style::default().fg(C_TRACK())),
-                Span::styled(format!("{:<22} ", truncw(&a.model, 22)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:<12} ", truncw(&a.engine, 12)), Style::default().fg(C_ACC())),
-                Span::styled(format!("@{:<14} ", if a.node.is_empty() { "?" } else { &a.node }), Style::default().fg(C_DIM())),
-            ];
-            if opts.is_empty() {
-                sp.push(Span::styled("· no compile opts detected", Style::default().fg(C_DIM())));
-            } else {
-                let npu = matches!(a.engine.as_str(), "vLLM-RBLN" | "Furiosa-LLM") || a.engine.contains("RBLN");
-                sp.push(Span::styled(opts, Style::default().fg(if npu { C_WARN() } else { Color::Gray })));
-            }
-            let mut line = Line::from(sp);
-            if selected {
-                line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
-            }
-            lines.push(line);
-        }
-    }
-    // 선택 행이 보이도록 스크롤(Nodes 뷰와 동일 방식).
-    let vis = (area.height as usize).saturating_sub(2);
-    let scroll = if sel_line + 2 > vis { (sel_line + 3).saturating_sub(vis) as u16 } else { 0 };
-    f.render_widget(
-        Paragraph::new(lines)
-            .scroll((scroll, 0))
-            .block(block(&format!("Store · model family → variants · ⏎ full{}", count_suffix(app.selected, order.len())))),
-        area,
-    );
-}
 
 // ── 진단 ───────────────────────────────────────────────
 // 판정 로직은 app::diagnose(agent JSON 과 공유). 여기선 글리프+색만 입힌다.

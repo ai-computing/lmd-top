@@ -289,6 +289,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                         KeyCode::Char('R') => app.reset_energy(),
                         KeyCode::Char('?') => app.toggle_help(),
                         KeyCode::Char('A') | KeyCode::Char('a') => app.toggle_alerts(),
+                        KeyCode::Char('v') => app.toggle_models_persp(), // Models: serving ⇄ artifacts
                         KeyCode::Char('t') => app.cycle_theme(),
                         KeyCode::Char('f') => {
                             let on = fx.toggle();
