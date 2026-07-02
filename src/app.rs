@@ -1333,17 +1333,23 @@ impl App {
         let (volumes_extra, env_block, mounts_extra, command, note) = if vendor == "furiosa" {
             let pp = { let p = form.get("pp"); if p.is_empty() { "1".into() } else { p } };
             let ml = { let m = form.get("max-len"); if m.is_empty() { "8192".into() } else { m } };
-            // fxb 는 .fxb 아카이브를 씀 → {target}/model.fxb 로 디렉터리 안에 두어 discovery 레이아웃 유지.
+            // 실기 검증 반영:
+            //  - RNGD 는 ARM64 제어 프로세서라 EDF 최종 코드젠에 aarch64 크로스컴파일러 필요(gcc-aarch64-linux-gnu).
+            //    furiosa-llm serve 이미지엔 없어 apt 로 설치(또는 build-complete 이미지 사용).
+            //  - SMB 스토어는 컴파일 작업 I/O(mmap 등) 미지원(os error 95) → 로컬 emptyDir 에 빌드 후 스토어로 복사.
+            //  - fxb 는 .fxb 아카이브 → {target}/model.fxb 로 디렉터리 안에 두어 discovery 레이아웃 유지.
             let cmd = format!(
-                "set -e; mkdir -p {outdir}; fxb build {model_id} {outdir}/model -tp {tp} -pp {pp} --max-model-len {ml}; echo COMPILE_DONE; ls -la {outdir}",
+                "set -e; apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq gcc-aarch64-linux-gnu build-essential >/dev/null 2>&1; \
+                 mkdir -p /work/out; fxb build {model_id} /work/out/model -tp {tp} -pp {pp} --max-model-len {ml} --concurrency 8; \
+                 mkdir -p {outdir}; cp -r /work/out/. {outdir}/; echo COMPILE_DONE; ls -la {outdir}",
                 outdir = outdir, model_id = model_id, tp = tp, pp = pp, ml = ml
             );
             (
-                String::new(),
-                "             \x20           - { name: HF_HOME, value: /mnt/store/hub }\n".to_string(),
-                String::new(),
+                "        - { name: work, emptyDir: {} }\n".to_string(),
+                "             \x20           - { name: HF_HOME, value: /work/hub }\n".to_string(),
+                "            - { name: work, mountPath: /work }\n".to_string(),
                 format!("[\"sh\", \"-c\", \"{}\"]", cmd),
-                "# Furiosa: 이미지의 fxb build 직접 호출(레지스트리 등록 모델만 빌드됨).",
+                "# Furiosa: fxb build 직접(레지스트리=furiosa-ai 양자화 체크포인트). aarch64 xcc 설치+로컬빌드→스토어복사.",
             )
         } else {
             let env_lines: String = envs
