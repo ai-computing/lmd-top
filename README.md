@@ -1,7 +1,7 @@
 # lmd-top
 
 > **A terminal observability & operations tool for [llm-d](https://llm-d.ai) clusters.**
-> `k9s` navigation · `all-smi` accelerator cards · **first-class EPP routing awareness** — one screen, one static binary.
+> The whole serving stack — Gateway, EPP routing, model servers, and heterogeneous accelerators — on one screen, in one static binary.
 
 ![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white)
 ![single static binary](https://img.shields.io/badge/single%20static%20binary-no%20C%20deps-success)
@@ -42,17 +42,10 @@ It reads your existing Prometheus + Kubernetes; it owns no data of its own.
 
 ## Why lmd-top?
 
-The llm-d ecosystem has **no live, operator-facing terminal tool** — only Grafana web
-dashboards, benchmark harnesses, and `helm`/`kubectl`. `lmd-top` fills that gap, and
-uniquely **observes and explains EPP routing decisions**.
-
-| | Sees | llm-d / EPP awareness | Accelerators | K8s actions | Terminal |
-|---|---|---|---|---|---|
-| `k9s` | K8s objects | ❌ | ❌ | ✅ | ✅ |
-| `all-smi` | Infra (accelerators) only | ❌ | ✅✅ | ❌ | ✅ |
-| `llmtop` | single-host psutil | ❌ | ⚠️ | ❌ | ✅ |
-| Grafana | all-layer metrics | ⚠️ | ✅ | ❌ | ❌ web |
-| **lmd-top** | **4-layer correlation** | ✅✅ EPP `Filter→Score→Pick` | ✅ | ✅ | ✅ |
+A live, operator-facing terminal view of an llm-d cluster: it **correlates the four
+serving layers** — Gateway → EPP (Endpoint Picker) → model servers → accelerators — and
+**observes and explains EPP routing decisions**, so you can answer *which model runs where,
+how requests are routed, and how load is distributed* without leaving the terminal.
 
 ---
 
@@ -71,7 +64,7 @@ uniquely **observes and explains EPP routing decisions**.
   visualizes routing decisions and per-pod queues, and **auto-diagnoses whether an
   HTTPRoute goes through the InferencePool (EPP) or bypasses it** (a common misconfig
   that leaves EPP metrics empty).
-- **all-smi-style visuals.** Per-device gauges, inline sparklines, btop/nvtop-style
+- **Rich accelerator visuals.** Per-device gauges, inline sparklines, braille
   **area-fill timelines**, an at-a-glance **LED device grid**, and a **stacked VRAM
   composition bar** (by vendor).
 - **Active alerting.** Threshold/health conditions (throttle, not-alive, hot, node
@@ -114,21 +107,40 @@ Ten correlated views — switch with the top number keys (`0`–`9`) or `Tab`:
 
 ### Prerequisites
 
-- **Rust** toolchain (`rustup`) + a **C linker** (`gcc`/`cc`), required for Rust linking:
+**Build** (audited — the binary links only glibc; there are **no native/C-library
+dependencies**, no OpenSSL/pkg-config/cmake):
+
+- **Rust** toolchain (`rustup`) + a **C linker** (`gcc`/`cc`, only to link against libc):
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  sudo apt-get install -y build-essential      # gcc/cc linker
+  sudo apt-get install -y build-essential      # provides the cc/gcc linker
   ```
-- Runtime: `kubectl` (with kubeconfig access) + reachability to Prometheus.
-  **No SSH to accelerator nodes is needed** — everything goes through Prometheus.
+  First build fetches Rust crates from crates.io (network needed once); after that it is offline.
+
+**Runtime:**
+
+- `kubectl` on `PATH` with kubeconfig access (topology / status / `scale` action).
+- Network reachability to **Prometheus** (metrics). **No SSH to accelerator nodes** — everything goes through Prometheus.
+- A terminal with **truecolor** (24-bit) support and a monospace font that covers **box-drawing + braille** glyphs (most modern fonts / any Nerd Font; e.g. DejaVu Sans Mono). Needed for the soft theme + timeline graphs — otherwise switch to `LMD_THEME=default` and expect blank glyphs.
+- *Optional:* `xdg-open` — only for the `g` key (open Grafana in a browser); harmless if absent.
+
+Everything else (Prometheus HTTP client, rendering, animation) is pure Rust in the single binary.
 
 ### Build & install
 
 ```bash
 git clone https://github.com/gspark-etri/lmd-top.git && cd lmd-top
+
+./install.sh          # installs any missing prereqs (Rust, cc) then `cargo install`
+#   ./install.sh --check       # just report what's present/missing, install nothing
+*Demo recording omitted from the public export.*
+```
+
+Or do it by hand (Rust crate deps are fetched by `cargo` automatically — nothing to install manually):
+
+```bash
 cargo install --path .        # → ~/.cargo/bin/lmd-top
-# or just build:
-cargo build --release         # → target/release/lmd-top
+cargo build --release         # or just build → target/release/lmd-top
 ```
 
 ---
@@ -294,21 +306,35 @@ src/
 
 ---
 
-## Roadmap
+## Status & roadmap — what works today
 
-- **Phase 1 — Monitor** ✅ *(current)* — 10 correlated views, active alerting, logs, scale action.
-- **Phase 2 — Control plane** *(next)* — permission modes (observe/debug/admin/danger), a
-  machine-readable **agent JSON** state (`--snapshot --json`), and safe actions (endpoint
-  drain / traffic & policy weight / rollout) with dry-run → confirm → audit.
-- **Phase 3 — LLM-native depth** *(infra-gated; skeleton-first)* — PD-aware dashboard, EPP
-  decision debugger with per-endpoint score table, KV/prefix cache locality, SLO/goodput
-  diagnosis. Fills in once traffic goes through the EPP with vLLM/tracing metrics.
-- **ModelService-native** — shift Models/Launch from raw Deployments to llm-d ModelService
-  CRDs, enabling real deploy from the catalog.
+### ✅ Works now (no traffic required)
+- All **10 views** with navigation, filtering, sorting, and drill-down detail (incl. **pivot previews** in model detail, per-device history in node detail, Enter-to-read event detail).
+- **Accelerator monitoring** — NVIDIA GPU / Rebellions RBLN / Furiosa RNGD side by side; exact GPU model + VRAM **auto-detected** from DCGM; **unified-memory** parts marked `∪`. LED grid, stacked VRAM bar, timelines, sparklines.
+- **Node monitoring** — status / kubelet / CPU / load / memory + devices per node.
+- **Topology (Flow)** — Gateway → HTTPRoute → backend → pods, InferencePool/EPP, and the **EPP-bypass diagnosis** (HTTPRoute→Service instead of InferencePool).
+- **EPP introspection** — active scorers, weights, picker from the `ConfigMap`.
+- **Active alerting** (throttle / not-alive / hot / node NotReady·cordon·pressure / pod restarts·Failed) with flash + toast + **alert history** (`A`).
+- **Actions**: `scale` a model (admin mode, with `y/n` confirm); **logs** overlay (debug mode).
+- **Headless / agent**: `--snapshot`, `--json` (agent state), `--doctor` (metric coverage survey), `--render`, `--cast` (demo).
+- **UX**: 4 themes, tasteful animations (`f`), zoom (`z`), pause, freshness clock, permission modes, Grafana open (`g`).
+
+### 🟡 Works once the workload + EPP path are live (metric-gated)
+These render `–` / "no data" until real requests flow **through the InferencePool/EPP** and vLLM exposes metrics:
+- **Per-model performance** (Perf) — p95 latency broken down QUEUE → PREFILL → DECODE → TPOT → E2E, tok/s, preemptions, per-pod queue distribution.
+- **EPP request distribution** — routing-decision shares per pod (needs EPP-path traffic).
+- **KV cache %, TTFT / E2E, running/waiting** in Models/Overview.
+- The **EPP weight what-if** (`+`/`-`) is a **local simulation of weight share only** — it does *not* apply to the cluster or re-run real routing.
+
+### 🔴 Not yet (planned)
+- **Applied control-plane actions** beyond scale — endpoint **drain**, **traffic / policy-weight apply**, **rollout** (dry-run → confirm → audit). *(danger mode delete/force is reserved.)*
+- **EPP decision debugger** — per-endpoint `Filter→Score→Pick` score table (needs per-endpoint scoring metrics).
+- **PD-aware dashboard**, KV/prefix-cache locality, SLO/goodput diagnosis.
+- **ModelService-native** — Launch is currently **read-only** (feasibility only); real deploy from the catalog awaits llm-d ModelService CRD wiring.
 
 See `ROADMAP.md` for the detailed plan and `CHANGELOG.md` for release history.
 
-## Status
+## Maturity
 
-Verified against a live cluster (5 nodes, 12 accelerators, EPP/routes/models live).
-Experimental (0.x) — interfaces may change.
+Verified against a live heterogeneous cluster (8 nodes; GB10 · RBLN · RNGD accelerators;
+EPP / routes / models live). Experimental (0.x) — interfaces may change.
