@@ -7,10 +7,12 @@ mod app;
 mod cast;
 mod catalog;
 mod collect;
+mod compat;
 mod config;
 mod doctor;
 mod kube;
 mod metrics;
+mod ops;
 mod prom;
 mod ui;
 
@@ -32,10 +34,104 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+const HELP: &str = "\
+lmd-top — terminal observability & operations for llm-d clusters
+
+USAGE:
+    lmd-top [OPTIONS]
+
+OPTIONS:
+    --mode <MODE>    permission mode: observe (default) | debug | admin | danger
+    --json           print machine-readable agent state (JSON) and exit
+    --doctor         survey Prometheus: exporters, metric coverage, gaps
+    --snapshot, -s   collect once, print headless text summary
+    --render         render each view to text via TestBackend (CI / no-tty)
+    --cast [FILE]    write a demo asciicast (default: docs/demo.cast)
+    --help, -h       show this help and exit
+
+ENVIRONMENT:
+    LMD_PROM         Prometheus host:port
+    LMD_NS           namespace (default: llm-serving)
+    LMD_GRAFANA      Grafana base URL (opened by the `g` key)
+    LMD_THEME        startup theme: soft | default | high-contrast | colorblind
+    LMD_W / LMD_H    size for --render
+
+With no options, lmd-top launches the interactive TUI. See `?` in the TUI for keybindings.";
+
+/// 인자 검증 결과 — main 이 이에 따라 도움말/에러를 출력하고 분기.
+#[derive(Debug, PartialEq)]
+enum ArgCheck {
+    Ok,
+    Help,
+    Unknown(String),
+    BadMode(String),
+    MissingMode,
+}
+
+/// args[1..] 를 훑어 알려진 플래그만 허용. 미지원 플래그/잘못된 --mode 는 거부.
+fn check_args(args: &[String]) -> ArgCheck {
+    // 도움말이 있으면 최우선.
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        return ArgCheck::Help;
+    }
+    const NOVALUE: &[&str] = &["--doctor", "--json", "--snapshot", "-s", "--render"];
+    let mut i = 1;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--mode" {
+            match args.get(i + 1) {
+                None => return ArgCheck::MissingMode,
+                Some(v) if Mode::parse(v).is_none() => return ArgCheck::BadMode(v.clone()),
+                Some(_) => i += 2,
+            }
+            continue;
+        }
+        if a == "--cast" {
+            // 선택적 출력 경로 값(플래그가 아니면 소비).
+            if args.get(i + 1).map(|s| !s.starts_with('-')).unwrap_or(false) {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if NOVALUE.contains(&a) {
+            i += 1;
+            continue;
+        }
+        return ArgCheck::Unknown(args[i].clone());
+    }
+    ArgCheck::Ok
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     let cfg = Config::default();
     let args: Vec<String> = std::env::args().collect();
+
+    // 인자 검증 — 도움말/미지원 플래그/잘못된 --mode 는 여기서 처리(TUI 진입 전).
+    match check_args(&args) {
+        ArgCheck::Ok => {}
+        ArgCheck::Help => {
+            println!("{}", HELP);
+            return Ok(());
+        }
+        ArgCheck::Unknown(f) => {
+            eprintln!("lmd-top: unknown argument '{}'\n", f);
+            eprintln!("{}", HELP);
+            std::process::exit(2);
+        }
+        ArgCheck::BadMode(v) => {
+            eprintln!("lmd-top: invalid --mode '{}' (expected observe|debug|admin|danger)\n", v);
+            eprintln!("{}", HELP);
+            std::process::exit(2);
+        }
+        ArgCheck::MissingMode => {
+            eprintln!("lmd-top: --mode requires a value (observe|debug|admin|danger)\n");
+            eprintln!("{}", HELP);
+            std::process::exit(2);
+        }
+    }
 
     // 메트릭 전수조사 + 갭 분석(왜 뷰가 비었나 진단).
     if args.iter().any(|a| a == "--doctor") {
@@ -80,6 +176,121 @@ async fn main() -> Result<()> {
     run_tui(cfg, mode).await
 }
 
+/// 액션 메뉴에서 고른 동작 실행 — 권한 게이팅 포함. 폼/확인은 오버레이로, 로그는 즉시.
+fn dispatch_action(app: &mut App, action: app::Action, subject: &str, ns: &str, prom: &str, rt: &tokio::runtime::Handle) {
+    use app::{Action, Mode, Pending, View};
+    match action {
+        Action::Info => {
+            if app.view == View::Launch && app.panel_focus == 1 {
+                app.pivot_to_node(subject); // 노드 상세로 점프
+            } else if app.view == View::Launch && app.panel_focus == 2 {
+                let s = app.catalog_feasibility(subject);
+                app.notify(s);
+            } else {
+                app.detail = true;
+            }
+        }
+        Action::Compile(vendor) => {
+            if !app.can(Mode::Admin) {
+                app.notify(format!("compile needs --mode admin+ (current: {})", app.mode.name()));
+            } else {
+                app.compile_form_for(vendor);
+            }
+        }
+        Action::Deploy => {
+            if !app.can(Mode::Admin) {
+                app.notify(format!("deploy needs --mode admin+ (current: {})", app.mode.name()));
+            } else {
+                app.open_deploy_form();
+            }
+        }
+        Action::Stop => {
+            if !app.can(Mode::Admin) {
+                app.notify(format!("stop needs --mode admin+ (current: {})", app.mode.name()));
+            } else {
+                app.confirm = Some(Pending::Stop { name: subject.to_string() });
+            }
+        }
+        Action::Scale => {
+            if !app.can(Mode::Admin) {
+                app.notify(format!("scale needs --mode admin+ (current: {})", app.mode.name()));
+            } else {
+                let target = app.selected_model().map(|m| if m.desired == 0 { 1 } else { 0 }).unwrap_or(1);
+                app.confirm = Some(Pending::Scale { name: subject.to_string(), target });
+            }
+        }
+        Action::Restart => {
+            if !app.can(Mode::Admin) {
+                app.notify(format!("restart needs --mode admin+ (current: {})", app.mode.name()));
+            } else {
+                app.confirm = Some(Pending::Restart { name: subject.to_string() });
+            }
+        }
+        Action::Yaml => {
+            if let Some((kind, nsd, name)) = app.yaml_target() {
+                let nsopt = if nsd { Some(ns) } else { None };
+                match kube::resource_yaml(kind, nsopt, &name) {
+                    Ok(y) => {
+                        app.preview = Some((format!("{} {} · yaml (read-only)", kind, name), y));
+                        app.preview_scroll = 0;
+                        app.preview_apply = false;
+                    }
+                    Err(e) => app.notify(format!("yaml: {}", e.to_string().lines().next().unwrap_or(""))),
+                }
+            }
+        }
+        Action::Delete => {
+            if !app.can(Mode::Admin) {
+                app.notify(format!("delete needs --mode admin+ (current: {})", app.mode.name()));
+            } else {
+                app.confirm = Some(Pending::DeletePod { name: subject.to_string() });
+            }
+        }
+        Action::Objective => app.open_objective_form(), // 목표 설정(관측 전용, 권한 불필요)
+        Action::Cordon | Action::Uncordon => {
+            if !app.can(Mode::Admin) {
+                app.notify(format!("cordon needs --mode admin+ (current: {})", app.mode.name()));
+            } else {
+                app.confirm = Some(Pending::Cordon { node: subject.to_string(), on: matches!(action, Action::Cordon) });
+            }
+        }
+        Action::Logs => {
+            if !app.can(Mode::Debug) {
+                app.notify(format!("logs needs --mode debug+ (current: {})", app.mode.name()));
+            } else if let Some(pod) = app.logs_target_pod() {
+                match kube::logs(ns, &pod, 400) {
+                    Ok(l) => {
+                        app.logs_scroll = l.len().saturating_sub(30) as u16;
+                        app.logs = l;
+                        app.logs_target = pod;
+                        app.logs_mode = true;
+                    }
+                    Err(e) => app.notify(format!("logs: {}", e)),
+                }
+            } else {
+                app.notify("logs: no pod for selection".to_string());
+            }
+        }
+    }
+    let _ = (prom, rt); // 현재 미사용(향후 온디맨드 조회용 자리)
+}
+
+/// preview 내용을 파일로 저장 — 편집 후 kubectl apply 하거나 보관용. 제목에서 파일명 유추.
+fn save_manifest(title: &str, yaml: &str) -> Result<String> {
+    // 제목 첫 토큰들 → 안전한 파일명.
+    let base: String = title
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let base = if base.is_empty() { "manifest".to_string() } else { base };
+    let dir = std::env::var("LMD_SAVE_DIR").unwrap_or_else(|_| ".".to_string());
+    let path = format!("{}/lmd-{}.yaml", dir.trim_end_matches('/'), &base[..base.len().min(48)]);
+    std::fs::write(&path, yaml)?;
+    Ok(path)
+}
+
 /// 헤드리스 렌더 검증 — TestBackend 로 각 뷰를 한 프레임 그려 텍스트로 출력.
 fn render_dump(snap: collect::Snapshot) {
     use app::View;
@@ -89,7 +300,9 @@ fn render_dump(snap: collect::Snapshot) {
     let rw: u16 = std::env::var("LMD_W").ok().and_then(|s| s.parse().ok()).unwrap_or(100);
     let rh: u16 = std::env::var("LMD_H").ok().and_then(|s| s.parse().ok()).unwrap_or(26);
     let mut fx = ui::FxState::disabled(); // 텍스트 덤프 — 이펙트 끔(부분 프레임 방지)
-    for v in View::ALL {
+    // ALL(8 탭) + 허브 하위 뷰(Accel/Perf) 까지 렌더 커버리지.
+    let views: Vec<View> = View::ALL.iter().copied().chain([View::Accel, View::Perf, View::Topo]).collect();
+    for v in views {
         a.view = v;
         a.selected = 0;
         let backend = TestBackend::new(rw, rh);
@@ -144,8 +357,13 @@ async fn run_tui(cfg: Config, mode: Mode) -> Result<()> {
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 if let Ok(mut g) = shared.lock() {
-                    g.accel = accel;
-                    g.nodes = nodes;
+                    // 빈 결과로 기존 테이블을 덮지 않음 — Prometheus 순간 장애가 "가속기 없음"으로 오인되는 것 방지.
+                    if !accel.is_empty() || g.accel.is_empty() {
+                        g.accel = accel;
+                    }
+                    if !nodes.is_empty() || g.nodes.is_empty() {
+                        g.nodes = nodes;
+                    }
                     g.ts = ts;
                 }
             }
@@ -176,6 +394,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
 
     let mut app = App::new();
     app.mode = mode;
+    app.ns = ns.clone(); // 매니페스트/액션 네임스페이스 = cfg.ns(LMD_NS)
     app::set_theme(cfg.theme); // 시작 테마(LMD_THEME / yaml)
     let mut fx = ui::FxState::new();
     let result = (|| -> Result<()> {
@@ -231,6 +450,25 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                                         Ok(_) => app.notify(format!("rollout restart {}", name)),
                                         Err(e) => app.notify(format!("restart failed: {}", e)),
                                     },
+                                    Pending::Stop { name } => match kube::scale_deploy(&ns, &name, 0) {
+                                        Ok(_) => app.notify(format!("stopped {} (scaled → 0)", name)),
+                                        Err(e) => app.notify(format!("stop failed: {}", e)),
+                                    },
+                                    Pending::Cordon { node, on } => match kube::cordon(&node, on) {
+                                        Ok(_) => app.notify(format!("{} {}", if on { "cordoned" } else { "uncordoned" }, node)),
+                                        Err(e) => app.notify(format!("cordon failed: {}", e)),
+                                    },
+                                    Pending::DeletePod { name } => match kube::delete_pod(&ns, &name) {
+                                        Ok(_) => app.notify(format!("deleted pod {}", name)),
+                                        Err(e) => app.notify(format!("delete failed: {}", e)),
+                                    },
+                                    Pending::Apply { yaml, .. } => match kube::apply_manifest(&ns, &yaml, false) {
+                                        Ok(o) => {
+                                            app.preview = None;
+                                            app.notify(format!("applied — {}", o.lines().next().unwrap_or("ok")));
+                                        }
+                                        Err(e) => app.notify(format!("apply failed: {}", e.to_string().lines().next().unwrap_or(""))),
+                                    },
                                 }
                                 app.confirm = None;
                             }
@@ -251,12 +489,151 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                         }
                         continue;
                     }
-                    // 매니페스트 미리보기 오버레이(compile/deploy dry-run)
+                    // Enter 컨텍스트 액션 메뉴 — ↑↓ 선택, Enter/단축키 실행, q/Esc 닫기.
+                    if app.action_menu.is_some() {
+                        let act = match k.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                app.action_menu = None;
+                                None
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                app.action_menu.as_mut().unwrap().move_cursor(-1);
+                                None
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                app.action_menu.as_mut().unwrap().move_cursor(1);
+                                None
+                            }
+                            KeyCode::Enter => app.action_menu.as_ref().unwrap().current(),
+                            KeyCode::Char(c) => app.action_menu.as_ref().unwrap().by_key(c),
+                            _ => None,
+                        };
+                        if let Some(action) = act {
+                            let subject = app.action_menu.as_ref().unwrap().subject.clone();
+                            app.action_menu = None;
+                            dispatch_action(&mut app, action, &subject, &ns, &prom, &rt);
+                        }
+                        continue;
+                    }
+                    // 서빙 목표(SLO) 편집 폼 오버레이
+                    if app.objective_form.is_some() {
+                        let editing = app.objective_form.as_ref().unwrap().editing;
+                        if editing {
+                            match k.code {
+                                KeyCode::Enter | KeyCode::Esc => app.objective_form.as_mut().unwrap().editing = false,
+                                KeyCode::Backspace => app.objective_form.as_mut().unwrap().backspace(),
+                                KeyCode::Char(c) => app.objective_form.as_mut().unwrap().type_char(c),
+                                _ => {}
+                            }
+                        } else {
+                            match k.code {
+                                KeyCode::Esc | KeyCode::Char('q') => app.objective_form = None,
+                                KeyCode::Up => app.objective_form.as_mut().unwrap().move_cursor(-1),
+                                KeyCode::Down => app.objective_form.as_mut().unwrap().move_cursor(1),
+                                KeyCode::Left => app.objective_form.as_mut().unwrap().cycle(-1),
+                                KeyCode::Right => app.objective_form.as_mut().unwrap().cycle(1),
+                                KeyCode::Char('e') => app.objective_form.as_mut().unwrap().editing = true,
+                                KeyCode::Backspace => app.objective_form.as_mut().unwrap().backspace(),
+                                KeyCode::Char(c) if c.is_ascii_digit() => app.objective_form.as_mut().unwrap().type_digit(c),
+                                KeyCode::Enter => app.objective_form_submit(),
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                    // NPU 컴파일 옵션 편집 폼 오버레이
+                    if app.compile_form.is_some() {
+                        let editing = app.compile_form.as_ref().unwrap().editing;
+                        if editing {
+                            // 자유 입력(커스텀 값) 모드: Enter/Esc 확정, 문자 입력.
+                            match k.code {
+                                KeyCode::Enter | KeyCode::Esc => app.compile_form.as_mut().unwrap().editing = false,
+                                KeyCode::Backspace => app.compile_form.as_mut().unwrap().backspace(),
+                                KeyCode::Char(c) => app.compile_form.as_mut().unwrap().type_char(c),
+                                _ => {}
+                            }
+                        } else {
+                            match k.code {
+                                KeyCode::Esc | KeyCode::Char('q') => app.compile_form = None,
+                                KeyCode::Up => app.compile_form.as_mut().unwrap().move_cursor(-1),
+                                KeyCode::Down => app.compile_form.as_mut().unwrap().move_cursor(1),
+                                KeyCode::Left => app.compile_form.as_mut().unwrap().cycle(-1),
+                                KeyCode::Right => app.compile_form.as_mut().unwrap().cycle(1),
+                                KeyCode::Char('e') => app.compile_form.as_mut().unwrap().editing = true,
+                                KeyCode::Backspace => app.compile_form.as_mut().unwrap().backspace(),
+                                KeyCode::Char(c) if c.is_ascii_digit() => app.compile_form.as_mut().unwrap().type_digit(c),
+                                KeyCode::Enter => app.compile_form_submit(),
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                    // 배포(서빙) 옵션 편집 폼 오버레이
+                    if app.deploy_form.is_some() {
+                        let editing = app.deploy_form.as_ref().unwrap().editing;
+                        if editing {
+                            match k.code {
+                                KeyCode::Enter | KeyCode::Esc => app.deploy_form.as_mut().unwrap().editing = false,
+                                KeyCode::Backspace => app.deploy_form.as_mut().unwrap().backspace(),
+                                KeyCode::Char(c) => app.deploy_form.as_mut().unwrap().type_char(c),
+                                _ => {}
+                            }
+                        } else {
+                            match k.code {
+                                KeyCode::Esc | KeyCode::Char('q') => app.deploy_form = None,
+                                KeyCode::Up => app.deploy_form.as_mut().unwrap().move_cursor(-1),
+                                KeyCode::Down => app.deploy_form.as_mut().unwrap().move_cursor(1),
+                                KeyCode::Left => app.deploy_form.as_mut().unwrap().cycle(-1),
+                                KeyCode::Right => app.deploy_form.as_mut().unwrap().cycle(1),
+                                KeyCode::Char('e') => app.deploy_form.as_mut().unwrap().editing = true,
+                                KeyCode::Backspace => app.deploy_form.as_mut().unwrap().backspace(),
+                                KeyCode::Char(c) if c.is_ascii_digit() => app.deploy_form.as_mut().unwrap().type_digit(c),
+                                KeyCode::Enter => app.deploy_form_submit(),
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                    // 미리보기 오버레이 — 생성 매니페스트(v 검증·a 적용·w 저장) 또는 읽기전용 YAML(w 저장만)
                     if app.preview.is_some() {
                         match k.code {
                             KeyCode::Esc | KeyCode::Char('q') => app.preview = None,
                             KeyCode::Up | KeyCode::Char('k') => app.preview_scroll = app.preview_scroll.saturating_sub(1),
                             KeyCode::Down | KeyCode::Char('j') => app.preview_scroll = app.preview_scroll.saturating_add(3),
+                            // 파일로 저장(어느 preview 든) — 편집 후 kubectl apply 하거나 보관.
+                            KeyCode::Char('w') => {
+                                if let Some((title, yaml)) = app.preview.clone() {
+                                    match save_manifest(&title, &yaml) {
+                                        Ok(p) => app.notify(format!("saved → {}", p)),
+                                        Err(e) => app.notify(format!("save failed: {}", e)),
+                                    }
+                                }
+                            }
+                            // 서버 dry-run 검증(무변경) — 생성 매니페스트에만.
+                            KeyCode::Char('v') if app.preview_apply => {
+                                if let Some((_, yaml)) = app.preview.clone() {
+                                    // placeholder 여부 — dry-run 은 이미지 형식을 검증하지 않아 valid 로 통과함을 명시.
+                                    let ph = if yaml.contains("TODO-") { " · ⚠ still has TODO- placeholders (apply blocked)" } else { "" };
+                                    match kube::apply_manifest(&ns, &yaml, true) {
+                                        Ok(o) => app.notify(format!("valid ✓ {}{}", o.lines().next().unwrap_or("ok"), ph)),
+                                        Err(e) => app.notify(format!("invalid: {}", e.to_string().lines().next().unwrap_or(""))),
+                                    }
+                                }
+                            }
+                            // 실제 적용(admin+, 확인, 생성 매니페스트만). TODO placeholder 있으면 거부.
+                            KeyCode::Char('a') if app.preview_apply && !app.can(Mode::Admin) => {
+                                app.notify(format!("apply needs --mode admin+ (current: {})", app.mode.name()));
+                            }
+                            KeyCode::Char('a') if app.preview_apply => {
+                                if let Some((title, yaml)) = app.preview.clone() {
+                                    // placeholder(TODO-...) 필드가 남아 있으면 거부. 이미지 env 로 채우면 통과.
+                                    if yaml.contains("TODO-") {
+                                        app.notify("apply 불가: placeholder(TODO-) 남음 — LMD_*_IMAGE 로 이미지 지정".to_string());
+                                    } else {
+                                        app.confirm = Some(Pending::Apply { title, yaml });
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                         continue;
@@ -329,6 +706,12 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                                 }
                             } else if app.view == View::Routing {
                                 app.drill_route(); // Flow: route → backend 모델 상세
+                            } else if matches!(app.view, View::Launch | View::Models | View::Overview | View::Pods) {
+                                // Enter = 컨텍스트 액션 메뉴(변형/노드/카탈로그/모델/파드). 없으면 상세로 폴백.
+                                app.open_action_menu();
+                                if app.action_menu.is_none() {
+                                    app.toggle_detail();
+                                }
                             } else {
                                 app.toggle_detail();
                             }
@@ -403,6 +786,37 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                                 app.notify("restart: select a model in Models/Overview".to_string());
                             }
                         }
+                        // 서빙 중지(admin+, 확인) — replicas 0 으로(되돌릴 수 있음).
+                        KeyCode::Char('x') if !app.can(Mode::Admin) => {
+                            app.notify(format!("stop needs --mode admin+ (current: {})", app.mode.name()));
+                        }
+                        KeyCode::Char('x') => {
+                            if let Some(m) = app.selected_model() {
+                                if m.desired == 0 {
+                                    app.notify(format!("{} 는 이미 중지됨(0 replica)", m.name));
+                                } else {
+                                    app.confirm = Some(Pending::Stop { name: m.name.clone() });
+                                }
+                            } else {
+                                app.notify("stop: Models/Overview 에서 모델 선택".to_string());
+                            }
+                        }
+                        // 선택 리소스의 live YAML 보기(읽기전용 preview) — k9s y.
+                        KeyCode::Char('y') => {
+                            if let Some((kind, nsd, name)) = app.yaml_target() {
+                                let nsopt = if nsd { Some(ns.as_str()) } else { None };
+                                match kube::resource_yaml(kind, nsopt, &name) {
+                                    Ok(y) => {
+                                        app.preview = Some((format!("{} {} · yaml (read-only)", kind, name), y));
+                                        app.preview_scroll = 0;
+                                        app.preview_apply = false;
+                                    }
+                                    Err(e) => app.notify(format!("yaml: {}", e.to_string().lines().next().unwrap_or(""))),
+                                }
+                            } else {
+                                app.notify("yaml: Models/Pods/Nodes/Deploy 에서 리소스 선택".to_string());
+                            }
+                        }
                         // Deploy: compile(NPU)/deploy 매니페스트 미리보기(dry-run, admin+).
                         KeyCode::Char('c') | KeyCode::Char('d') if app.view == View::Launch => {
                             if !app.can(Mode::Admin) {
@@ -412,7 +826,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                             } else if k.code == KeyCode::Char('c') {
                                 app.compile_preview();
                             } else {
-                                app.deploy_preview();
+                                app.open_deploy_form();
                             }
                         }
                         _ => {
@@ -510,5 +924,54 @@ fn print_snapshot(s: &collect::Snapshot, cfg: &Config) {
         for w in &s.warnings {
             println!("  ! {}", w);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{check_args, ArgCheck};
+
+    fn args(v: &[&str]) -> Vec<String> {
+        std::iter::once("lmd-top").chain(v.iter().copied()).map(String::from).collect()
+    }
+
+    #[test]
+    fn no_args_is_ok() {
+        assert_eq!(check_args(&args(&[])), ArgCheck::Ok);
+    }
+
+    #[test]
+    fn known_flags_ok() {
+        assert_eq!(check_args(&args(&["--json"])), ArgCheck::Ok);
+        assert_eq!(check_args(&args(&["--snapshot"])), ArgCheck::Ok);
+        assert_eq!(check_args(&args(&["-s"])), ArgCheck::Ok);
+        assert_eq!(check_args(&args(&["--doctor"])), ArgCheck::Ok);
+        assert_eq!(check_args(&args(&["--render"])), ArgCheck::Ok);
+        assert_eq!(check_args(&args(&["--cast"])), ArgCheck::Ok);
+        assert_eq!(check_args(&args(&["--cast", "out.cast"])), ArgCheck::Ok);
+        assert_eq!(check_args(&args(&["--mode", "admin"])), ArgCheck::Ok);
+    }
+
+    #[test]
+    fn help_flag_detected() {
+        assert_eq!(check_args(&args(&["--help"])), ArgCheck::Help);
+        assert_eq!(check_args(&args(&["-h"])), ArgCheck::Help);
+        // 도움말은 다른 인자보다 우선.
+        assert_eq!(check_args(&args(&["--bogus", "--help"])), ArgCheck::Help);
+    }
+
+    #[test]
+    fn unknown_flag_rejected() {
+        assert_eq!(check_args(&args(&["--nope"])), ArgCheck::Unknown("--nope".into()));
+        assert_eq!(check_args(&args(&["--jsonx"])), ArgCheck::Unknown("--jsonx".into()));
+        assert_eq!(check_args(&args(&["foo"])), ArgCheck::Unknown("foo".into()));
+    }
+
+    #[test]
+    fn mode_validation() {
+        assert_eq!(check_args(&args(&["--mode", "bogus"])), ArgCheck::BadMode("bogus".into()));
+        assert_eq!(check_args(&args(&["--mode"])), ArgCheck::MissingMode);
+        // --mode 값 뒤의 실제 미지원 플래그도 잡힌다.
+        assert_eq!(check_args(&args(&["--mode", "admin", "--x"])), ArgCheck::Unknown("--x".into()));
     }
 }

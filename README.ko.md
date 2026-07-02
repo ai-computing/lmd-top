@@ -6,10 +6,8 @@
 [English](README.md) · **한국어**
 
 [![release](https://img.shields.io/github/v/release/gspark-etri/lmd-top?logo=github)](https://github.com/gspark-etri/lmd-top/releases/latest)
+[![license](https://img.shields.io/github/license/gspark-etri/lmd-top)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white)
-![single static binary](https://img.shields.io/badge/single%20static%20binary-no%20C%20deps-success)
-![for llm-d](https://img.shields.io/badge/for-llm--d-8839ef)
-![views](https://img.shields.io/badge/correlated%20views-10-89b4fa)
 
 `lmd-top` 은 llm-d 서빙 스택의 네 계층 — Gateway → EPP(Endpoint Picker) → 모델 서버 → 인프라 —
 을 이종 가속기(NVIDIA GPU, Rebellions RBLN, Furiosa RNGD, 호스트 CPU) 환경에서 하나로 엮어
@@ -48,19 +46,31 @@
 
 ## 설치
 
-빌드에는 Rust 툴체인과 C 링커(`cc`/`gcc`) 만 있으면 됩니다. 바이너리는 glibc 만 링크하고,
-네이티브·C 라이브러리 의존성이 전혀 없습니다(OpenSSL, pkg-config, cmake 불필요). 실행할 때는
-kubeconfig 접근 권한이 있는 `kubectl` 과 Prometheus 로의 네트워크 접근이 필요하며, 가속기 노드에
-SSH 하지 않습니다. truecolor 를 지원하고 box-drawing·braille 글리프를 포함한 폰트를 쓰는 터미널을
-권장합니다(아니면 `LMD_THEME=default` 로 실행). `xdg-open` 은 `g` 키에만 쓰이는 선택 사항입니다.
+**빌드된 바이너리** (Linux x86_64):
+
+```bash
+VER=v0.32.0   # 최신 버전: https://github.com/gspark-etri/lmd-top/releases/latest
+curl -fsSL "https://github.com/gspark-etri/lmd-top/releases/download/$VER/lmd-top-$VER-x86_64-linux.tar.gz" | tar xz
+sudo install -m 0755 lmd-top /usr/local/bin/
+```
+
+릴리스마다 `.sha256` 체크섬이 함께 게시됩니다.
+
+**소스 빌드** (Rust 툴체인과 C 링커 `cc`/`gcc` 만 있으면 됩니다):
 
 ```bash
 git clone https://github.com/gspark-etri/lmd-top.git && cd lmd-top
 ./install.sh                 # 누락된 사전 요구사항을 설치한 뒤 `cargo install` 실행
 #   ./install.sh --check     # 무엇이 있고 없는지만 확인(설치는 안 함)
 #   ./install.sh --with-demo # agg 도 설치하고 데모 GIF 까지 생성
-# 수동 설치: cargo install --path .   (Rust 크레이트는 cargo 가 자동으로 받습니다)
+# 수동 설치: cargo install --path .
 ```
+
+**실행 요구사항:**
+
+- kubeconfig 접근 권한이 있는 `kubectl`, Prometheus 로의 네트워크 접근. 가속기 노드에 SSH 하지 않습니다.
+- truecolor 를 지원하고 box-drawing·braille 글리프를 포함한 폰트를 쓰는 터미널 권장. 아니면 `LMD_THEME=default` 로 실행하세요.
+- 바이너리는 glibc 만 링크합니다 — OpenSSL, pkg-config, cmake 불필요. `xdg-open` 은 `g` 키에만 쓰이는 선택 사항입니다.
 
 ## 사용법
 
@@ -77,14 +87,22 @@ LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # 다른 클러스터 지정
 `observe`(기본, 보기 전용) → `debug`(로그 `l` 추가) → `admin`(`scale` 추가, y/n 확인) →
 `danger`(예약). admin 액션은 적용 전에 항상 확인을 받습니다.
 
-**키.** `↑↓`/`kj` 로 행을 선택하고, `Enter` 로 상세로 들어가며, 멀티 패널 뷰에서는 `w` 로 패널
-포커스를 옮기고, `←→` 로 항목을 넘깁니다. `/` 는 필터, `o` 는 정렬 순환, `l` 은 로그, `s` 는
-scale, `A` 는 알림 히스토리입니다. `t` 는 테마, `f` 는 애니메이션 토글, `z` 는 zoom, `Space` 는
-일시정지, `g` 는 Grafana 열기, `?` 는 도움말, `q` 는 종료입니다.
+**키.**
 
-**환경 변수.** `LMD_PROM`, `LMD_NS`(기본 `llm-serving`), `LMD_GRAFANA` 로 클러스터를 지정하고,
-`LMD_THEME` 로 시작 테마(`soft`, `default`, `high-contrast`, `colorblind`) 를 고릅니다.
-`LMD_W`/`LMD_H` 는 `--render` 크기이며, `~/.config/lmd-top/lmd-top.yaml` 로 컬럼 순서를 바꿀 수 있습니다.
+| | |
+|---|---|
+| 이동 | `↑↓` / `kj` 행 선택 · `⏎` 상세 진입 · `←→` 항목 넘기기 · `w` 패널 포커스 이동 |
+| 액션 | `/` 필터 · `o` 정렬 순환 · `l` 로그 · `s` scale · `A` 알림 히스토리 |
+| 표시 | `t` 테마 · `f` 애니메이션 · `z` zoom · `Space` 일시정지 · `g` Grafana · `?` 도움말 · `q` 종료 |
+
+**환경 변수.**
+
+- `LMD_PROM`, `LMD_NS`(기본 `llm-serving`), `LMD_GRAFANA` — 대상 클러스터 지정.
+- `LMD_THEME` — 시작 테마: `soft`, `default`, `high-contrast`, `colorblind`.
+- `LMD_COMPILE_IMAGE_RBLN`, `LMD_COMPILE_IMAGE_FURIOSA`, `LMD_SERVING_IMAGE` — 생성되는 compile/deploy 매니페스트의 컨테이너 이미지. 지정 전에는 `TODO-…` placeholder 라 앱 내 apply(`a`)가 막히고, `w` 로 저장해 직접 편집·적용은 가능.
+- `LMD_SAVE_DIR` — `w` 저장 위치(기본: 현재 디렉터리).
+- `LMD_W` / `LMD_H` — `--render` 크기.
+- 선택 사항인 `~/.config/lmd-top/lmd-top.yaml` 로 컬럼 순서를 바꿀 수 있습니다.
 
 **색과 글리프.** 색은 심각도나 정체성을 나타내고, 상태는 별도의 글리프(`●` 정상, `○` 유휴,
 `◐` 대기, `⚠` throttle, `⊘` cordon, `✗` 다운) 로 표현합니다. 그래서 색맹 테마에서도 읽힙니다.
@@ -119,9 +137,14 @@ Kubernetes 는 `kubectl` 로 조회합니다.
 **예정된 것.** 적용형 컨트롤 플레인 액션(엔드포인트 drain, 트래픽/정책 가중치 적용, rollout —
 각각 dry-run → 확인 → 감사), EPP 엔드포인트별 점수 디버거, 그리고 **NPU 컴파일·배포 자동화** —
 Deploy 뷰에서 모델을 RBLN/Furiosa 용으로 컴파일하고(벤더 툴체인을 도는 Kubernetes Job) ModelService
-로 배포까지, 권한 모드로 게이팅. 자세한 내용은 `ROADMAP.md` 와 `CHANGELOG.md` 참고.
+로 배포까지, 권한 모드로 게이팅. 자세한 내용은 [ROADMAP.md](ROADMAP.md) 와 [CHANGELOG.md](CHANGELOG.md) 참고.
 
 ## 성숙도
 
 실제 이종 클러스터에서 검증했습니다(8개 노드, GB10·RBLN·RNGD 가속기, EPP·라우트·모델 모두 라이브).
 아직 실험 단계(0.x) 라 인터페이스는 바뀔 수 있습니다.
+
+## 기여 & 라이선스
+
+이슈와 PR 을 환영합니다 — [CONTRIBUTING.md](CONTRIBUTING.md) 를 참고하세요.
+라이선스는 [Apache-2.0](LICENSE) 입니다.

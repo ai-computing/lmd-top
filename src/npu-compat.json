@@ -1,0 +1,35 @@
+{
+  "_comment": "NPU 컴파일 지원 모델 계열. HF/GPU 모델이 RBLN·Furiosa 로 컴파일 가능한지 계열 키워드로 판별.",
+  "_paths": {
+    "data_file": "src/npu-compat.json (이 파일) — include_str! 로 바이너리에 임베드",
+    "loader": "src/compat.rs — family_of(id) / compilable_vendors(id)",
+    "update": "벤더 페이지(sources) 확인 후 families 항목만 추가/수정. 코드 변경 불필요, 재빌드만."
+  },
+  "sources": {
+    "rbln": "https://docs.rbln.ai/v0.11.0/misc/pytorch_modelzoo.html#get-started",
+    "furiosa": "https://developer.furiosa.ai/latest/en/furiosa_llm/supported_models.html",
+    "checked": "2026-07"
+  },
+  "families": [
+    { "name": "Llama", "arch": "LlamaForCausalLM", "match": ["llama", "llama-2", "llama-3", "llama2", "llama3"], "rbln": true, "furiosa": true, "note": "RBLN: 2/3/3.1/3.2/3.3 · Furiosa: 3.1/3.3" },
+    { "name": "Qwen3", "arch": "Qwen3ForCausalLM", "match": ["qwen3", "qwen-3"], "rbln": true, "furiosa": true, "note": "text + Furiosa Qwen3 MoE/embedding/reranker/VL" },
+    { "name": "Qwen2", "arch": "Qwen2ForCausalLM", "match": ["qwen2", "qwen-2", "qwen2.5", "qwen1.5"], "rbln": true, "furiosa": true, "note": "RBLN: 2/2.5 · Furiosa: 2.5" },
+    { "name": "Gemma", "arch": "GemmaForCausalLM", "match": ["gemma"], "rbln": true, "furiosa": false, "note": "RBLN: Gemma 1/2/3/4" },
+    { "name": "Mistral", "arch": "MistralForCausalLM", "match": ["mistral"], "rbln": true, "furiosa": false },
+    { "name": "EXAONE", "arch": "ExaoneForCausalLM", "match": ["exaone"], "rbln": true, "furiosa": true, "note": "RBLN: 3.0/3.5 · Furiosa: 4.0(Exaone4) + K-EXAONE MoE" },
+    { "name": "SOLAR", "arch": "SolarOpenForCausalLM", "match": ["solar"], "rbln": true, "furiosa": true, "note": "RBLN: SOLAR-10.7B(Llama) · Furiosa: Solar Open" },
+    { "name": "DeepSeek-R1", "arch": "LlamaForCausalLM", "match": ["deepseek-r1", "deepseek"], "rbln": true, "furiosa": true, "note": "R1 / distill(Llama·Qwen2 기반)" },
+    { "name": "GPT-OSS", "arch": "GptOssForCausalLM", "match": ["gpt-oss", "gptoss"], "rbln": true, "furiosa": true, "note": "RBLN: gpt-oss-20b · Furiosa: GPT-OSS" },
+    { "name": "Phi", "arch": "PhiForCausalLM", "match": ["phi-", "phi2", "phi3", "phi4"], "rbln": true, "furiosa": false },
+    { "name": "OPT", "arch": "OPTForCausalLM", "match": ["opt-"], "rbln": true, "furiosa": false },
+    { "name": "GPT2", "arch": "GPT2LMHeadModel", "match": ["gpt2", "gpt-2"], "rbln": true, "furiosa": false },
+    { "name": "T5", "arch": "T5ForConditionalGeneration", "match": ["t5", "flan-t5"], "rbln": true, "furiosa": false },
+    { "name": "BART", "arch": "BartForConditionalGeneration", "match": ["bart"], "rbln": true, "furiosa": false },
+    { "name": "Pegasus", "arch": "PegasusForConditionalGeneration", "match": ["pegasus"], "rbln": true, "furiosa": false },
+    { "name": "Mi:dm", "arch": "AutoModelForCausalLM", "match": ["midm", "mi:dm", "mi-dm"], "rbln": true, "furiosa": false, "note": "Midm-2.0 Mini/Base" },
+    { "name": "A.X", "arch": "AutoModelForCausalLM", "match": ["a.x-4", "ax-4"], "rbln": true, "furiosa": false, "note": "A.X-4.0-Light" },
+    { "name": "EEVE-Korean", "arch": "LlamaForCausalLM", "match": ["eeve"], "rbln": true, "furiosa": false },
+    { "name": "Salamandra", "arch": "LlamaForCausalLM", "match": ["salamandra"], "rbln": true, "furiosa": false },
+    { "name": "KONI", "arch": "LlamaForCausalLM", "match": ["koni"], "rbln": true, "furiosa": true, "note": "KONI-Llama3.1-8B(Llama 기반)" }
+  ]
+}

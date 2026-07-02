@@ -53,6 +53,10 @@ pub struct NavState {
 pub enum Pending {
     Scale { name: String, target: i64 },
     Restart { name: String },
+    Stop { name: String }, // 서빙 중지 = replicas 0 으로(디바이스 반환, 되돌릴 수 있음)
+    Apply { title: String, yaml: String }, // 미리보기 매니페스트를 실제 kubectl apply
+    Cordon { node: String, on: bool }, // 노드 스케줄 차단/해제
+    DeletePod { name: String },        // 파드 삭제
 }
 impl Pending {
     /// 확인 프롬프트 문구.
@@ -60,6 +64,10 @@ impl Pending {
         match self {
             Pending::Scale { name, target } => format!("scale {} → {} replica(s)?", name, target),
             Pending::Restart { name } => format!("rollout restart {} (rolling)?", name),
+            Pending::Stop { name } => format!("stop serving {} (scale → 0, frees devices)?", name),
+            Pending::Apply { title, .. } => format!("apply manifest to cluster — {}?", title),
+            Pending::Cordon { node, on } => format!("{} node {}?", if *on { "cordon (block scheduling on)" } else { "uncordon (allow scheduling on)" }, node),
+            Pending::DeletePod { name } => format!("delete pod {} (reschedules)?", name),
         }
     }
 }
@@ -73,7 +81,11 @@ pub struct Alert {
     pub msg: String,
 }
 
-// 알림 임계치(ui.rs 의 색 임계치와 개념 일치 — 여기선 "경보" 발생선).
+// 기능 타입(CompileForm/DeployForm/Action/Objective/Fit 등)은 crate::ops 로 분리, 재수출.
+pub use crate::ops::*;
+
+
+/// 알림 임계치(ui.rs 의 색 임계치와 개념 일치 — 여기선 "경보" 발생선).
 const ALERT_TEMP_BAD: f64 = 80.0;
 
 /// 전역 테마 인덱스 (0=default, 1=고대비, 2=색맹친화). ui 색 함수가 읽음.
@@ -109,23 +121,30 @@ pub enum View {
     Launch,
     Events,
     Nodes,
+    Topo, // Nodes 허브의 토폴로지/디바이스 pressure 맵(Canvas)
 }
 
 impl View {
-    pub const ALL: [View; 10] = [
+    /// 탭 순서(숫자키 0-7). Accel·Perf·Topo 는 Nodes 허브의 하위 뷰라 여기 없음 — 슬롯 1(Nodes)에 통합.
+    pub const ALL: [View; 8] = [
         View::Overview,
-        View::Accel,
+        View::Nodes,
         View::Models,
         View::Epp,
         View::Routing,
         View::Pods,
-        View::Perf,
         View::Launch,
         View::Events,
-        View::Nodes,
     ];
+    /// Nodes 허브의 하위 뷰 순환 순서(w 로 전환) — 노드 → 디바이스 → 서빙 성능 → pressure 맵.
+    pub const HUB: [View; 4] = [View::Nodes, View::Accel, View::Perf, View::Topo];
+    pub fn is_hub(&self) -> bool {
+        matches!(self, View::Nodes | View::Accel | View::Perf | View::Topo)
+    }
     pub fn idx(&self) -> usize {
-        View::ALL.iter().position(|v| v == self).unwrap_or(0)
+        // 허브 하위 뷰(Accel/Perf)는 Nodes 탭 슬롯으로 취급.
+        let anchor = if self.is_hub() { &View::Nodes } else { self };
+        View::ALL.iter().position(|v| v == anchor).unwrap_or(0)
     }
     pub fn title(&self) -> &'static str {
         match self {
@@ -139,6 +158,7 @@ impl View {
             View::Launch => "Deploy", // 모델 라이프사이클(컴파일 변형·저장 노드·배치 타깃)
             View::Events => "Events",
             View::Nodes => "Nodes",
+            View::Topo => "Topology",
         }
     }
 }
@@ -149,6 +169,11 @@ pub struct App {
     pub view: View,
     pub selected: usize,
     pub snap: Snapshot,
+    // ── 배포/컴파일 대상 컨텍스트(매니페스트 생성·apply 에 사용) ──
+    pub ns: String,                  // 대상 네임스페이스(cfg.ns) — 하드코딩 대신 주입
+    pub img_rbln: Option<String>,    // LMD_COMPILE_IMAGE_RBLN — 없으면 placeholder
+    pub img_furiosa: Option<String>, // LMD_COMPILE_IMAGE_FURIOSA — 기본 furiosaai/furiosa-llm:latest
+    pub img_serving: Option<String>, // LMD_SERVING_IMAGE — 없으면 placeholder
     pub hist: HashMap<String, VecDeque<u64>>, // accel util 히스토리
     pub toast: Option<String>,
     pub detail: bool,  // 선택 행 상세(drill-down) 표시 여부
@@ -162,8 +187,14 @@ pub struct App {
     pub detail_scroll: u16, // detail 내부 세로 스크롤
     pub dev_sel: usize,     // Node 상세 내 device 커서: 0=노드요약, 1..=n=해당 device 히스토리
     pub panel_focus: usize, // 멀티패널 뷰에서 활성(포커스) 패널 인덱스(w 로 순환)
-    pub preview: Option<(String, String)>, // (제목, YAML) 매니페스트 미리보기 오버레이(compile/deploy dry-run)
+    pub preview: Option<(String, String)>, // (제목, YAML) 미리보기 오버레이(생성 매니페스트 또는 읽기전용 YAML)
     pub preview_scroll: u16,
+    pub preview_apply: bool, // true=생성 매니페스트(v 검증·a 적용 가능), false=읽기전용(describe/yaml)
+    pub compile_form: Option<CompileForm>, // NPU 컴파일 옵션 편집 폼(c → 편집 → Enter → preview)
+    pub deploy_form: Option<DeployForm>,   // 배포(서빙) 옵션 편집 폼(d → 편집 → Enter → preview)
+    pub action_menu: Option<ActionMenu>,   // Enter 컨텍스트 액션 메뉴(Info/Compile/Deploy/Stop…)
+    pub objectives: HashMap<String, Objective>, // 모델별 서빙 목표(SLO) — 사용자 입력
+    pub objective_form: Option<ObjectiveForm>,  // 목표 편집 폼
     pub logs_mode: bool,      // 로그 오버레이
     pub logs_target: String,  // 로그 대상 pod
     pub logs: Vec<String>,    // 로그 줄
@@ -214,10 +245,15 @@ fn load_columns() -> HashMap<String, Vec<String>> {
 
 impl App {
     pub fn new() -> Self {
+        let env = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
         App {
             view: View::Overview,
             selected: 0,
             snap: Snapshot::default(),
+            ns: "llm-serving".into(),
+            img_rbln: env("LMD_COMPILE_IMAGE_RBLN"),
+            img_furiosa: env("LMD_COMPILE_IMAGE_FURIOSA").or_else(|| Some("furiosaai/furiosa-llm:latest".into())),
+            img_serving: env("LMD_SERVING_IMAGE"),
             hist: HashMap::new(),
             toast: None,
             detail: false,
@@ -233,6 +269,12 @@ impl App {
             panel_focus: 0,
             preview: None,
             preview_scroll: 0,
+            preview_apply: false,
+            compile_form: None,
+            deploy_form: None,
+            action_menu: None,
+            objectives: HashMap::new(),
+            objective_form: None,
             logs_mode: false,
             logs_target: String::new(),
             logs: Vec::new(),
@@ -502,6 +544,7 @@ impl App {
             View::Routing if self.panel_focus == 1 => self.snap.pools.get(i).map(|p| p.name.clone()).unwrap_or_default(),
             View::Routing => self.snap.routes.get(i).map(|r| format!("{} {}", r.path, r.backend)).unwrap_or_default(),
             View::Perf => self.snap.perf_rows.get(i).map(|r| r.model.clone()).unwrap_or_default(),
+            View::Topo => String::new(), // 맵 뷰 — 리스트 선택 없음
         }
     }
 
@@ -742,12 +785,20 @@ impl App {
             View::Launch => 3,  // Deploy: 컴파일 변형 / 배치 타깃 / 카탈로그
             View::Epp => 2,     // scorers / InferencePool
             View::Routing => 2, // routes / InferencePool
-            View::Perf => 2,    // per-model / per-pod queue
             _ => 1,
         }
     }
-    /// 활성 패널 순환(w). 패널 바뀌면 선택 리셋(패널마다 리스트 길이가 다름).
+    /// w 키 — 허브(Nodes/Accel/Perf)에선 하위 뷰 전환, 그 외엔 멀티패널 포커스 순환.
     pub fn cycle_panel(&mut self) {
+        if self.view.is_hub() {
+            let cur = View::HUB.iter().position(|v| *v == self.view).unwrap_or(0);
+            self.view = View::HUB[(cur + 1) % View::HUB.len()];
+            self.selected = 0;
+            self.detail = false;
+            self.panel_focus = 0;
+            self.dev_sel = 0;
+            return;
+        }
         let n = self.panel_count();
         if n > 1 {
             self.panel_focus = (self.panel_focus + 1) % n;
@@ -905,6 +956,7 @@ impl App {
             View::Perf => self.perf_rows_order(),
             View::Routing if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
             View::Routing => (0..self.snap.routes.len()).collect(),
+            View::Topo => Vec::new(), // 맵 뷰 — 리스트 선택 없음
         };
         if !self.filter.is_empty() {
             let fl = self.filter.to_lowercase();
@@ -916,6 +968,69 @@ impl App {
     /// 표시 순서상 selected 위치 → 원본 인덱스.
     pub fn sel_orig(&self) -> Option<usize> {
         self.order().get(self.selected).copied()
+    }
+
+    /// 현재 뷰의 (필터된/전체) 행 집계 요약 — Overview 처럼 통합 값을 함께 보이려는 용도.
+    /// 필터가 있으면 보이는 행만, 없으면 전체. 없으면 None.
+    pub fn agg_summary(&self) -> Option<String> {
+        use crate::collect::{Accel, ModelRow, NodeInfo, PerfRow};
+        let order = self.order();
+        if order.is_empty() {
+            return None;
+        }
+        let scope = if self.filter.is_empty() { "all" } else { "filt" };
+        let n = order.len();
+        match self.view {
+            View::Accel => {
+                let d: Vec<&Accel> = order.iter().filter_map(|&i| self.snap.accel.get(i)).collect();
+                if d.is_empty() {
+                    return None;
+                }
+                let util = d.iter().map(|x| x.util).sum::<f64>() / d.len() as f64;
+                let mu: f64 = d.iter().map(|x| x.mem_used_gb).sum();
+                let mt: f64 = d.iter().map(|x| x.mem_total_gb).sum();
+                let pw: f64 = d.iter().map(|x| x.power).sum();
+                let busy = d.iter().filter(|x| !x.busy_model.is_empty()).count();
+                Some(format!("Σ{} {}dev · {}busy · util {:.0}% · VRAM {:.0}/{:.0}G · {:.0}W", scope, n, busy, util, mu, mt, pw))
+            }
+            View::Models | View::Overview => {
+                let m: Vec<&ModelRow> = order.iter().filter_map(|&i| self.snap.models.get(i)).collect();
+                if m.is_empty() {
+                    return None;
+                }
+                let ready: i64 = m.iter().map(|x| x.ready).sum();
+                let desired: i64 = m.iter().map(|x| x.desired).sum();
+                let run: f64 = m.iter().filter_map(|x| x.running).sum();
+                let wait: f64 = m.iter().filter_map(|x| x.waiting).sum();
+                let tps: f64 = m.iter().filter_map(|x| x.tps).sum();
+                Some(format!("Σ{} {}mdl · {}/{}ready · run {:.0} wait {:.0} · {:.0}tok/s", scope, n, ready, desired, run, wait, tps))
+            }
+            View::Nodes => {
+                let nn: Vec<&NodeInfo> = order.iter().filter_map(|&i| self.snap.nodes.get(i)).collect();
+                if nn.is_empty() {
+                    return None;
+                }
+                let cpu = nn.iter().map(|x| x.cpu_pct).sum::<f64>() / nn.len() as f64;
+                let mu: f64 = nn.iter().map(|x| x.mem_used_gb).sum();
+                let mt: f64 = nn.iter().map(|x| x.mem_total_gb).sum();
+                let du: f64 = nn.iter().map(|x| x.disk_used_gb).sum();
+                let dt: f64 = nn.iter().map(|x| x.disk_total_gb).sum();
+                let ready = nn.iter().filter(|x| x.ready).count();
+                Some(format!("Σ{} {}node · {}ready · CPU {:.0}% · mem {:.0}/{:.0}G · disk {:.1}/{:.1}T", scope, n, ready, cpu, mu, mt, du / 1024.0, dt / 1024.0))
+            }
+            View::Perf => {
+                let p: Vec<&PerfRow> = order.iter().filter_map(|&i| self.snap.perf_rows.get(i)).collect();
+                if p.is_empty() {
+                    return None;
+                }
+                let tps: f64 = p.iter().filter_map(|x| if x.tps.is_nan() { None } else { Some(x.tps) }).sum();
+                let e2e: Vec<f64> = p.iter().map(|x| x.e2e_p95).filter(|v| !v.is_nan()).collect();
+                let e2e_avg = if e2e.is_empty() { f64::NAN } else { e2e.iter().sum::<f64>() / e2e.len() as f64 };
+                let e2e_s = if e2e_avg.is_nan() { "–".to_string() } else { format!("{:.0}ms", e2e_avg * 1000.0) };
+                Some(format!("Σ{} {}active · E2E p95 {} · {:.0}tok/s", scope, n, e2e_s, tps))
+            }
+            _ => None,
+        }
     }
 
     pub fn selected_model(&self) -> Option<&crate::collect::ModelRow> {
@@ -948,6 +1063,53 @@ impl App {
             _ => None,
         }
     }
+    /// `y` — 현재 선택의 live YAML 조회 대상 (kind, namespaced?, name). 없으면 None.
+    pub fn yaml_target(&self) -> Option<(&'static str, bool, String)> {
+        match self.view {
+            View::Models | View::Overview => self.selected_model().map(|m| ("deployment", true, m.name.clone())),
+            View::Pods => self.selected_pod().map(|p| ("pod", true, p.name.clone())),
+            View::Nodes => self.selected_node().map(|n| ("node", false, n.name.clone())),
+            View::Launch if self.panel_focus == 0 => self.selected_artifact().map(|a| ("deployment", true, a.model.clone())),
+            View::Launch if self.panel_focus == 1 => {
+                let nodes = self.target_nodes();
+                self.sel_orig().and_then(|i| nodes.get(i).cloned()).map(|n| ("node", false, n))
+            }
+            _ => None,
+        }
+    }
+
+    /// 노드 상세로 피벗 — Nodes 뷰의 해당 노드 detail 로 점프(브레드크럼 push, esc 로 복귀).
+    pub fn pivot_to_node(&mut self, node: &str) {
+        if let Some(pos) = self.snap.nodes.iter().position(|n| n.name == node) {
+            self.nav_stack.push(NavState { view: self.view, selected: self.selected, filter: self.filter.clone(), detail: self.detail });
+            self.view = View::Nodes;
+            self.filter.clear();
+            self.panel_focus = 0;
+            self.sort = 0;
+            self.selected = pos;
+            self.detail = true;
+            self.dev_sel = 0;
+        } else {
+            self.notify(format!("node {} not found in node list", node));
+        }
+    }
+
+    /// 카탈로그 모델 feasibility 요약(placement 별 ready/needs-artifact/미지원).
+    pub fn catalog_feasibility(&self, id: &str) -> String {
+        let Some(m) = self.catalog.iter().find(|c| c.id == id) else { return format!("{}: not in catalog", id) };
+        let mut ready = 0;
+        let mut needs = 0;
+        let mut no = 0;
+        for p in &m.placements {
+            match crate::catalog::solve(p, &self.snap.inventory).0 {
+                crate::catalog::Ready::Ready => ready += 1,
+                crate::catalog::Ready::NeedsArtifact => needs += 1,
+                _ => no += 1,
+            }
+        }
+        format!("{}: {} ready · {} needs-compile · {} unsupported placement(s)", id, ready, needs, no)
+    }
+
     /// Deploy 뷰의 배치 타깃 후보 노드(가속기를 가진 노드, 정렬·중복제거). order()/뷰 공용.
     pub fn target_nodes(&self) -> Vec<String> {
         let mut v: Vec<String> = self.snap.accel.iter().map(|a| a.node.clone()).collect();
@@ -976,101 +1138,771 @@ impl App {
         a.opts.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone()).unwrap_or_else(|| def.to_string())
     }
 
-    /// `[c] compile` — 선택 모델의 NPU 컴파일 Job 매니페스트를 생성해 미리보기(dry-run)로.
-    /// 컴파일은 NPU(RBLN/Furiosa) 개념 — GPU 는 컴파일 불필요.
+    /// `[c] compile` — 선택 빌드의 NPU 컴파일 폼. 엔진이 NPU 면 그 벤더로,
+    /// GPU/HF 라도 [[npu-compat]] 지원 목록에 있으면 해당 벤더로 컴파일 가능(GPU→NPU 경로).
     pub fn compile_preview(&mut self) {
         let Some(a) = self.selected_artifact() else { return };
-        let rbln = a.engine.contains("RBLN");
-        let furiosa = a.engine.contains("Furiosa");
         let model_id = Self::artifact_model_id(a);
-        if !rbln && !furiosa {
-            self.preview = Some((
-                format!("compile · {}", a.model),
-                format!("# {}\n# 엔진 '{}' 는 GPU 계열 — 사전 컴파일이 필요 없습니다.\n# vLLM 이 HF 가중치를 직접 로드합니다. [d] deploy 를 사용하세요.\n", model_id, a.engine),
-            ));
-            self.preview_scroll = 0;
-            return;
+        let vendor: Option<&'static str> = if a.engine.contains("RBLN") {
+            Some("rbln")
+        } else if a.engine.contains("Furiosa") {
+            Some("furiosa")
+        } else {
+            crate::compat::compilable_vendors(&model_id).first().copied()
+        };
+        match vendor {
+            Some(v) => {
+                let form = self.build_compile_form(a, v);
+                self.compile_form = Some(form);
+            }
+            None => {
+                self.preview = Some((
+                    format!("compile · {}", a.model),
+                    format!(
+                        "# {}\n# 이 모델 계열은 NPU 컴파일 지원 목록에 없습니다(RBLN/Furiosa).\n# 지원 계열: Llama·Qwen2/3·Gemma·Mistral·EXAONE·Phi·OPT·GPT2·SOLAR·DeepSeek·T5 …\n# 목록: src/npu-compat.json (벤더 공식 문서 기반)\n",
+                        model_id
+                    ),
+                ));
+                self.preview_scroll = 0;
+                self.preview_apply = false;
+            }
         }
-        let tp = Self::opt_or(a, "tp", "4");
-        let maxlen = Self::opt_or(a, "max-len", "8192");
-        let vendor = if rbln { "rbln" } else { "furiosa" };
-        let target = if rbln { format!("rbln-ca22-tp{}-s{}", tp, maxlen) } else { format!("rngd-tp{}-s{}", tp, maxlen) };
+    }
+
+    /// 특정 벤더로 컴파일 폼 열기(액션 메뉴의 'Compile → RBLN/Furiosa'용).
+    pub fn compile_form_for(&mut self, vendor: &'static str) {
+        let Some(a) = self.selected_artifact() else { return };
+        let form = self.build_compile_form(a, vendor);
+        self.compile_form = Some(form);
+    }
+
+    /// 선택 아티팩트를 주어진 벤더로 컴파일하는 옵션 폼 구성(순수). 초기값은 관측 opts.
+    fn build_compile_form(&self, a: &crate::collect::ModelArtifact, vendor: &'static str) -> CompileForm {
+        let rbln = vendor == "rbln";
+        let model_id = Self::artifact_model_id(a);
+        let mkf = |key: &str, label: &str, def: &str, choices: &[&str], numeric: bool, help: &str| CompileField {
+            key: key.into(),
+            label: label.into(),
+            value: Self::opt_or(a, key, def),
+            choices: choices.iter().map(|s| s.to_string()).collect(),
+            numeric,
+            help: help.into(),
+        };
+        // 파라미터는 컴파일 타임 고정 — RBLN=optimum-rbln config, Furiosa=furiosa-llm build.
+        // (참고: 심층 탐색/자동튜닝은 npu_aitune 프레임워크가 담당. 여기선 단발 컴파일 Job.)
+        let mut fields = if rbln {
+            // RBLNDecoderOnlyModelForCausalLMConfig — RBLN-CA22 는 칩 4장이라 TP≤4.
+            vec![
+                mkf("tp", "tensor-parallel", "4", &["1", "2", "4"], true, "텐서 병렬 = 사용할 RBLN 칩 수 (rbln_tensor_parallel_size). CA22 최대 4"),
+                mkf("max-len", "max-seq-len", "8192", &["2048", "4096", "8192", "16384", "32768"], true, "컴파일 최대 컨텍스트 길이 (rbln_max_seq_len) — 크면 메모리·컴파일시간↑"),
+                mkf("batch", "batch-size", "1", &["1", "2", "4", "8", "16"], true, "정적 배치 크기 (rbln_batch_size) — RBLN 은 컴파일 시 고정"),
+                mkf("attn", "attn-impl", "flash_attn", &["flash_attn", "eager"], false, "어텐션 구현 — flash_attn(SRAM 최적) / eager(PagedAttention)"),
+                mkf("kvpart", "kvcache-partition", "16384", &["4096", "8192", "16384", "32768"], true, "flash_attn 전용 SRAM 파티션당 KV 토큰(2의 거듭제곱). 크면 처리량↑·SRAM 압박↑"),
+                mkf("quant", "quantization", "none", &["none", "w8a8", "w4a16"], false, "가중치/활성 양자화 포맷(RBLNQuantizationConfig) — 지원 모델 한정"),
+                mkf("npu", "npu-chip", "RBLN-CA22", &["RBLN-CA22"], false, "대상 RBLN 칩 (rbln_npu) — 클러스터 감지값"),
+            ]
+        } else {
+            // furiosa-llm ArtifactBuilder — RNGD 단일 칩 = 8 PE(full=8, half=4).
+            vec![
+                mkf("tp", "tensor-parallel", "8", &["4", "8"], true, "텐서 병렬 크기(PE 수). RNGD full=8, half=4"),
+                mkf("pp", "pipeline-parallel", "1", &["1", "2"], true, "파이프라인 병렬 스테이지 수 (ParallelConfig)"),
+                mkf("max-len", "max-seq-len", "8192", &["2048", "4096", "8192", "16384"], true, "max_seq_len_to_capture — 이 이상 버킷 제외"),
+                mkf("batch", "batch-size", "1", &["1", "2", "4", "8"], true, "prefill/decode 버킷 배치 크기(BucketConfig)"),
+                mkf("chunk", "prefill-chunk", "none", &["none", "512", "1024", "2048"], true, "chunked prefill 청크 크기(prefill_chunk_size)"),
+                mkf("block", "kv-block-size", "16", &["16", "32"], true, "PagedAttention 블록당 토큰(paged_attention_block_size)"),
+                mkf("quant", "activation-dq", "none", &["none", "on"], false, "use_activation_dq — 활성 동적 양자화(메모리↓·처리량↑)"),
+            ]
+        };
+        // ── 인프라 배치: 실제 디바이스 수·노드는 스냅샷에서 후보를 뽑아 선택 가능하게 ──
+        let want_kind = if rbln { crate::collect::AccelKind::Rbln } else { crate::collect::AccelKind::Rngd };
+        // 노드별 동종 디바이스 개수.
+        let mut per_node: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for ac in self.snap.accel.iter().filter(|x| x.kind == want_kind && !x.node.is_empty()) {
+            *per_node.entry(ac.node.clone()).or_insert(0) += 1;
+        }
+        let mut cand_nodes: Vec<String> = per_node.keys().cloned().collect();
+        cand_nodes.sort();
+        let max_dev = per_node.values().copied().max().unwrap_or(4).max(1);
+        // 컴파일에 필요한 디바이스 기본값: RBLN=TP, Furiosa=chips≈ceil(TP/8)*PP.
+        let tp_v = fields.iter().find(|f| f.key == "tp").and_then(|f| f.value.parse::<i64>().ok()).unwrap_or(1).max(1);
+        let pp_v = fields.iter().find(|f| f.key == "pp").and_then(|f| f.value.parse::<i64>().ok()).unwrap_or(1).max(1);
+        let dev_default = if rbln { tp_v } else { ((tp_v as f64 / 8.0).ceil() as i64).max(1) * pp_v };
+        let dev_choices: Vec<String> = (1..=max_dev.max(dev_default)).map(|i| i.to_string()).collect();
+        fields.push(CompileField {
+            key: "devices".into(),
+            label: "devices".into(),
+            value: dev_default.to_string(),
+            choices: dev_choices,
+            numeric: true,
+            help: "요청할 NPU 디바이스 수(resources.limits). 보통 = TP(RBLN) / ceil(TP/8)×PP(Furiosa)".into(),
+        });
+        let mut node_choices = vec!["any".to_string()];
+        node_choices.extend(cand_nodes.iter().map(|n| format!("{}({})", n, per_node[n])));
+        fields.push(CompileField {
+            key: "node".into(),
+            label: "target-node".into(),
+            value: "any".into(),
+            choices: node_choices,
+            numeric: false,
+            help: "컴파일 실행 노드. any=제품 라벨 매칭, 특정 노드=hostname 고정. 괄호=그 노드의 디바이스 수".into(),
+        });
+        CompileForm {
+            model: a.model.clone(),
+            model_id,
+            vendor,
+            engine: a.engine.clone(),
+            fields,
+            cursor: 0,
+            editing: false,
+        }
+    }
+
+    /// 컴파일 폼 → 매니페스트 미리보기(dry-run) 생성. Enter 시 호출. 폼 값을 env·OUTPUT 에 반영.
+    pub fn compile_form_submit(&mut self) {
+        let Some(form) = self.compile_form.take() else { return };
+        let model_id = &form.model_id;
+        let vendor = form.vendor;
+        let target = form.target();
         let repo_dir = model_id.replace('/', "--");
+        let name = format!("compile-{}", repo_dir.to_lowercase().replace(['.', '_'], "-"));
+        let tp = form.get("tp");
+        // 디바이스 수·노드는 폼에서 선택한 값. 노드 라벨의 "(N)" 접미는 제거.
+        let devices = {
+            let d = form.get("devices");
+            if d.is_empty() { tp.clone() } else { d }
+        };
+        let node_pick = form.get("node");
+        let node_host = node_pick.split('(').next().unwrap_or("any").trim().to_string();
+        // 클러스터 감지값 기반 nodeSelector·디바이스 resource. 이미지는 env 설정값(없으면 placeholder).
+        let (res_key, product_label, image) = if vendor == "rbln" {
+            let img = self.img_rbln.clone().unwrap_or_else(|| "TODO-rbln-compiler-image".into());
+            ("rebellions.ai/ATOM", "rebellions.ai/npu.product: RBLN-CA22", img)
+        } else {
+            let img = self.img_furiosa.clone().unwrap_or_else(|| "furiosaai/furiosa-llm:latest".into());
+            ("furiosa.ai/rngd", "furiosa.ai/npu.product: rngd", img)
+        };
+        let res_qty = devices;
+        // 노드 지정: any=제품 라벨 매칭, 특정=hostname 고정.
+        let node_label = if node_host == "any" || node_host.is_empty() {
+            product_label.to_string()
+        } else {
+            format!("kubernetes.io/hostname: {}", node_host)
+        };
+        // 폼 값을 스크립트가 읽는 env 로 — 벤더별 파라미터 이름 대응.
+        let mut envs: Vec<(String, String)> = vec![
+            ("MODEL_STORE".into(), "/mnt/store".into()),
+            ("MODEL_ID".into(), model_id.clone()),
+            ("OUTPUT".into(), format!("/mnt/store/compiled/{}/{}/{}", repo_dir, vendor, target)),
+        ];
+        for f in &form.fields {
+            if f.value.is_empty() || f.value == "none" {
+                continue;
+            }
+            let ek = match (vendor, f.key.as_str()) {
+                ("rbln", "tp") => "RBLN_TENSOR_PARALLEL_SIZE",
+                ("rbln", "max-len") => "RBLN_MAX_SEQ_LEN",
+                ("rbln", "batch") => "RBLN_BATCH_SIZE",
+                ("rbln", "attn") => "RBLN_ATTN_IMPL",
+                ("rbln", "kvpart") => "RBLN_KVCACHE_PARTITION_LEN",
+                ("rbln", "npu") => "RBLN_NPU",
+                ("rbln", "quant") => "RBLN_QUANTIZATION",
+                (_, "tp") => "TENSOR_PARALLEL_SIZE",
+                (_, "pp") => "PIPELINE_PARALLEL_SIZE",
+                (_, "max-len") => "MAX_SEQ_LEN_TO_CAPTURE",
+                (_, "batch") => "BUCKET_BATCH_SIZE",
+                (_, "chunk") => "PREFILL_CHUNK_SIZE",
+                (_, "block") => "PAGED_ATTENTION_BLOCK_SIZE",
+                (_, "quant") => "USE_ACTIVATION_DQ",
+                _ => continue,
+            };
+            envs.push((ek.into(), f.value.clone()));
+        }
+        let env_lines: String = envs
+            .iter()
+            .map(|(k, v)| format!("             \x20           - {{ name: {}, value: \"{}\" }}\n", k, v))
+            .collect();
+        let opts_summary: String = form
+            .fields
+            .iter()
+            .map(|f| format!("{}={}", f.key, f.value))
+            .collect::<Vec<_>>()
+            .join("  ");
         let yaml = format!(
             "# 컴파일 Job (dry-run 미리보기) — 검토 후 `kubectl apply -f -` 로 적용.\n\
-             # 모델 {model_id} → {vendor} 컴파일 → 공유 스토어 저장(compiled/{repo_dir}/{vendor}/{target}).\n\
-             # TODO: image(벤더 툴체인), nodeSelector(NPU+스토어 마운트 가능 노드), 디바이스 resources 채우기.\n\
+             # 모델 {model_id} → {vendor} 컴파일 → 공유 스토어(compiled/{repo_dir}/{vendor}/{target}).\n\
+             # 옵션(컴파일 타임 고정): {opts}\n\
+             # nodeSelector·디바이스 resource 는 클러스터 감지 라벨. 컴파일 스크립트는 아래 env 를 읽음.\n\
+             # 이미지 placeholder(TODO-)면 LMD_COMPILE_IMAGE_RBLN 로 지정해야 apply 가능.\n\
              apiVersion: batch/v1\n\
              kind: Job\n\
-             metadata: {{ name: compile-{repo_dir_lc}, namespace: {ns} }}\n\
+             metadata: {{ name: {name}, namespace: {ns} }}\n\
              spec:\n\
              \x20 backoffLimit: 0\n\
              \x20 template:\n\
              \x20   spec:\n\
              \x20     restartPolicy: Never\n\
-             \x20     nodeSelector: {{ kubernetes.io/hostname: TODO-npu-node }}\n\
+             \x20     nodeSelector: {{ {node_label} }}\n\
              \x20     volumes:\n\
              \x20       - {{ name: store, persistentVolumeClaim: {{ claimName: model-store }} }}\n\
+             \x20       - {{ name: script, configMap: {{ name: compile-script }} }}\n\
              \x20     containers:\n\
              \x20       - name: compile\n\
-             \x20         image: TODO-{vendor}-toolchain\n\
+             \x20         image: {image}\n\
+             \x20         resources: {{ limits: {{ {res_key}: {res_qty} }} }}\n\
              \x20         env:\n\
-             \x20           - {{ name: MODEL_STORE, value: /mnt/store }}\n\
-             \x20           - {{ name: MODEL_ID, value: \"{model_id}\" }}\n\
-             \x20           - {{ name: OUTPUT, value: /mnt/store/compiled/{repo_dir}/{vendor}/{target} }}\n\
-             \x20         # resources: {{ limits: {{ {res}: {tp} }} }}\n\
+             {env_lines}\
              \x20         volumeMounts:\n\
              \x20           - {{ name: store, mountPath: /mnt/store }}\n\
-             \x20         command: [\"python3\", \"/scripts/compile.py\"]   # manifests/compile-*.py (MODEL_STORE/OUTPUT 대응)\n",
+             \x20           - {{ name: script, mountPath: /scripts, readOnly: true }}\n\
+             \x20         command: [\"python3\", \"/scripts/compile.py\"]\n",
             model_id = model_id,
             vendor = vendor,
             repo_dir = repo_dir,
-            repo_dir_lc = repo_dir.to_lowercase().replace('.', "-"),
             target = target,
-            ns = "llm-serving",
-            res = if rbln { "rebellions.ai/ATOM" } else { "furiosa.ai/rngd" },
-            tp = tp,
+            opts = opts_summary,
+            name = name,
+            ns = self.ns,
+            node_label = node_label,
+            image = image,
+            res_key = res_key,
+            res_qty = res_qty,
+            env_lines = env_lines,
         );
-        self.preview = Some((format!("compile · {} → {}", a.model, target), yaml));
+        self.preview = Some((format!("compile · {} → {}", form.model, target), yaml));
         self.preview_scroll = 0;
+        self.preview_apply = true;
     }
 
-    /// `[d] deploy` — 선택 모델을 스토어 아티팩트로 서빙하는 매니페스트 미리보기(dry-run).
-    pub fn deploy_preview(&mut self) {
+    /// 모델 이름에서 파라미터 수(B) 추정 — "8B", "1.5b", "0.5B", "32b" 등 첫 매치.
+    fn est_params_b(name: &str) -> Option<f64> {
+        let lower = name.to_lowercase();
+        let bytes = lower.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_digit() {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                    i += 1;
+                }
+                // 숫자 뒤 바로 'b' 이고, 앞이 알파벳이 아니어야(예: fp"8b" 방지 위해 직전 문자 체크)
+                if i < bytes.len() && (bytes[i] == b'b') {
+                    let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphabetic();
+                    if before_ok {
+                        if let Ok(v) = lower[start..i].parse::<f64>() {
+                            if (0.1..=2000.0).contains(&v) {
+                                return Some(v);
+                            }
+                        }
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+        None
+    }
+
+    /// 선택 인프라(NPU 메모리) 대비 컴파일 옵션 적합성 추정 + 조정 제안. 대략치.
+    pub fn compile_fit(&self, form: &CompileForm) -> FitEstimate {
+        let rbln = form.vendor == "rbln";
+        let params_b = Self::est_params_b(&form.model_id).or_else(|| Self::est_params_b(&form.model));
+        let tp = form.get("tp").parse::<f64>().unwrap_or(1.0).max(1.0);
+        let pp = form.get("pp").parse::<f64>().unwrap_or(1.0).max(1.0);
+        let seq = form.get("max-len").parse::<f64>().unwrap_or(8192.0).max(1.0);
+        let batch = form.get("batch").parse::<f64>().unwrap_or(1.0).max(1.0);
+        // dtype 바이트/파라미터 — 양자화·모델명 반영.
+        let q = form.get("quant").to_lowercase();
+        let name_l = form.model_id.to_lowercase();
+        let dtype_bytes = if rbln {
+            if q.contains("w4") {
+                0.5
+            } else if q.contains("w8") {
+                1.0
+            } else {
+                2.0
+            }
+        } else if name_l.contains("fp8") || name_l.contains("-w8") {
+            1.0
+        } else if name_l.contains("int4") || name_l.contains("awq") || name_l.contains("gptq") {
+            0.5
+        } else {
+            2.0
+        };
+        // 칩당 가용 메모리 — 스냅샷의 동종 디바이스 mem_total 평균, 없으면 표준값.
+        let want_kind = if rbln { crate::collect::AccelKind::Rbln } else { crate::collect::AccelKind::Rngd };
+        let mems: Vec<f64> = self
+            .snap
+            .accel
+            .iter()
+            .filter(|a| a.kind == want_kind && a.mem_total_gb > 0.0)
+            .map(|a| a.mem_total_gb)
+            .collect();
+        let avail_gb = if mems.is_empty() {
+            if rbln {
+                15.7
+            } else {
+                48.0
+            }
+        } else {
+            mems.iter().sum::<f64>() / mems.len() as f64
+        };
+        // 메모리 분산 칩 수: RBLN=TP, Furiosa≈ceil(tp/8)*pp.
+        let chips = if rbln { tp } else { (tp / 8.0).ceil().max(1.0) * pp };
+        let weight_gb = params_b.map(|p| p * dtype_bytes).unwrap_or(0.0);
+        // KV: Llama-8B bf16 ≈ 0.25 MB/token 기준 스케일. (KV 양자화는 미반영 — 보수적)
+        let kv_per_tok_mb = 0.25 * (params_b.unwrap_or(8.0) / 8.0);
+        let kv_gb = batch * seq * kv_per_tok_mb / 1024.0;
+        let overhead_gb = 2.0;
+        let per_chip_gb = (weight_gb + kv_gb) / chips + overhead_gb;
+        let ratio = per_chip_gb / avail_gb;
+        let verdict = if params_b.is_none() {
+            FitVerdict::Unknown
+        } else if ratio > 1.0 {
+            FitVerdict::Oom
+        } else if ratio > 0.85 {
+            FitVerdict::Tight
+        } else {
+            FitVerdict::Fits
+        };
+        // 조정 제안.
+        let mut tips: Vec<String> = Vec::new();
+        let max_chips = if rbln { 4.0 } else { 8.0 };
+        if matches!(verdict, FitVerdict::Oom | FitVerdict::Tight) {
+            if tp < max_chips {
+                tips.push(format!("TP↑ {}→{} (칩 추가로 칩당 부담↓)", tp as i64, (tp * 2.0).min(max_chips) as i64));
+            }
+            if seq > 2048.0 {
+                tips.push(format!("max-seq-len↓ {}→{} (KV {:.1}GiB↓)", seq as i64, (seq / 2.0) as i64, kv_gb / 2.0));
+            }
+            if batch > 1.0 {
+                tips.push(format!("batch↓ {}→{} (KV 절반)", batch as i64, (batch / 2.0) as i64));
+            }
+            if dtype_bytes >= 2.0 {
+                tips.push(if rbln { "양자화 w4a16/w8a8 로 가중치↓".into() } else { "FP8 체크포인트 사용 시 가중치 절반".into() });
+            }
+        } else if matches!(verdict, FitVerdict::Fits) && ratio < 0.4 {
+            if batch < 8.0 {
+                tips.push(format!("여유 있음 — batch↑ {}→{} 로 처리량 확보 여지", batch as i64, (batch * 2.0) as i64));
+            }
+            if tp > 1.0 && rbln {
+                tips.push(format!("TP↓ {}→{} 로 칩 절약(가능 시)", tp as i64, (tp / 2.0) as i64));
+            }
+        }
+        // 요청 디바이스 수가 물리 분산 칩 수보다 적으면 컴파일 불가.
+        if let Ok(dev) = form.get("devices").parse::<f64>() {
+            if dev > 0.0 && dev < chips {
+                tips.push(format!("⚠ devices {} < 필요 {} 칩 — 이 TP/PP 로는 컴파일 불가", dev as i64, chips as i64));
+            }
+        }
+        // RBLN kvcache_partition_len 은 2의 거듭제곱이어야.
+        if rbln {
+            if let Ok(k) = form.get("kvpart").parse::<u64>() {
+                if k == 0 || (k & (k - 1)) != 0 {
+                    tips.push(format!("⚠ kvcache-partition {} 는 2의 거듭제곱이 아님", k));
+                }
+            }
+        }
+        FitEstimate { params_b, weight_gb, kv_gb, overhead_gb, chips, per_chip_gb, avail_gb, verdict, tips }
+    }
+
+    /// Enter — 선택 항목의 컨텍스트 액션 메뉴를 연다(단축키를 몰라도 되게).
+    pub fn open_action_menu(&mut self) {
+        let mut items: Vec<ActionItem> = Vec::new();
+        let (title, subject) = match self.view {
+            View::Launch if self.panel_focus == 0 => {
+                let Some(a) = self.selected_artifact() else { return };
+                let model_id = Self::artifact_model_id(a);
+                let deployed = self.snap.models.iter().any(|m| m.name == a.model && m.desired > 0);
+                items.push(ActionItem { key: 'i', label: "Info", desc: "show full build detail", action: Action::Info });
+                // 컴파일 대상 벤더 — 엔진이 NPU 면 그 벤더, 아니면 지원 목록(GPU/HF→NPU)에서.
+                let rbln_ok = a.engine.contains("RBLN") || crate::compat::compilable_vendors(&model_id).contains(&"rbln");
+                let furiosa_ok = a.engine.contains("Furiosa") || crate::compat::compilable_vendors(&model_id).contains(&"furiosa");
+                if rbln_ok {
+                    items.push(ActionItem { key: 'c', label: "Compile→RBLN", desc: "optimum-rbln compile → .rbln in store", action: Action::Compile("rbln") });
+                }
+                if furiosa_ok {
+                    items.push(ActionItem { key: 'f', label: "Compile→Furiosa", desc: "furiosa-llm build → artifact in store", action: Action::Compile("furiosa") });
+                }
+                items.push(ActionItem { key: 'd', label: "Deploy", desc: "serving options → Deployment", action: Action::Deploy });
+                items.push(ActionItem { key: 'y', label: "YAML", desc: "live Deployment YAML (read-only)", action: Action::Yaml });
+                if deployed {
+                    items.push(ActionItem { key: 'x', label: "Stop", desc: "scale serving → 0 (frees devices)", action: Action::Stop });
+                }
+                (format!("actions · {}", a.model), a.model.clone())
+            }
+            View::Launch if self.panel_focus == 1 => {
+                // 배치 타깃(노드) 패널 — 노드 액션.
+                let nodes = self.target_nodes();
+                let Some(node) = self.sel_orig().and_then(|i| nodes.get(i).cloned()) else { return };
+                let cordoned = self.snap.nodes.iter().find(|n| n.name == node).map(|n| n.cordoned).unwrap_or(false);
+                items.push(ActionItem { key: 'i', label: "Info", desc: "node detail — devices, occupancy, capacity", action: Action::Info });
+                if cordoned {
+                    items.push(ActionItem { key: 'u', label: "Uncordon", desc: "allow scheduling on this node", action: Action::Uncordon });
+                } else {
+                    items.push(ActionItem { key: 'C', label: "Cordon", desc: "block new scheduling on this node", action: Action::Cordon });
+                }
+                (format!("node · {}", node), node)
+            }
+            View::Launch if self.panel_focus == 2 => {
+                // 카탈로그(배포 가능 모델) 패널 — feasibility 안내.
+                let Some(m) = self.sel_orig().and_then(|i| self.catalog.get(i)) else { return };
+                items.push(ActionItem { key: 'i', label: "Info", desc: "why ready / needs artifact (feasibility)", action: Action::Info });
+                (format!("catalog · {}", m.id), m.id.clone())
+            }
+            View::Models | View::Overview => {
+                let Some(m) = self.selected_model() else { return };
+                let running = m.desired > 0;
+                items.push(ActionItem { key: 'i', label: "Info", desc: "model detail", action: Action::Info });
+                items.push(ActionItem { key: 'l', label: "Logs", desc: "tail pod logs", action: Action::Logs });
+                items.push(ActionItem { key: 'y', label: "YAML", desc: "live Deployment YAML (read-only)", action: Action::Yaml });
+                items.push(ActionItem { key: 's', label: "Scale", desc: "toggle replicas 0/1", action: Action::Scale });
+                items.push(ActionItem { key: 'S', label: "Restart", desc: "rollout restart (rolling)", action: Action::Restart });
+                items.push(ActionItem { key: 'O', label: "Objective", desc: "set SLO target (TTFT/TPOT/E2E/tok·s) — drives advisor", action: Action::Objective });
+                if running {
+                    items.push(ActionItem { key: 'x', label: "Stop", desc: "scale → 0 (frees devices)", action: Action::Stop });
+                }
+                (format!("actions · {}", m.name), m.name.clone())
+            }
+            View::Pods => {
+                let Some(p) = self.selected_pod() else { return };
+                items.push(ActionItem { key: 'i', label: "Info", desc: "pod detail", action: Action::Info });
+                items.push(ActionItem { key: 'l', label: "Logs", desc: "tail pod logs", action: Action::Logs });
+                items.push(ActionItem { key: 'y', label: "YAML", desc: "live Pod YAML (read-only)", action: Action::Yaml });
+                items.push(ActionItem { key: 'D', label: "Delete", desc: "delete pod (reschedules)", action: Action::Delete });
+                (format!("actions · {}", p.name), p.name.clone())
+            }
+            _ => return,
+        };
+        self.action_menu = Some(ActionMenu { title, subject, items, cursor: 0 });
+    }
+
+    /// 모델 목표(SLO) 조회 — 정확 매칭 우선, 없으면 느슨한 부분일치(서빙명 ≠ deploy명 대비).
+    pub fn objective_for(&self, model: &str) -> Option<&Objective> {
+        if let Some(o) = self.objectives.get(model) {
+            return Some(o);
+        }
+        self.objectives.iter().find(|(k, _)| model.contains(k.as_str()) || k.contains(model)).map(|(_, o)| o)
+    }
+
+    /// Models 액션 메뉴 → Objective: 목표 편집 폼(기존 값 프리필).
+    pub fn open_objective_form(&mut self) {
+        let Some(m) = self.selected_model() else { return };
+        let name = m.name.clone();
+        let cur = self.objectives.get(&name).cloned().unwrap_or_default();
+        let numf = |key: &str, label: &str, cur: Option<f64>, choices: &[&str], help: &str| CompileField {
+            key: key.into(),
+            label: label.into(),
+            value: cur.map(|v| format!("{}", v as i64)).unwrap_or_else(|| "none".into()),
+            choices: std::iter::once("none").chain(choices.iter().copied()).map(|s| s.to_string()).collect(),
+            numeric: true,
+            help: help.into(),
+        };
+        let fields = vec![
+            numf("ttft", "TTFT p95 ≤ms", cur.ttft_ms, &["500", "1000", "2000", "4000"], "첫 토큰까지 목표 상한(ms) — 대화형 응답성"),
+            numf("tpot", "TPOT p95 ≤ms", cur.tpot_ms, &["20", "50", "100", "200"], "토큰당 생성 시간 상한(ms) — 스트리밍 속도"),
+            numf("e2e", "E2E p95 ≤ms", cur.e2e_ms, &["1000", "2000", "5000", "10000"], "요청 완료까지 상한(ms)"),
+            numf("tps", "min tok/s ≥", cur.min_tps, &["10", "50", "100", "500"], "최소 처리량(tok/s) — 낮으면 처리량 부족"),
+        ];
+        self.objective_form = Some(ObjectiveForm { model: name, fields, cursor: 0, editing: false });
+    }
+
+    /// 목표 폼 제출 → objectives 에 반영(모두 none 이면 삭제).
+    pub fn objective_form_submit(&mut self) {
+        let Some(form) = self.objective_form.take() else { return };
+        let p = |s: String| -> Option<f64> {
+            if s.is_empty() || s == "none" {
+                None
+            } else {
+                s.parse::<f64>().ok()
+            }
+        };
+        let obj = Objective {
+            ttft_ms: p(form.get("ttft")),
+            tpot_ms: p(form.get("tpot")),
+            e2e_ms: p(form.get("e2e")),
+            min_tps: p(form.get("tps")),
+        };
+        if obj.is_empty() {
+            self.objectives.remove(&form.model);
+            self.notify(format!("objective cleared for {}", form.model));
+        } else {
+            self.objectives.insert(form.model.clone(), obj);
+            self.notify(format!("objective set for {}", form.model));
+        }
+    }
+
+    /// 관측(PerfRow) vs 목표 판정 + 병목 기반 조정 제안(값싼 런타임 노브 중심).
+    pub fn perf_advice(&self, row: &crate::collect::PerfRow) -> PerfAdvice {
+        let Some(o) = self.objective_for(&row.model) else {
+            return PerfAdvice { has_obj: false, checks: Vec::new(), tips: Vec::new() };
+        };
+        let ms = |s: f64| s * 1000.0;
+        let mut checks: Vec<(&'static str, bool)> = Vec::new();
+        if let Some(t) = o.ttft_ms {
+            if !row.ttft_p95.is_nan() {
+                checks.push(("TTFT", ms(row.ttft_p95) <= t));
+            }
+        }
+        if let Some(t) = o.tpot_ms {
+            if !row.tpot_p95.is_nan() {
+                checks.push(("TPOT", ms(row.tpot_p95) <= t));
+            }
+        }
+        if let Some(t) = o.e2e_ms {
+            if !row.e2e_p95.is_nan() {
+                checks.push(("E2E", ms(row.e2e_p95) <= t));
+            }
+        }
+        if let Some(t) = o.min_tps {
+            if !row.tps.is_nan() {
+                checks.push(("tok/s", row.tps >= t));
+            }
+        }
+        let mut tips: Vec<String> = Vec::new();
+        let violated = checks.iter().any(|(_, ok)| !ok);
+        if violated {
+            let q = row.queue_p95;
+            let pf = row.prefill_p95;
+            let dc = row.decode_p95;
+            if row.preempt > 0.0 {
+                tips.push("KV/메모리 스래싱(preemption↑) — batch↓ 또는 max-seq-len↓, KV 여유 확보".into());
+            }
+            if !q.is_nan() && q > 0.0 && q >= pf.max(dc) {
+                tips.push(format!("스케줄 대기 지배적({:.0}ms) — replicas↑ 또는 배치 버킷↑", ms(q)));
+            } else if !pf.is_nan() && pf >= dc && pf > 0.0 {
+                tips.push(format!("prefill 지배적({:.0}ms) — max-seq-len↓ 또는 chunked prefill", ms(pf)));
+            } else if !dc.is_nan() && dc > 0.0 {
+                tips.push(format!("decode 지배적({:.0}ms) — TPOT 개선: 동시성 조정, 필요시 TP↑", ms(dc)));
+            }
+            if let Some(mt) = o.min_tps {
+                if !row.tps.is_nan() && row.tps < mt {
+                    // 이 모델을 점유한 디바이스 평균 util 로 방향 제시.
+                    let ut: Vec<f64> = self.snap.accel.iter().filter(|a| !a.busy_model.is_empty() && row.model.contains(&a.busy_model) || a.busy_model == row.model).map(|a| a.util).collect();
+                    let avg = if ut.is_empty() { f64::NAN } else { ut.iter().sum::<f64>() / ut.len() as f64 };
+                    if !avg.is_nan() && avg > 70.0 {
+                        tips.push("tok/s 미달 · util 높음 — compute-bound: TP↑ 또는 replica↑".into());
+                    } else {
+                        tips.push("tok/s 미달 · util 여유 — 동시성/배치↑ 로 처리량 확보".into());
+                    }
+                }
+            }
+        }
+        PerfAdvice { has_obj: true, checks, tips }
+    }
+
+    /// `[d] deploy` — 선택 모델의 배포(서빙) 옵션 편집 폼을 연다. replicas·디바이스·노드 배치.
+    pub fn open_deploy_form(&mut self) {
         let Some(a) = self.selected_artifact() else { return };
         let model_id = Self::artifact_model_id(a);
         let repo_dir = model_id.replace('/', "--");
-        let name = a.family.replace('/', "-");
-        let mount = if a.mount.is_empty() { format!("/mnt/store/compiled/{}", repo_dir) } else { a.mount.split(" ← ").next().unwrap_or("/mnt/store").to_string() };
+        let vendor = if a.engine.contains("RBLN") {
+            "rbln"
+        } else if a.engine.contains("Furiosa") {
+            "furiosa"
+        } else {
+            "gpu"
+        };
+        let mount = if a.mount.is_empty() {
+            format!("/mnt/store/compiled/{}", repo_dir)
+        } else {
+            a.mount.split(" ← ").next().unwrap_or("/mnt/store").to_string()
+        };
+        // replica당 디바이스 기본값: 아티팩트 TP(없으면 1).
+        let dev_default = Self::opt_or(a, "tp", "1");
+        let want_kind = match vendor {
+            "rbln" => crate::collect::AccelKind::Rbln,
+            "furiosa" => crate::collect::AccelKind::Rngd,
+            _ => crate::collect::AccelKind::Gpu,
+        };
+        let mut per_node: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for ac in self.snap.accel.iter().filter(|x| x.kind == want_kind && !x.node.is_empty()) {
+            *per_node.entry(ac.node.clone()).or_insert(0) += 1;
+        }
+        let mut cand_nodes: Vec<String> = per_node.keys().cloned().collect();
+        cand_nodes.sort();
+        let mut place_choices = vec!["any".to_string(), "spread".to_string()];
+        place_choices.extend(cand_nodes.iter().map(|n| format!("{}({})", n, per_node[n])));
+        let fields = vec![
+            CompileField {
+                key: "replicas".into(),
+                label: "replicas".into(),
+                value: "1".into(),
+                choices: ["1", "2", "3", "4", "6", "8"].iter().map(|s| s.to_string()).collect(),
+                numeric: true,
+                help: "서빙 인스턴스 수(Deployment replicas). 총 디바이스 수요 = replicas × devices".into(),
+            },
+            CompileField {
+                key: "devices".into(),
+                label: "devices/replica".into(),
+                value: dev_default,
+                choices: ["1", "2", "4", "8"].iter().map(|s| s.to_string()).collect(),
+                numeric: true,
+                help: "replica 당 가속기 수(resources.limits). 보통 = 컴파일 TP".into(),
+            },
+            CompileField {
+                key: "port".into(),
+                label: "port".into(),
+                value: "8000".into(),
+                choices: ["8000", "8080"].iter().map(|s| s.to_string()).collect(),
+                numeric: true,
+                help: "서빙 컨테이너 포트".into(),
+            },
+            CompileField {
+                key: "place".into(),
+                label: "placement".into(),
+                value: "any".into(),
+                choices: place_choices,
+                numeric: false,
+                help: "노드 배치 — any=제약 없음, spread=여러 노드 분산(topologySpread), 특정=hostname 고정".into(),
+            },
+        ];
+        self.deploy_form = Some(DeployForm {
+            model: a.model.clone(),
+            model_id,
+            engine: a.engine.clone(),
+            vendor,
+            mount,
+            fields,
+            cursor: 0,
+            editing: false,
+        });
+    }
+
+    /// 배포 용량 판정 — 총 디바이스 수요 대 클러스터 동종 가속기(총/유휴).
+    pub fn deploy_fit(&self, form: &DeployForm) -> DeployFit {
+        let want_kind = match form.vendor {
+            "rbln" => crate::collect::AccelKind::Rbln,
+            "furiosa" => crate::collect::AccelKind::Rngd,
+            _ => crate::collect::AccelKind::Gpu,
+        };
+        let devs: Vec<&crate::collect::Accel> = self.snap.accel.iter().filter(|x| x.kind == want_kind).collect();
+        let total = devs.len() as i64;
+        // 노드별 유휴(살아있고 미점유) — replica 는 한 노드에 per 개가 모여야 배치 가능(패킹).
+        let mut free_by_node: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
+        for d in &devs {
+            if !d.node.is_empty() {
+                let e = free_by_node.entry(d.node.as_str()).or_insert(0);
+                if d.alive && d.busy_model.is_empty() {
+                    *e += 1;
+                }
+            }
+        }
+        let free: i64 = free_by_node.values().sum();
+        let nodes = free_by_node.len() as i64;
+        let max_node_free = free_by_node.values().copied().max().unwrap_or(0);
+        let replicas = form.get("replicas").parse::<i64>().unwrap_or(1).max(1);
+        let per = form.get("devices").parse::<i64>().unwrap_or(1).max(1);
+        let demand = replicas * per;
+        // 실제 배치 가능 replica 수 = Σ floor(node_free / per) (한 노드 안에 per 개가 모여야).
+        let placeable: i64 = free_by_node.values().map(|f| f / per).sum();
+        let verdict = if total == 0 {
+            FitVerdict::Unknown
+        } else if per > max_node_free {
+            FitVerdict::Oom // replica 하나도 어느 노드에도 안 들어감(조각난 여유)
+        } else if placeable < replicas {
+            FitVerdict::Tight // 총량은 되지만 노드 패킹으로 일부만 배치
+        } else {
+            FitVerdict::Fits
+        };
+        let mut tips: Vec<String> = Vec::new();
+        match verdict {
+            FitVerdict::Oom => {
+                tips.push(format!("replica당 {}개가 단일 노드에 안 들어감(최대 유휴 {}/노드) — devices/replica↓ 또는 서빙 정리", per, max_node_free));
+            }
+            FitVerdict::Tight => {
+                tips.push(format!("노드 패킹상 {}/{} replica 만 배치 가능(유휴 {}, 노드별 조각) — replicas↓ 또는 노드 확보", placeable, replicas, free));
+            }
+            _ => {}
+        }
+        if form.get("place") == "spread" && replicas > nodes && nodes > 0 {
+            tips.push(format!("⚠ spread: replicas {} > 노드 {} — 일부는 같은 노드로", replicas, nodes));
+        }
+        if per > 1 && form.vendor == "rbln" {
+            tips.push("replica당 다중 칩은 컴파일 TP 와 일치해야 함".into());
+        }
+        DeployFit { demand, total, free, nodes, verdict, tips }
+    }
+
+    /// 배포 폼 → Deployment 매니페스트 미리보기(dry-run). Enter 시 호출.
+    pub fn deploy_form_submit(&mut self) {
+        let Some(form) = self.deploy_form.take() else { return };
+        let name = form.model_id.replace(['/', '.'], "-").to_lowercase();
+        let name = format!("serve-{}", name);
+        let replicas = form.get("replicas");
+        let devices = form.get("devices");
+        let port = {
+            let p = form.get("port");
+            if p.is_empty() { "8000".to_string() } else { p }
+        };
+        let (res_key, product_label) = match form.vendor {
+            "rbln" => ("rebellions.ai/ATOM", "rebellions.ai/npu.product: RBLN-CA22"),
+            "furiosa" => ("furiosa.ai/rngd", "furiosa.ai/npu.product: rngd"),
+            _ => ("nvidia.com/gpu", ""),
+        };
+        let place = form.get("place");
+        let place_host = place.split('(').next().unwrap_or("any").trim().to_string();
+        // 배치 스펙 — spread=topologySpread, 특정=nodeSelector hostname, any=제약 없음(디바이스 resource 로 스케줄).
+        let placement_yaml = if place_host == "spread" {
+            format!(
+                "\x20     topologySpreadConstraints:\n\
+                 \x20       - {{ maxSkew: 1, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: DoNotSchedule, labelSelector: {{ matchLabels: {{ app: {name} }} }} }}\n",
+                name = name
+            )
+        } else if place_host != "any" && !place_host.is_empty() {
+            format!("\x20     nodeSelector: {{ kubernetes.io/hostname: {} }}\n", place_host)
+        } else if !product_label.is_empty() {
+            format!("\x20     nodeSelector: {{ {} }}\n", product_label)
+        } else {
+            String::new()
+        };
+        let compile_note = if form.vendor == "gpu" {
+            "vLLM 이 HF 가중치 직접 로드(컴파일 불필요)"
+        } else {
+            "사전 컴파일 아티팩트 필요([c] compile 로 생성)"
+        };
+        let image = self.img_serving.clone().unwrap_or_else(|| "TODO-serving-image".into());
         let yaml = format!(
             "# 배포 매니페스트 (dry-run 미리보기) — 검토 후 `kubectl apply -f -`.\n\
-             # 모델 {model_id} 를 공유 스토어({mount})에서 서빙. 엔진: {engine}.\n\
-             # TODO: image(서빙 런타임), args/포트, 디바이스 resources, ModelService 사용 시 CRD 로 대체.\n\
+             # 모델 {model_id} 를 공유 스토어({mount})에서 서빙. 엔진: {engine}. {note}.\n\
+             # 배치: {place}  ·  총 디바이스 수요 = {replicas} × {devices}\n\
+             # 이미지 placeholder(TODO-)면 LMD_SERVING_IMAGE 로 지정해야 apply 가능.\n\
              apiVersion: apps/v1\n\
              kind: Deployment\n\
              metadata: {{ name: {name}, namespace: {ns} }}\n\
              spec:\n\
-             \x20 replicas: 1\n\
+             \x20 replicas: {replicas}\n\
              \x20 selector: {{ matchLabels: {{ app: {name} }} }}\n\
              \x20 template:\n\
              \x20   metadata: {{ labels: {{ app: {name} }} }}\n\
              \x20   spec:\n\
+             {placement}\
              \x20     volumes:\n\
              \x20       - {{ name: store, persistentVolumeClaim: {{ claimName: model-store }} }}\n\
              \x20     containers:\n\
              \x20       - name: server\n\
-             \x20         image: TODO-serving-image   # {engine}\n\
-             \x20         args: [\"--model\", \"{mount}\"]\n\
+             \x20         image: {image}   # {engine}\n\
+             \x20         args: [\"--model\", \"{mount}\", \"--port\", \"{port}\"]\n\
+             \x20         ports: [{{ containerPort: {port} }}]\n\
+             \x20         resources: {{ limits: {{ {res_key}: {devices} }} }}\n\
              \x20         volumeMounts:\n\
              \x20           - {{ name: store, mountPath: /mnt/store, readOnly: true }}\n",
-            model_id = model_id,
-            mount = mount,
-            engine = a.engine,
+            model_id = form.model_id,
+            mount = form.mount,
+            engine = form.engine,
+            note = compile_note,
+            place = place,
             name = name,
-            ns = "llm-serving",
+            ns = self.ns,
+            replicas = replicas,
+            devices = devices,
+            port = port,
+            placement = placement_yaml,
+            res_key = res_key,
+            image = image,
         );
-        self.preview = Some((format!("deploy · {}", a.model), yaml));
+        self.preview = Some((format!("deploy · {} ×{}", form.model, replicas), yaml));
         self.preview_scroll = 0;
+        self.preview_apply = true;
     }
 
     /// 로그 대상 pod 이름(현재 선택 기준).
@@ -1236,18 +2068,156 @@ mod tests {
         a.view = View::Launch;
         a.panel_focus = 0;
         a.selected = 0;
-        // compile: NPU(RBLN) → Job 매니페스트에 모델 id/타깃/스토어 경로 포함.
+        // compile: NPU(RBLN) → 옵션 폼이 열리고, 관측 opts 로 초기화.
         a.compile_preview();
+        let form = a.compile_form.clone().expect("compile form opens for RBLN");
+        assert_eq!(form.vendor, "rbln");
+        assert_eq!(form.get("tp"), "4");
+        assert_eq!(form.get("max-len"), "8192");
+        assert!(form.target().contains("tp4-s8192"));
+        // Enter → 폼 값으로 Job 매니페스트 생성(모델 id/타깃/스토어 경로/옵션 env 포함).
+        a.compile_form_submit();
         let (title, yaml) = a.preview.clone().expect("compile preview");
         assert!(title.contains("compile"));
         assert!(yaml.contains("kind: Job"));
         assert!(yaml.contains("KISTI-KONI/KONI-Llama3.1-8B-Instruct"));
         assert!(yaml.contains("compiled/KISTI-KONI--KONI-Llama3.1-8B-Instruct/rbln/rbln-ca22-tp4-s8192"));
-        // deploy: 스토어 마운트를 서빙하는 매니페스트.
-        a.deploy_preview();
+        assert!(yaml.contains("RBLN_TENSOR_PARALLEL_SIZE"));
+        assert!(yaml.contains("RBLN_MAX_SEQ_LEN"));
+        // deploy: 폼 열고 replicas/디바이스/배치 → Deployment 매니페스트.
+        a.open_deploy_form();
+        let dform = a.deploy_form.clone().expect("deploy form opens");
+        assert_eq!(dform.vendor, "rbln");
+        assert_eq!(dform.get("devices"), "4"); // 아티팩트 TP
+        a.deploy_form_submit();
         let (_, dyaml) = a.preview.clone().expect("deploy preview");
         assert!(dyaml.contains("kind: Deployment"));
         assert!(dyaml.contains("model-store"));
+        assert!(dyaml.contains("rebellions.ai/ATOM: 4"));
+        // 구조 유효성: 생성 매니페스트가 실제 파싱되는 YAML 인지 테스트 시점에 검증
+        // (문자열 보간 들여쓰기 실수를 dry-run 이전에 잡음).
+        serde_yaml::from_str::<serde_yaml::Value>(&yaml).expect("compile manifest is valid YAML");
+        serde_yaml::from_str::<serde_yaml::Value>(&dyaml).expect("deploy manifest is valid YAML");
+    }
+
+    #[test]
+    fn action_menu_offers_contextual_actions() {
+        use crate::collect::ModelArtifact;
+        let mut a = App::new();
+        a.snap = Snapshot {
+            artifacts: vec![ModelArtifact {
+                model: "koni-rbln".into(),
+                family: "kisti-koni/koni".into(),
+                engine: "vLLM-RBLN".into(),
+                node: "etri-001".into(),
+                image: String::new(),
+                source: "KISTI-KONI/KONI".into(),
+                mount: String::new(),
+                opts: vec![],
+            }],
+            ..Default::default()
+        };
+        a.view = View::Launch;
+        a.panel_focus = 0;
+        a.selected = 0;
+        // NPU(RBLN) 빌드 → Info + Compile→RBLN + Deploy(배포 안 된 상태라 Stop 없음).
+        a.open_action_menu();
+        let m = a.action_menu.clone().expect("menu opens on Launch panel 0");
+        let acts: Vec<Action> = m.items.iter().map(|i| i.action).collect();
+        assert!(acts.contains(&Action::Info));
+        assert!(acts.contains(&Action::Compile("rbln")));
+        assert!(acts.contains(&Action::Deploy));
+        assert!(!acts.contains(&Action::Stop)); // 미배포
+        assert_eq!(m.by_key('c'), Some(Action::Compile("rbln")));
+        assert_eq!(m.by_key('z'), None);
+        // GPU vLLM 이지만 모델이 Llama 계열 → 지원 목록으로 Compile→RBLN·Furiosa 노출(GPU→NPU 경로).
+        a.snap.artifacts[0].engine = "vLLM".into();
+        a.action_menu = None;
+        a.open_action_menu();
+        let g = a.action_menu.clone().unwrap();
+        assert!(g.items.iter().any(|i| i.action == Action::Compile("rbln")));
+        assert!(g.items.iter().any(|i| i.action == Action::Compile("furiosa")));
+    }
+
+    #[test]
+    fn objective_advice_flags_and_recommends() {
+        use crate::collect::PerfRow;
+        let mut a = App::new();
+        a.objectives.insert(
+            "koni".into(),
+            Objective { ttft_ms: Some(2000.0), tpot_ms: None, e2e_ms: Some(1000.0), min_tps: Some(100.0) },
+        );
+        // 느슨한 매칭(서빙명 ≠ 키).
+        assert!(a.objective_for("koni-llama3.1-8b").is_some());
+        // E2E 위반 + decode 지배 + tok/s 미달.
+        let row = PerfRow {
+            model: "koni-llama3.1-8b".into(),
+            req: 5.0,
+            tps: 40.0,             // < 100 → 위반
+            ttft_p95: 0.5,         // 500ms ≤ 2000 → 충족
+            tpot_p95: f64::NAN,
+            e2e_p95: 3.0,          // 3000ms > 1000 → 위반
+            in_tok_p95: f64::NAN,
+            out_tok_p95: f64::NAN,
+            queue_p95: 0.1,
+            prefill_p95: 0.2,
+            decode_p95: 2.5,       // decode 지배
+            preempt: 0.0,
+        };
+        let adv = a.perf_advice(&row);
+        assert!(adv.has_obj);
+        assert!(!adv.all_met());
+        assert!(adv.checks.iter().any(|(m, ok)| *m == "E2E" && !*ok));
+        assert!(adv.checks.iter().any(|(m, ok)| *m == "TTFT" && *ok));
+        assert!(adv.tips.iter().any(|t| t.contains("decode")));
+        assert!(adv.tips.iter().any(|t| t.contains("tok/s")));
+        // 목표 없는 모델 → has_obj=false.
+        let row2 = PerfRow { model: "other".into(), ..row };
+        assert!(!a.perf_advice(&row2).has_obj);
+    }
+
+    #[test]
+    fn compile_fit_flags_oom_and_recommends() {
+        use crate::collect::ModelArtifact;
+        let mk = |source: &str| App {
+            snap: Snapshot {
+                artifacts: vec![ModelArtifact {
+                    model: "m".into(),
+                    family: source.to_lowercase(),
+                    engine: "vLLM-RBLN".into(),
+                    node: "etri-001".into(),
+                    image: String::new(),
+                    source: source.into(),
+                    mount: String::new(),
+                    opts: vec![],
+                }],
+                ..Default::default()
+            },
+            view: View::Launch,
+            panel_focus: 0,
+            selected: 0,
+            ..App::new()
+        };
+        // 8B on RBLN TP4 s8192 batch1 → fits (칩당 ~여유).
+        let mut a = mk("meta-llama/Llama-3.1-8B-Instruct");
+        a.compile_preview();
+        let form = a.compile_form.clone().unwrap();
+        let fit = a.compile_fit(&form);
+        assert_eq!(fit.params_b, Some(8.0));
+        assert!(matches!(fit.verdict, FitVerdict::Fits | FitVerdict::Tight));
+        // 70B on RBLN TP4 → 칩당 초과 → OOM + 양자화 제안.
+        let mut b = mk("meta-llama/Llama-3.1-70B-Instruct");
+        b.compile_preview();
+        let bform = b.compile_form.clone().unwrap();
+        let bfit = b.compile_fit(&bform);
+        assert_eq!(bfit.params_b, Some(70.0));
+        assert_eq!(bfit.verdict, FitVerdict::Oom);
+        assert!(bfit.tips.iter().any(|t| t.contains("양자화")));
+        // 크기 미상 → Unknown.
+        let mut c = mk("some-org/mystery-model");
+        c.compile_preview();
+        let cform = c.compile_form.clone().unwrap();
+        assert_eq!(c.compile_fit(&cform).verdict, FitVerdict::Unknown);
     }
 
     #[test]

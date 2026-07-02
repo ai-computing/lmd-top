@@ -207,6 +207,7 @@ pub struct Snapshot {
     pub gw_ok: bool,
     pub inventory: Vec<(String, i64, i64)>, // (가속기 resource, allocatable total, 사용중 requests)
     pub warnings: Vec<String>,
+    pub prom_ok: bool, // Prometheus 도달 가능 여부(false 면 "가속기 없음"이 아니라 연결 문제)
 }
 
 /// EPP 정책 수립용 성능 지표(구간별 지연 percentile·토큰분포·처리량). 값 없으면 NaN.
@@ -374,8 +375,46 @@ struct Vllm {
 }
 
 /// deploy 컨테이너 command/args/image 로 추론 엔진 추정.
+/// pod spec 의 여러 컨테이너 중 모델 서버 컨테이너 선택(프록시/사이드카 제외).
+/// llm-d/게이트웨이는 프록시+모델서버 사이드카 패턴이 흔해 [0] 이 프록시일 수 있음.
+fn model_container(spec: &serde_json::Value) -> &serde_json::Value {
+    let arr = match spec["containers"].as_array() {
+        Some(a) if !a.is_empty() => a,
+        _ => return &spec["containers"][0],
+    };
+    let is_sidecar = |c: &serde_json::Value| {
+        let n = c["name"].as_str().unwrap_or("").to_lowercase();
+        let img = c["image"].as_str().unwrap_or("").to_lowercase();
+        ["proxy", "sidecar", "istio", "envoy", "-router", "gateway", "dcgm", "exporter", "vector", "fluent", "otel"]
+            .iter()
+            .any(|k| n.contains(k) || img.contains(k))
+    };
+    let looks_server = |c: &serde_json::Value| {
+        let mut t = String::new();
+        for key in ["command", "args"] {
+            if let Some(a) = c[key].as_array() {
+                for x in a {
+                    if let Some(s) = x.as_str() {
+                        t.push_str(&s.to_lowercase());
+                        t.push(' ');
+                    }
+                }
+            }
+        }
+        let img = c["image"].as_str().unwrap_or("").to_lowercase();
+        ["vllm", "sglang", "furiosa", "ollama", "--model", "optimum", "text-generation"].iter().any(|k| t.contains(k) || img.contains(k))
+    };
+    if let Some(c) = arr.iter().find(|c| looks_server(c)) {
+        return c;
+    }
+    if let Some(c) = arr.iter().find(|c| !is_sidecar(c)) {
+        return c;
+    }
+    &arr[0]
+}
+
 fn detect_engine(d: &serde_json::Value, accel: &str) -> String {
-    let c = &d["spec"]["template"]["spec"]["containers"][0];
+    let c = model_container(&d["spec"]["template"]["spec"]);
     let mut t = String::new();
     for key in ["command", "args"] {
         if let Some(arr) = c[key].as_array() {
@@ -408,7 +447,7 @@ fn detect_engine(d: &serde_json::Value, accel: &str) -> String {
 /// deploy 컨테이너 spec(command/args/env/volumeMounts)에서 모델 저장 위치 + 컴파일/서빙 옵션 추출.
 fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtifact {
     let pod = &d["spec"]["template"]["spec"];
-    let c = &pod["containers"][0];
+    let c = model_container(pod);
     let image = c["image"].as_str().unwrap_or("").to_string();
 
     let mut toks: Vec<String> = Vec::new();
@@ -811,6 +850,12 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     let mut snap = Snapshot::default();
     let mut warn = Vec::new();
     snap.ts = now_secs();
+
+    // Prometheus 도달성 프로브 — 실패 시 빈 테이블을 "장비 없음"이 아니라 연결 문제로 구분.
+    snap.prom_ok = prom::query(&cfg.prom, "vector(1)").await.is_ok();
+    if !snap.prom_ok {
+        warn.push(format!("Prometheus unreachable at {}", cfg.prom));
+    }
 
     // 가속기 + 노드는 fast tier(collect_fast) 재사용 — 중복 제거
     let (accel, nodes) = collect_fast(cfg).await;
@@ -1216,40 +1261,8 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     }
     snap.pods.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // events (최근순) — llm-d/k8s 이벤트 통합
-    if let Ok(v) = kube::get_json(&["get", "events", "-n", &cfg.ns, "--sort-by=.lastTimestamp", "-o", "json"]).await {
-        if let Some(items) = v["items"].as_array() {
-            for e in items.iter().rev().take(40) {
-                let obj = format!(
-                    "{}/{}",
-                    e["involvedObject"]["kind"].as_str().unwrap_or(""),
-                    e["involvedObject"]["name"].as_str().unwrap_or("")
-                );
-                snap.events.push(EventRow {
-                    typ: e["type"].as_str().unwrap_or("Normal").to_string(),
-                    reason: e["reason"].as_str().unwrap_or("").to_string(),
-                    object: obj,
-                    message: e["message"].as_str().unwrap_or("").to_string(),
-                    count: e["count"].as_i64().unwrap_or(1),
-                });
-            }
-        }
-    }
-
-    // gateway
-    if let Ok(v) = kube::get_json(&["get", "gateway", "-n", &cfg.ns, "-o", "json"]).await {
-        if let Some(g) = v["items"].as_array().and_then(|a| a.first()) {
-            snap.gw_addr = g["status"]["addresses"][0]["value"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            if let Some(conds) = g["status"]["conditions"].as_array() {
-                snap.gw_ok = conds
-                    .iter()
-                    .any(|c| c["type"] == "Programmed" && c["status"] == "True");
-            }
-        }
-    }
+    collect_events(cfg, snap).await;
+    collect_gateway(cfg, snap).await;
 
     // EPP config (ConfigMap)
     if let Ok(v) = kube::get_json(&["get", "cm", "llmd-router-epp", "-n", &cfg.ns, "-o", "json"]).await
@@ -1361,7 +1374,62 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
         }
     }
 
-    // 공유 스토어 인벤토리(model-inventory ConfigMap) — 있으면 파싱. 없으면(미배포) 조용히 빈 값.
+    collect_stored(cfg, snap).await;
+
+    // artifact 저장/구동 노드 — 가속기 busy_model 우선, 없으면 파드 스케줄 노드(분리 차용으로 먼저 계산).
+    let nodes: Vec<String> = snap
+        .artifacts
+        .iter()
+        .map(|a| {
+            snap.accel
+                .iter()
+                .find(|x| !x.busy_model.is_empty() && x.busy_model.starts_with(&a.model))
+                .map(|x| x.node.clone())
+                .or_else(|| snap.pods.iter().find(|p| p.name.starts_with(&a.model)).map(|p| p.node.clone()))
+                .unwrap_or_default()
+        })
+        .collect();
+    for (a, n) in snap.artifacts.iter_mut().zip(nodes) {
+        a.node = n;
+    }
+}
+
+/// k8s/llm-d 이벤트(최근 40) → snap.events. collect_kube 에서 분리된 leaf 파서.
+async fn collect_events(cfg: &Config, snap: &mut Snapshot) {
+    if let Ok(v) = kube::get_json(&["get", "events", "-n", &cfg.ns, "--sort-by=.lastTimestamp", "-o", "json"]).await {
+        if let Some(items) = v["items"].as_array() {
+            for e in items.iter().rev().take(40) {
+                let obj = format!(
+                    "{}/{}",
+                    e["involvedObject"]["kind"].as_str().unwrap_or(""),
+                    e["involvedObject"]["name"].as_str().unwrap_or("")
+                );
+                snap.events.push(EventRow {
+                    typ: e["type"].as_str().unwrap_or("Normal").to_string(),
+                    reason: e["reason"].as_str().unwrap_or("").to_string(),
+                    object: obj,
+                    message: e["message"].as_str().unwrap_or("").to_string(),
+                    count: e["count"].as_i64().unwrap_or(1),
+                });
+            }
+        }
+    }
+}
+
+/// Gateway 주소/상태(Programmed) → snap.gw_addr/gw_ok.
+async fn collect_gateway(cfg: &Config, snap: &mut Snapshot) {
+    if let Ok(v) = kube::get_json(&["get", "gateway", "-n", &cfg.ns, "-o", "json"]).await {
+        if let Some(g) = v["items"].as_array().and_then(|a| a.first()) {
+            snap.gw_addr = g["status"]["addresses"][0]["value"].as_str().unwrap_or("").to_string();
+            if let Some(conds) = g["status"]["conditions"].as_array() {
+                snap.gw_ok = conds.iter().any(|c| c["type"] == "Programmed" && c["status"] == "True");
+            }
+        }
+    }
+}
+
+/// 공유 스토어 인벤토리(model-inventory ConfigMap) → snap.stored. 없으면(미배포) 조용히 빈 값.
+async fn collect_stored(cfg: &Config, snap: &mut Snapshot) {
     if let Ok(v) = kube::get_json(&["get", "cm", "model-inventory", "-n", &cfg.ns, "-o", "json"]).await {
         if let Some(txt) = v["data"]["inventory"].as_str() {
             for line in txt.lines() {
@@ -1383,23 +1451,6 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                 }
             }
         }
-    }
-
-    // artifact 저장/구동 노드 — 가속기 busy_model 우선, 없으면 파드 스케줄 노드(분리 차용으로 먼저 계산).
-    let nodes: Vec<String> = snap
-        .artifacts
-        .iter()
-        .map(|a| {
-            snap.accel
-                .iter()
-                .find(|x| !x.busy_model.is_empty() && x.busy_model.starts_with(&a.model))
-                .map(|x| x.node.clone())
-                .or_else(|| snap.pods.iter().find(|p| p.name.starts_with(&a.model)).map(|p| p.node.clone()))
-                .unwrap_or_default()
-        })
-        .collect();
-    for (a, n) in snap.artifacts.iter_mut().zip(nodes) {
-        a.node = n;
     }
 }
 

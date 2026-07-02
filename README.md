@@ -6,10 +6,8 @@
 **English** · [한국어](README.ko.md)
 
 [![release](https://img.shields.io/github/v/release/gspark-etri/lmd-top?logo=github)](https://github.com/gspark-etri/lmd-top/releases/latest)
+[![license](https://img.shields.io/github/license/gspark-etri/lmd-top)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white)
-![single static binary](https://img.shields.io/badge/single%20static%20binary-no%20C%20deps-success)
-![for llm-d](https://img.shields.io/badge/for-llm--d-8839ef)
-![views](https://img.shields.io/badge/correlated%20views-10-89b4fa)
 
 `lmd-top` correlates the four layers of an llm-d serving stack — Gateway → EPP (Endpoint
 Picker) → model server → infrastructure — across heterogeneous accelerators (NVIDIA GPU,
@@ -49,20 +47,31 @@ Switch views with the number keys `0`–`9`, or cycle with `Tab` / `Shift+Tab`.
 
 ## Install
 
-To build, you need a Rust toolchain and a C linker (`cc`/`gcc`) — that's it. The binary
-links only glibc; there are no native or C-library dependencies (no OpenSSL, pkg-config, or
-cmake). At runtime it needs `kubectl` with kubeconfig access and network reachability to
-Prometheus; it never SSHes into accelerator nodes. A truecolor terminal with a font that
-covers box-drawing and braille glyphs is recommended (otherwise run with `LMD_THEME=default`).
-`xdg-open` is optional and only used by the `g` key.
+**Prebuilt binary** (Linux x86_64):
+
+```bash
+VER=v0.32.0   # latest: https://github.com/gspark-etri/lmd-top/releases/latest
+curl -fsSL "https://github.com/gspark-etri/lmd-top/releases/download/$VER/lmd-top-$VER-x86_64-linux.tar.gz" | tar xz
+sudo install -m 0755 lmd-top /usr/local/bin/
+```
+
+A `.sha256` checksum is published alongside each release asset.
+
+**From source** (needs a Rust toolchain and a C linker, `cc`/`gcc` — nothing else):
 
 ```bash
 git clone https://github.com/gspark-etri/lmd-top.git && cd lmd-top
 ./install.sh                 # installs any missing prereqs, then runs `cargo install`
 #   ./install.sh --check     # report what's present/missing, install nothing
 #   ./install.sh --with-demo # also install agg and regenerate the demo GIF
-# by hand: cargo install --path .   (cargo fetches the Rust crates automatically)
+# by hand: cargo install --path .
 ```
+
+**Runtime requirements:**
+
+- `kubectl` with kubeconfig access, and network reachability to Prometheus. It never SSHes into accelerator nodes.
+- A truecolor terminal with a font covering box-drawing and braille glyphs is recommended; otherwise run with `LMD_THEME=default`.
+- The binary links only glibc — no OpenSSL, pkg-config, or cmake. `xdg-open` is optional (used only by the `g` key).
 
 ## Usage
 
@@ -79,15 +88,22 @@ LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # point at another cluster
 `observe` (default, view only) → `debug` (adds logs, `l`) → `admin` (adds `scale`, with a
 y/n confirmation) → `danger` (reserved). Admin actions always ask before applying.
 
-**Keys.** `↑↓`/`kj` select a row, `Enter` drills into detail, `w` moves focus between panels
-in multi-panel views, and `←→` step through items. `/` filters, `o` cycles the sort, `l`
-shows logs, `s` scales, and `A` opens the alert history. `t` cycles the theme, `f` toggles
-animations, `z` zooms, `Space` pauses, `g` opens Grafana, `?` shows help, and `q` quits.
+**Keys.**
 
-**Environment.** `LMD_PROM`, `LMD_NS` (default `llm-serving`), and `LMD_GRAFANA` point it at
-your cluster; `LMD_THEME` picks the startup theme (`soft`, `default`, `high-contrast`, or
-`colorblind`); `LMD_W`/`LMD_H` set the `--render` size. An optional
-`~/.config/lmd-top/lmd-top.yaml` customizes column order.
+| | |
+|---|---|
+| Navigate | `↑↓` / `kj` select · `⏎` drill into detail · `←→` step items · `w` move focus between panels |
+| Act | `/` filter · `o` cycle sort · `l` logs · `s` scale · `A` alert history |
+| Display | `t` theme · `f` animations · `z` zoom · `Space` pause · `g` Grafana · `?` help · `q` quit |
+
+**Environment.**
+
+- `LMD_PROM`, `LMD_NS` (default `llm-serving`), `LMD_GRAFANA` — point it at your cluster.
+- `LMD_THEME` — startup theme: `soft`, `default`, `high-contrast`, or `colorblind`.
+- `LMD_W` / `LMD_H` — the `--render` size.
+- `LMD_COMPILE_IMAGE_RBLN`, `LMD_COMPILE_IMAGE_FURIOSA`, `LMD_SERVING_IMAGE` — container images for the generated compile/deploy manifests. Until set, those fields are `TODO-…` placeholders and the in-app apply (`a`) is blocked; `w` still saves the manifest to edit by hand.
+- `LMD_SAVE_DIR` — where `w` writes saved manifests (default: current dir).
+- Optional `~/.config/lmd-top/lmd-top.yaml` customizes column order.
 
 **Colors and glyphs.** Color encodes severity or identity, while state is carried by a
 separate glyph (`●` up, `○` idle, `◐` pending, `⚠` throttling, `⊘` cordoned, `✗` down) so the
@@ -126,9 +142,14 @@ to the cluster.)
 rollout, each as dry-run → confirm → audit); an EPP per-endpoint score debugger; and **NPU
 compile & deploy automation** — from the Deploy view, compile a model for RBLN or Furiosa (as
 a Kubernetes Job running the vendor toolchain) and deploy the artifact through ModelService,
-gated by permission mode. See `ROADMAP.md` and `CHANGELOG.md`.
+gated by permission mode. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## Maturity
 
 Verified against a live heterogeneous cluster (8 nodes; GB10, RBLN, and RNGD accelerators;
 EPP, routes, and models live). It's experimental (0.x), so interfaces may still change.
+
+## Contributing & license
+
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+Licensed under [Apache-2.0](LICENSE).
