@@ -31,13 +31,14 @@ pub async fn run(cfg: &Config, out: &str) {
     }
 
     // 스토리보드: (뷰, detail, 프레임수) — 앞단→상세를 두루 보여줌.
-    let story: [(View, bool, u32); 6] = [
+    let story: [(View, bool, u32); 7] = [
         (View::Overview, false, 30),
         (View::Accel, false, 20),
         (View::Accel, true, 22),   // 가속기 상세(게이지+타임라인)
+        (View::Nodes, false, 24),  // 노드 + disk
+        (View::Launch, false, 26), // Deploy 라이프사이클(컴파일 변형·배치 타깃)
         (View::Perf, false, 24),
-        (View::Models, true, 26),  // 모델 상세(pivot 미리보기)
-        (View::Nodes, false, 24),
+        (View::Models, true, 28),  // 모델 상세(pivot 미리보기)
     ];
 
     let mut events = String::new();
