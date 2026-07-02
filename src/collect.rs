@@ -129,6 +129,19 @@ pub struct ModelRow {
     pub ttft: Option<f64>, // TTFT p95 (s)
 }
 
+/// 공유 모델 스토어 인벤토리 항목(디스커버리 CronJob → model-inventory ConfigMap).
+/// 배포 여부와 무관하게 "스토어에 존재하는" HF 원본/NPU 컴파일본.
+#[derive(Clone, Default)]
+pub struct StoredModel {
+    pub repo: String,         // org/name (HF id) 또는 로컬 식별자
+    pub family: String,       // 트리 그룹 키(정규화)
+    pub revision: String,     // HF revision 또는 "-"
+    pub format: String,       // hf | rbln | furiosa
+    pub compiled_for: String, // 컴파일 타깃/옵션(예: RBLN-CA22-tp4-s8192) 또는 "-"
+    pub size: String,         // du -sh 결과
+    pub path: String,         // 스토어 내 상대 경로
+}
+
 /// Store 뷰용 — 모델이 "어디에(경로/볼륨)" 저장되고 "어떤 옵션으로" 컴파일/서빙되는지.
 /// deploy 컨테이너 spec(command/args/env/volumeMounts)에서 추출(휴리스틱).
 #[derive(Clone, Default)]
@@ -176,6 +189,7 @@ pub struct Snapshot {
     pub pools: Vec<Pool>,
     pub models: Vec<ModelRow>,
     pub artifacts: Vec<ModelArtifact>, // Store 뷰: 모델 저장 위치 + 컴파일/서빙 옵션
+    pub stored: Vec<StoredModel>,      // 공유 스토어 인벤토리(model-inventory ConfigMap) — 배포 무관
     pub pods: Vec<PodRow>,
     pub events: Vec<EventRow>,
     pub routes: Vec<Route>,
@@ -1347,6 +1361,30 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                     active: cond("Active"),
                     triggers,
                 });
+            }
+        }
+    }
+
+    // 공유 스토어 인벤토리(model-inventory ConfigMap) — 있으면 파싱. 없으면(미배포) 조용히 빈 값.
+    if let Ok(v) = kube::get_json(&["get", "cm", "model-inventory", "-n", &cfg.ns, "-o", "json"]).await {
+        if let Some(txt) = v["data"]["inventory"].as_str() {
+            for line in txt.lines() {
+                let l = line.trim();
+                if l.is_empty() || l.starts_with('#') {
+                    continue;
+                }
+                let f: Vec<&str> = l.split('|').map(|s| s.trim()).collect();
+                if f.len() >= 6 {
+                    snap.stored.push(StoredModel {
+                        family: model_family(f[0], f[0]),
+                        repo: f[0].into(),
+                        revision: f[1].into(),
+                        format: f[2].into(),
+                        compiled_for: f[3].into(),
+                        size: f[4].into(),
+                        path: f[5].into(),
+                    });
+                }
             }
         }
     }

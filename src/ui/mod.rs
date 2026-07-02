@@ -1757,7 +1757,7 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
     let focus = app.panel_focus; // 0 변형 · 1 타깃 · 2 카탈로그
     let blk = |title: &str, active: bool| if active { block_active(title) } else { block(title) };
 
-    // ── 1) 컴파일 변형: family → variant 트리(focus 0 일 때 선택/강조) ──
+    // ── 1) 컴파일 변형: family → variant 트리(배포된 것 + 스토어에만 있는 것) ──
     let mut fams: Vec<(String, Vec<usize>)> = Vec::new();
     for i in 0..app.snap.artifacts.len() {
         let fam = app.snap.artifacts[i].family.clone();
@@ -1767,17 +1767,26 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
             fams.push((fam, vec![i]));
         }
     }
+    // 스토어 인벤토리(배포 무관)를 family 별로 — 배포된 family 없으면 새 family 로.
+    let stored_of = |fam: &str| -> Vec<&crate::collect::StoredModel> { app.snap.stored.iter().filter(|s| s.family == fam).collect() };
+    for s in &app.snap.stored {
+        if !fams.iter().any(|(k, _)| *k == s.family) {
+            fams.push((s.family.clone(), Vec::new()));
+        }
+    }
     let vsel = if focus == 0 { app.sel_orig() } else { None };
     let mut lines: Vec<Line> = Vec::new();
     let mut sel_line = 0usize;
     if fams.is_empty() {
-        lines.push(Line::from(Span::styled("(no model deployments found)", Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled("(no models — deploy one, or set up the shared model-store)", Style::default().fg(C_DIM()))));
     }
     for (fam, idxs) in &fams {
+        let stored = stored_of(fam);
+        let total = idxs.len() + stored.len();
         lines.push(Line::from(vec![
             Span::styled("▪ ", Style::default().fg(C_ACC())),
             Span::styled(fam.clone(), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  ({} build{})", idxs.len(), if idxs.len() == 1 { "" } else { "s" }), Style::default().fg(C_DIM())),
+            Span::styled(format!("  ({} build{})", total, if total == 1 { "" } else { "s" }), Style::default().fg(C_DIM())),
         ]));
         let last = idxs.len();
         for (j, &i) in idxs.iter().enumerate() {
@@ -1806,6 +1815,24 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
                 line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
             }
             lines.push(line);
+        }
+        // 스토어에만 있는(배포 안 된) 빌드 — ○ 로 구분, 컴파일 타깃/포맷/크기.
+        let slast = stored.len();
+        for (k, s) in stored.iter().enumerate() {
+            let br = if k + 1 == slast && idxs.is_empty() { "  └─ " } else { "  ├─ " };
+            let tag = if s.format == "hf" {
+                if s.revision.is_empty() || s.revision == "-" { "in store".to_string() } else { format!("in store @{}", truncw(&s.revision, 8)) }
+            } else {
+                format!("{} · {}", s.format, s.compiled_for)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(br.to_string(), Style::default().fg(C_TRACK())),
+                Span::styled("○ ", Style::default().fg(C_DIM())),
+                Span::styled(format!("{:<32} ", truncw(&s.repo, 32)), Style::default().fg(C_DIM())),
+                Span::styled(format!("{:<24} ", truncw(&tag, 24)), Style::default().fg(if s.format == "hf" { C_DIM() } else { C_WARN() })),
+                Span::styled(format!("{}  ", s.size), Style::default().fg(C_DIM())),
+                Span::styled(truncw(&s.path, 24), Style::default().fg(C_TRACK())),
+            ]));
         }
     }
     let vis = (rows[0].height as usize).saturating_sub(2);
