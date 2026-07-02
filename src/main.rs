@@ -325,6 +325,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                         }
                         KeyCode::Char('o') => app.cycle_sort(),
                         KeyCode::Tab => app.next_tab(),
+                        KeyCode::BackTab => app.prev_tab(), // Shift+Tab → 이전 뷰
                         KeyCode::Char(c @ '0'..='9') => {
                             app.set_view_idx(c as usize - '0' as usize)
                         }
