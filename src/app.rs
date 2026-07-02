@@ -2150,9 +2150,9 @@ impl App {
     }
 
     /// llm-d 게이트웨이 라우팅 리소스 문서들(서빙 Deployment 뒤에 붙임).
-    /// 실기 배선 그대로: SA + RoleBinding×2(공유 Role llmd-router-epp-{sa,non-sa} 참조)
-    ///   + plugins ConfigMap + EPP Deployment/Service + InferencePool(app={name} 선택) + HTTPRoute.
-    /// 경로 = /{accel}/{model}. EPP 는 pool 멤버 파드로 model/부하 인지 라우팅.
+    /// 실기 배선 그대로: SA, RoleBinding×2(공유 Role llmd-router-epp-sa/-non-sa 참조),
+    /// plugins ConfigMap, EPP Deployment/Service, InferencePool(app={name} 선택), HTTPRoute.
+    /// 경로 = /accel/model. EPP 는 pool 멤버 파드로 model/부하 인지 라우팅.
     fn routing_docs(&self, name: &str, vendor: &str, served: &str) -> String {
         let accel = match vendor {
             "furiosa" => "rngd",
