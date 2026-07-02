@@ -1374,6 +1374,7 @@ impl App {
                  \x20\x20\x20 from optimum.rbln import RBLNAutoModelForCausalLM as M\n\
                  \x20\x20\x20 g = os.environ.get; o = os.environ[\"OUTPUT\"]; loc = \"/work/out\"\n\
                  \x20\x20\x20 m = M.from_pretrained(os.environ[\"MODEL_ID\"], export=True, rbln_create_runtimes=False,\n\
+                 \x20\x20\x20\x20\x20 rbln_npu=g(\"RBLN_NPU\", \"RBLN-CA22\"),\n\
                  \x20\x20\x20\x20\x20 rbln_tensor_parallel_size=int(g(\"RBLN_TENSOR_PARALLEL_SIZE\", \"1\")),\n\
                  \x20\x20\x20\x20\x20 rbln_max_seq_len=int(g(\"RBLN_MAX_SEQ_LEN\", \"4096\")),\n\
                  \x20\x20\x20\x20\x20 rbln_batch_size=int(g(\"RBLN_BATCH_SIZE\", \"1\")))\n\
