@@ -1330,7 +1330,9 @@ impl App {
         let outdir = format!("/mnt/store/compiled/{}/{}/{}", repo_dir, vendor, target);
         // 벤더별 컨테이너: Furiosa 는 이미지에 든 `fxb build` 를 직접 호출(스크립트 불필요, 바로 실행 가능).
         // RBLN 은 optimum-rbln 커스텀 스크립트(compile-script ConfigMap)를 env 로 구동.
-        let (volumes_extra, env_block, mounts_extra, command, note) = if vendor == "furiosa" {
+        // 벤더별 컨테이너: (volumes_extra, env_block, mounts_extra, command, note, extra_doc).
+        // extra_doc = Job 앞에 붙는 별도 YAML 문서(RBLN 은 인라인 컴파일 스크립트 ConfigMap).
+        let (volumes_extra, env_block, mounts_extra, command, note, extra_doc) = if vendor == "furiosa" {
             let pp = { let p = form.get("pp"); if p.is_empty() { "1".into() } else { p } };
             let ml = { let m = form.get("max-len"); if m.is_empty() { "8192".into() } else { m } };
             // 실기 검증 반영:
@@ -1350,25 +1352,56 @@ impl App {
                 "            - { name: work, mountPath: /work }\n".to_string(),
                 format!("[\"sh\", \"-c\", \"{}\"]", cmd),
                 "# Furiosa: fxb build 직접(레지스트리=furiosa-ai 양자화 체크포인트). aarch64 xcc 설치+로컬빌드→스토어복사.",
+                String::new(),
             )
         } else {
+            // RBLN: optimum-rbln 인라인 스크립트를 ConfigMap 으로 동봉(외부 의존 없음).
+            //  - rbln_create_runtimes=False: 디바이스에 런타임을 올리지 않고 컴파일만 → 서빙이 칩을
+            //    점유 중이어도 성공(실기 확인: create_runtimes=True 면 "Device 0 is not a valid NPU device").
+            //  - SMB 스토어 I/O(os error 95) 회피: 로컬 /work 에 save 후 스토어로 복사.
             let env_lines: String = envs
                 .iter()
                 .map(|(k, v)| format!("             \x20           - {{ name: {}, value: \"{}\" }}\n", k, v))
                 .collect();
+            let script_doc = format!(
+                "# RBLN 컴파일 스크립트(인라인) — create_runtimes=False + 로컬빌드→스토어복사(실기 검증).\n\
+                 apiVersion: v1\n\
+                 kind: ConfigMap\n\
+                 metadata: {{ name: {name}-script, namespace: {ns} }}\n\
+                 data:\n\
+                 \x20 compile.py: |\n\
+                 \x20\x20\x20 import os, shutil\n\
+                 \x20\x20\x20 from optimum.rbln import RBLNAutoModelForCausalLM as M\n\
+                 \x20\x20\x20 g = os.environ.get; o = os.environ[\"OUTPUT\"]; loc = \"/work/out\"\n\
+                 \x20\x20\x20 m = M.from_pretrained(os.environ[\"MODEL_ID\"], export=True, rbln_create_runtimes=False,\n\
+                 \x20\x20\x20\x20\x20 rbln_tensor_parallel_size=int(g(\"RBLN_TENSOR_PARALLEL_SIZE\", \"1\")),\n\
+                 \x20\x20\x20\x20\x20 rbln_max_seq_len=int(g(\"RBLN_MAX_SEQ_LEN\", \"4096\")),\n\
+                 \x20\x20\x20\x20\x20 rbln_batch_size=int(g(\"RBLN_BATCH_SIZE\", \"1\")))\n\
+                 \x20\x20\x20 m.save_pretrained(loc)\n\
+                 \x20\x20\x20 os.makedirs(o, exist_ok=True)\n\
+                 \x20\x20\x20 for f in os.listdir(loc):\n\
+                 \x20\x20\x20\x20\x20 s = os.path.join(loc, f); d = os.path.join(o, f)\n\
+                 \x20\x20\x20\x20\x20 shutil.copytree(s, d, dirs_exist_ok=True) if os.path.isdir(s) else shutil.copy2(s, d)\n\
+                 \x20\x20\x20 print(\"COMPILE_DONE\", os.listdir(o))\n\
+                 ---\n",
+                name = name, ns = self.ns
+            );
             (
                 // 들여쓰기는 형제 항목(store)과 정확히 일치해야 함(volumes 8칸, mounts 12칸).
-                "        - { name: script, configMap: { name: compile-script } }\n".to_string(),
+                "        - { name: script, configMap: { name: SCRIPT_CM } }\n        - { name: work, emptyDir: {} }\n"
+                    .replace("SCRIPT_CM", &format!("{}-script", name)),
                 env_lines,
-                "            - { name: script, mountPath: /scripts, readOnly: true }\n".to_string(),
+                "            - { name: script, mountPath: /scripts, readOnly: true }\n            - { name: work, mountPath: /work }\n".to_string(),
                 "[\"python3\", \"/scripts/compile.py\"]".to_string(),
-                "# RBLN: optimum-rbln 스크립트(compile-script ConfigMap)를 env 로 구동. 이미지 placeholder(TODO-)면 LMD_COMPILE_IMAGE_RBLN 필요.",
+                "# RBLN: optimum-rbln 인라인 스크립트(create_runtimes=False). 이미지 placeholder(TODO-)면 LMD_COMPILE_IMAGE_RBLN 필요.",
+                script_doc,
             )
         };
         let yaml = format!(
             "# 컴파일 Job (dry-run 미리보기) — 검토 후 `kubectl apply -f -` 로 적용.\n\
              # 모델 {model_id} → {vendor} 컴파일 → 공유 스토어(compiled/{repo_dir}/{vendor}/{target}).\n\
              # 옵션(컴파일 타임 고정): {opts}\n\
+             {extra_doc}\
              {note}\n\
              apiVersion: batch/v1\n\
              kind: Job\n\
@@ -1397,6 +1430,7 @@ impl App {
             repo_dir = repo_dir,
             target = target,
             opts = opts_summary,
+            extra_doc = extra_doc,
             note = note,
             name = name,
             ns = self.ns,
@@ -2006,17 +2040,67 @@ impl App {
         } else {
             String::new()
         };
-        let compile_note = if form.vendor == "gpu" {
-            "vLLM 이 HF 가중치 직접 로드(컴파일 불필요)"
-        } else {
-            "사전 컴파일 아티팩트 필요([c] compile 로 생성)"
+        // 벤더별 서빙 스펙 — 실기 검증된 명령/이미지/env (제네릭 `--model` 은 NPU 에서 안 뜸).
+        //   Furiosa: `furiosa-llm serve <model> -tp N` (entrypoint=furiosa-llm, 첫 인자 serve 필수;
+        //            published furiosa-ai 모델은 HF 에서 받아 서빙, 아티팩트 내장 tp 가 -tp 보다 우선).
+        //   RBLN   : vllm_rbln 런타임 이미지에 `vllm serve <path> -tp N` + VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK.
+        //   GPU    : `vllm serve <path> -tp N`.
+        let served = form.model_id.clone();
+        let (image, note, container_spec, volumes_block) = match form.vendor {
+            "furiosa" => {
+                let img = self.img_furiosa.clone().unwrap_or_else(|| "furiosaai/furiosa-llm:latest".into());
+                let spec = format!(
+                    "\x20         args: [\"serve\", \"{served}\", \"--port\", \"{port}\", \"--tensor-parallel-size\", \"{devices}\"]\n\
+                     \x20         ports: [{{ containerPort: {port} }}]\n\
+                     \x20         env:\n\
+                     \x20           - {{ name: HF_HOME, value: /model-cache }}\n\
+                     \x20           - {{ name: HF_TOKEN, valueFrom: {{ secretKeyRef: {{ name: hf-token, key: HF_TOKEN }} }} }}\n\
+                     \x20         resources: {{ limits: {{ {res_key}: {devices} }}, requests: {{ cpu: \"4\", memory: \"16Gi\", {res_key}: {devices} }} }}\n\
+                     \x20         volumeMounts:\n\
+                     \x20           - {{ name: cache, mountPath: /model-cache }}\n",
+                    served = served, port = port, devices = devices, res_key = res_key
+                );
+                let vols = "\x20     volumes:\n\x20       - { name: cache, emptyDir: {} }\n".to_string();
+                (img, "# Furiosa: furiosa-llm serve. HF_TOKEN=secret hf-token 필요. 아티팩트 내장 tp 가 -tp 보다 우선.".to_string(), spec, vols)
+            }
+            "rbln" => {
+                // vllm_rbln 런타임 이미지 필요(LMD_SERVING_IMAGE). 없으면 apply 차단 placeholder.
+                // (이 클러스터처럼 레지스트리 이미지가 없으면 호스트 RBLN 스택을 hostPath 로 마운트하는
+                //  ubuntu 베이스 패턴이 대안 — deploy preflight 참고. sympy 는 /usr/local dist-packages 에.)
+                let img = self.img_serving.clone().unwrap_or_else(|| "TODO-rbln-serving-image".into());
+                let spec = format!(
+                    "\x20         args: [\"serve\", \"{mount}\", \"--served-model-name\", \"{served}\", \"--port\", \"{port}\", \"--tensor-parallel-size\", \"{devices}\", \"--max-num-seqs\", \"1\"]\n\
+                     \x20         ports: [{{ containerPort: {port} }}]\n\
+                     \x20         env:\n\
+                     \x20           - {{ name: VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK, value: \"{devices}\" }}\n\
+                     \x20         resources: {{ limits: {{ {res_key}: {devices} }}, requests: {{ cpu: \"8\", memory: \"32Gi\", {res_key}: {devices} }} }}\n\
+                     \x20         volumeMounts:\n\
+                     \x20           - {{ name: store, mountPath: /mnt/store, readOnly: true }}\n",
+                    mount = form.mount, served = served, port = port, devices = devices, res_key = res_key
+                );
+                let vols = "\x20     volumes:\n\x20       - { name: store, persistentVolumeClaim: { claimName: model-store } }\n".to_string();
+                (img, "# RBLN: vllm_rbln 런타임 이미지 필요(LMD_SERVING_IMAGE). 사전컴파일 .rbln 을 스토어에서 로드.".to_string(), spec, vols)
+            }
+            _ => {
+                let img = self.img_serving.clone().unwrap_or_else(|| "vllm/vllm-openai:latest".into());
+                let spec = format!(
+                    "\x20         args: [\"serve\", \"{mount}\", \"--served-model-name\", \"{served}\", \"--port\", \"{port}\", \"--tensor-parallel-size\", \"{devices}\"]\n\
+                     \x20         ports: [{{ containerPort: {port} }}]\n\
+                     \x20         resources: {{ limits: {{ {res_key}: {devices} }}, requests: {{ cpu: \"4\", memory: \"16Gi\", {res_key}: {devices} }} }}\n\
+                     \x20         volumeMounts:\n\
+                     \x20           - {{ name: store, mountPath: /mnt/store, readOnly: true }}\n",
+                    mount = form.mount, served = served, port = port, devices = devices, res_key = res_key
+                );
+                let vols = "\x20     volumes:\n\x20       - { name: store, persistentVolumeClaim: { claimName: model-store } }\n".to_string();
+                (img, "# GPU: vLLM 이 스토어 경로에서 로드(별도 컴파일 불필요).".to_string(), spec, vols)
+            }
         };
-        let image = self.img_serving.clone().unwrap_or_else(|| "TODO-serving-image".into());
         let yaml = format!(
             "# 배포 매니페스트 (dry-run 미리보기) — 검토 후 `kubectl apply -f -`.\n\
-             # 모델 {model_id} 를 공유 스토어({mount})에서 서빙. 엔진: {engine}. {note}.\n\
+             # 모델 {model_id} 서빙. 엔진: {engine}.\n\
              # 배치: {place}  ·  총 디바이스 수요 = {replicas} × {devices}\n\
              # 이미지 placeholder(TODO-)면 LMD_SERVING_IMAGE 로 지정해야 apply 가능.\n\
+             {note}\n\
              apiVersion: apps/v1\n\
              kind: Deployment\n\
              metadata: {{ name: {name}, namespace: {ns} }}\n\
@@ -2027,28 +2111,22 @@ impl App {
              \x20   metadata: {{ labels: {{ app: {name} }} }}\n\
              \x20   spec:\n\
              {placement}\
-             \x20     volumes:\n\
-             \x20       - {{ name: store, persistentVolumeClaim: {{ claimName: model-store }} }}\n\
+             {volumes_block}\
              \x20     containers:\n\
              \x20       - name: server\n\
              \x20         image: {image}   # {engine}\n\
-             \x20         args: [\"--model\", \"{mount}\", \"--port\", \"{port}\"]\n\
-             \x20         ports: [{{ containerPort: {port} }}]\n\
-             \x20         resources: {{ limits: {{ {res_key}: {devices} }} }}\n\
-             \x20         volumeMounts:\n\
-             \x20           - {{ name: store, mountPath: /mnt/store, readOnly: true }}\n",
+             {container_spec}",
             model_id = form.model_id,
-            mount = form.mount,
             engine = form.engine,
-            note = compile_note,
+            note = note,
             place = place,
             name = name,
             ns = self.ns,
             replicas = replicas,
             devices = devices,
-            port = port,
             placement = placement_yaml,
-            res_key = res_key,
+            volumes_block = volumes_block,
+            container_spec = container_spec,
             image = image,
         );
         self.preview = Some((format!("deploy · {} ×{}", form.model, replicas), yaml));
@@ -2235,6 +2313,10 @@ mod tests {
         assert!(yaml.contains("compiled/KISTI-KONI--KONI-Llama3.1-8B-Instruct/rbln/rbln-ca22-tp4-s8192"));
         assert!(yaml.contains("RBLN_TENSOR_PARALLEL_SIZE"));
         assert!(yaml.contains("RBLN_MAX_SEQ_LEN"));
+        // 실기 학습 반영: 인라인 스크립트 ConfigMap + create_runtimes=False (외부 compile-script 의존 없음).
+        assert!(yaml.contains("kind: ConfigMap"), "RBLN compile inlines its script as ConfigMap");
+        assert!(yaml.contains("rbln_create_runtimes=False"), "compile-only (no device runtime)");
+        assert!(!yaml.contains("name: compile-script }"), "no external compile-script dependency");
         // deploy: 폼 열고 replicas/디바이스/배치 → Deployment 매니페스트.
         a.open_deploy_form();
         let dform = a.deploy_form.clone().expect("deploy form opens");
@@ -2245,9 +2327,14 @@ mod tests {
         assert!(dyaml.contains("kind: Deployment"));
         assert!(dyaml.contains("model-store"));
         assert!(dyaml.contains("rebellions.ai/ATOM: 4"));
-        // 구조 유효성: 생성 매니페스트가 실제 파싱되는 YAML 인지 테스트 시점에 검증
-        // (문자열 보간 들여쓰기 실수를 dry-run 이전에 잡음).
-        serde_yaml::from_str::<serde_yaml::Value>(&yaml).expect("compile manifest is valid YAML");
+        // RBLN 서빙은 vllm_rbln 런타임 + VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK (제네릭 --model 아님).
+        assert!(dyaml.contains("\"serve\""), "vllm serve subcommand");
+        assert!(dyaml.contains("VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK"));
+        // 구조 유효성: 생성 매니페스트가 실제 파싱되는 YAML 인지 테스트 시점에 검증(들여쓰기 실수 조기 검출).
+        // RBLN 컴파일은 다중 문서(ConfigMap---Job)라 문서별로 파싱.
+        for doc in yaml.split("\n---\n") {
+            serde_yaml::from_str::<serde_yaml::Value>(doc).expect("compile manifest doc is valid YAML");
+        }
         serde_yaml::from_str::<serde_yaml::Value>(&dyaml).expect("deploy manifest is valid YAML");
     }
 
@@ -2279,6 +2366,51 @@ mod tests {
         assert!(!yaml.contains("compile-script"), "no custom script needed for furiosa");
         assert!(yaml.contains("furiosa.ai/rngd"));
         serde_yaml::from_str::<serde_yaml::Value>(&yaml).expect("furiosa manifest is valid YAML");
+    }
+
+    #[test]
+    fn deploy_manifest_vendor_correct() {
+        use crate::collect::ModelArtifact;
+        let mk = |engine: &str, source: &str| {
+            let mut a = App::new();
+            a.snap = Snapshot {
+                artifacts: vec![ModelArtifact {
+                    model: "m".into(),
+                    family: "f".into(),
+                    engine: engine.into(),
+                    node: "etri-001".into(),
+                    image: String::new(),
+                    source: source.into(),
+                    mount: "/mnt/store/compiled/x ← PVC:model-store".into(),
+                    opts: vec![("tp".into(), "4".into())],
+                }],
+                ..Default::default()
+            };
+            a.view = View::Launch;
+            a.panel_focus = 0;
+            a.selected = 0;
+            a
+        };
+        // Furiosa: `furiosa-llm serve <model> --tensor-parallel-size` + HF_TOKEN, furiosaai 이미지.
+        let mut fa = mk("Furiosa-LLM", "furiosa-ai/Qwen3-4B-FP8");
+        fa.open_deploy_form();
+        fa.deploy_form_submit();
+        let (_, fy) = fa.preview.clone().expect("furiosa deploy");
+        assert!(fy.contains("furiosaai/furiosa-llm:latest"));
+        assert!(fy.contains("\"serve\", \"furiosa-ai/Qwen3-4B-FP8\""), "serve subcommand + model positional");
+        assert!(fy.contains("--tensor-parallel-size"));
+        assert!(fy.contains("hf-token"), "furiosa needs HF_TOKEN secret");
+        assert!(fy.contains("furiosa.ai/rngd:"));
+        serde_yaml::from_str::<serde_yaml::Value>(&fy).expect("furiosa deploy is valid YAML");
+
+        // GPU: `vllm serve <path>` on nvidia.com/gpu, 컴파일 불필요.
+        let mut gp = mk("vLLM", "Qwen/Qwen2.5-7B-Instruct");
+        gp.open_deploy_form();
+        gp.deploy_form_submit();
+        let (_, gy) = gp.preview.clone().expect("gpu deploy");
+        assert!(gy.contains("\"serve\""));
+        assert!(gy.contains("nvidia.com/gpu:"));
+        serde_yaml::from_str::<serde_yaml::Value>(&gy).expect("gpu deploy is valid YAML");
     }
 
     #[test]
