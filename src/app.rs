@@ -305,7 +305,7 @@ impl App {
 
     /// 선택된 per-model perf 행의 모델(서비스)명 — Perf 드릴용. sel_orig 경유(정렬/필터 안전).
     pub fn selected_perf_model(&self) -> Option<String> {
-        if self.view == View::Perf {
+        if self.view == View::Perf && self.panel_focus == 0 {
             self.sel_orig().and_then(|i| self.snap.perf_rows.get(i)).map(|r| r.model.clone())
         } else {
             None
@@ -738,6 +738,7 @@ impl App {
             View::Launch => 3,  // Deploy: 컴파일 변형 / 배치 타깃 / 카탈로그
             View::Epp => 2,     // scorers / InferencePool
             View::Routing => 2, // routes / InferencePool
+            View::Perf => 2,    // per-model / per-pod queue
             _ => 1,
         }
     }
@@ -748,6 +749,33 @@ impl App {
             self.panel_focus = (self.panel_focus + 1) % n;
             self.selected = 0;
         }
+    }
+
+    /// Perf per-model 리스트(서빙 중=active 만 + 정렬). 패널 포커스와 무관 — 뷰/order 공용.
+    pub fn perf_rows_order(&self) -> Vec<usize> {
+        use crate::collect::PerfRow;
+        use std::cmp::Ordering::Equal;
+        let v = &self.snap.perf_rows;
+        let active = |r: &PerfRow| {
+            (!r.req.is_nan() && r.req > 0.0)
+                || (!r.tps.is_nan() && r.tps > 0.0)
+                || !r.e2e_p95.is_nan()
+                || !r.ttft_p95.is_nan()
+                || !r.queue_p95.is_nan()
+        };
+        let mut idx: Vec<usize> = (0..v.len()).filter(|&i| active(&v[i])).collect();
+        let key = |x: f64| if x.is_nan() { f64::MIN } else { x };
+        idx.sort_by(|&a, &b| {
+            let (x, y): (&PerfRow, &PerfRow) = (&v[a], &v[b]);
+            match self.sort {
+                1 => key(y.e2e_p95).partial_cmp(&key(x.e2e_p95)).unwrap_or(Equal),
+                2 => key(y.ttft_p95).partial_cmp(&key(x.ttft_p95)).unwrap_or(Equal),
+                3 => key(y.queue_p95).partial_cmp(&key(x.queue_p95)).unwrap_or(Equal),
+                4 => x.model.cmp(&y.model),
+                _ => key(y.tps).partial_cmp(&key(x.tps)).unwrap_or(Equal),
+            }
+        });
+        idx
     }
 
     /// 현재 뷰에서 선택 가능한 행 수(필터 반영).
@@ -869,31 +897,8 @@ impl App {
             View::Epp => (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect(),
             View::Events => (0..self.snap.events.len()).collect(),
             View::Nodes => (0..self.snap.nodes.len()).collect(),
-            View::Perf => {
-                use crate::collect::PerfRow;
-                // "지금 켜진 것"만: 서빙 신호(req/tps/지연 중 하나라도 유효)가 있는 모델.
-                let v = &self.snap.perf_rows;
-                let active = |r: &PerfRow| {
-                    (!r.req.is_nan() && r.req > 0.0)
-                        || (!r.tps.is_nan() && r.tps > 0.0)
-                        || !r.e2e_p95.is_nan()
-                        || !r.ttft_p95.is_nan()
-                        || !r.queue_p95.is_nan()
-                };
-                let mut idx: Vec<usize> = (0..v.len()).filter(|&i| active(&v[i])).collect();
-                let key = |x: f64| if x.is_nan() { f64::MIN } else { x }; // 값 없는 건 뒤로
-                idx.sort_by(|&a, &b| {
-                    let (x, y): (&PerfRow, &PerfRow) = (&v[a], &v[b]);
-                    match self.sort {
-                        1 => key(y.e2e_p95).partial_cmp(&key(x.e2e_p95)).unwrap_or(Equal),
-                        2 => key(y.ttft_p95).partial_cmp(&key(x.ttft_p95)).unwrap_or(Equal),
-                        3 => key(y.queue_p95).partial_cmp(&key(x.queue_p95)).unwrap_or(Equal),
-                        4 => x.model.cmp(&y.model),
-                        _ => key(y.tps).partial_cmp(&key(x.tps)).unwrap_or(Equal), // 0=tok/s desc
-                    }
-                });
-                idx
-            }
+            View::Perf if self.panel_focus == 1 => (0..self.snap.pod_queues.len()).collect(),
+            View::Perf => self.perf_rows_order(),
             View::Routing if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
             View::Routing => (0..self.snap.routes.len()).collect(),
         };
