@@ -43,7 +43,7 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
         tabs(f, c[2], app);
         (c[3], c[4], Some(c[1]))
     };
-    if app.detail && matches!(app.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes) {
+    if app.detail && matches!(app.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events) {
         detail_panel(f, body, app);
     } else {
         match app.view {
@@ -405,7 +405,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     let mut parts: Vec<String> = Vec::new();
     parts.push("↑↓ sel".into());
     match v {
-        Accel | Models | Overview | Pods | Nodes => parts.push("⏎ detail".into()),
+        Accel | Models | Overview | Pods | Nodes | Events => parts.push("⏎ detail".into()),
         Perf => parts.push("⏎ p50/95/99".into()),
         Routing => parts.push("⏎ model".into()),
         _ => {}
@@ -1203,6 +1203,28 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             bar_timeline(f, l, app, &format!("{}:util", k), &format!("{} util", name), "%", Some(100.0));
             bar_timeline(f, r, app, &format!("{}:mem", k), &format!("{} VRAM", name), "%", Some(100.0));
         }
+        return;
+    }
+
+    // Event 상세 — 표에서 잘리는 전체 메시지를 읽기 위한 뷰.
+    if let Some(e) = app.selected_event() {
+        let (tg, tc) = if e.typ == "Warning" { ("⚠ Warning", C_WARN()) } else { ("● Normal", C_OK()) };
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(format!("{}  ", tg), Style::default().fg(tc).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("×{}", e.count), Style::default().fg(if e.count > 1 { C_WARN() } else { C_DIM() })),
+            ]),
+            Line::from(""),
+            kv("reason", &e.reason, Color::White),
+            kv("object", &e.object, C_ACC()),
+            Line::from(""),
+            Line::from(Span::styled("message", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(e.message.clone(), Style::default().fg(Color::White))),
+        ];
+        f.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }).block(block(&format!("Event{}", nav))),
+            area,
+        );
         return;
     }
 

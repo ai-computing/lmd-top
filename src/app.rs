@@ -504,7 +504,7 @@ impl App {
     /// 상세 패널을 가진 뷰인지(detail=true 가 실제로 렌더에 반영되는 뷰).
     /// 없는 뷰(Routing/Epp/Launch/Events)에서 detail=true 로 두면 ↑↓ 가 스크롤로 빠져 네비가 잠김.
     pub fn view_has_detail(&self) -> bool {
-        matches!(self.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes)
+        matches!(self.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events)
     }
 
     pub fn toggle_detail(&mut self) {
@@ -894,6 +894,12 @@ impl App {
     pub fn selected_node(&self) -> Option<&crate::collect::NodeInfo> {
         match self.view {
             View::Nodes => self.sel_orig().and_then(|i| self.snap.nodes.get(i)),
+            _ => None,
+        }
+    }
+    pub fn selected_event(&self) -> Option<&crate::collect::EventRow> {
+        match self.view {
+            View::Events => self.sel_orig().and_then(|i| self.snap.events.get(i)),
             _ => None,
         }
     }
