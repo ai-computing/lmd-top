@@ -772,6 +772,7 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
 fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     let s = &app.snap;
     let mut lines: Vec<Line> = Vec::new();
+    let mut sel_line = 0usize; // 선택 route 의 줄 위치(스크롤용)
 
     // Gateway → HTTPRoute → backend (모델 상태/가속기/노드 주석)
     let gw = if s.gw_addr.is_empty() {
@@ -796,6 +797,9 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
             None => "?".into(),
         };
         let sel = i == app.selected;
+        if sel {
+            sel_line = lines.len();
+        }
         let mut rl = Line::from(vec![
             Span::styled(rbr, Style::default().fg(C_DIM())),
             dot(up),
@@ -837,8 +841,11 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(4), Constraint::Length(10)])
         .split(area);
+    // 트리가 길면 선택 route 가 보이도록 세로 스크롤(무언의 잘림 방지).
+    let vis = (top[0].height as usize).saturating_sub(2);
+    let scroll = if sel_line + 2 > vis { (sel_line + 3).saturating_sub(vis) as u16 } else { 0 };
     f.render_widget(
-        Paragraph::new(lines).block(block(&format!(
+        Paragraph::new(lines).scroll((scroll, 0)).block(block(&format!(
             "Flow · Gateway→EPP→Model→Infra · ↑↓ route · p/i/m/e pivot{}",
             count_suffix(app.selected, s.routes.len())
         ))),
@@ -1036,6 +1043,13 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     }
     if al.is_empty() {
         al.push(Line::from(Span::styled("  (no accelerator metrics)", Style::default().fg(C_DIM()))));
+    }
+    // 무언의 잘림 방지: (종류,노드) 그룹이 패널보다 많으면 마지막 줄을 "+N more" 로.
+    let acap = (rows[2].height as usize).saturating_sub(2);
+    if al.len() > acap && acap > 0 {
+        let hidden = al.len() - (acap - 1);
+        al.truncate(acap - 1);
+        al.push(Line::from(Span::styled(format!("  … +{} more (see Accel / Nodes tab)", hidden), Style::default().fg(C_DIM()))));
     }
     f.render_widget(Paragraph::new(al).block(block("Accelerators (by kind / node)")), rows[2]);
 
