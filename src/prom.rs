@@ -27,6 +27,24 @@ pub async fn query(base: &str, promql: &str) -> Result<Vec<Series>> {
     parse(&body)
 }
 
+/// 여러 promql 을 동시(병렬) 조회 — 순차 라운드트립 제거. 결과는 입력 순서 유지.
+/// tokio JoinSet 사용(추가 의존성 없음). 각 태스크가 base/promql 을 소유(clone).
+pub async fn query_all(base: &str, qs: &[&str]) -> Vec<Result<Vec<Series>>> {
+    let mut set = tokio::task::JoinSet::new();
+    for (i, q) in qs.iter().enumerate() {
+        let base = base.to_string();
+        let q = q.to_string();
+        set.spawn(async move { (i, query(&base, &q).await) });
+    }
+    let mut out: Vec<Result<Vec<Series>>> = (0..qs.len()).map(|_| Ok(Vec::new())).collect();
+    while let Some(joined) = set.join_next().await {
+        if let Ok((i, r)) = joined {
+            out[i] = r;
+        }
+    }
+    out
+}
+
 /// 라벨의 값 목록 조회(`/api/v1/label/<label>/values`). label="__name__" → 전체 메트릭 이름,
 /// label="job" → 스크레이프 잡(=exporter) 목록. doctor(전수조사)용.
 pub async fn label_values(base: &str, label: &str) -> Result<Vec<String>> {
