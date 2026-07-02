@@ -2,6 +2,12 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.24.0]
+### Changed — Store 뷰를 모델 계열 트리 + 저장 노드 + NPU 컴파일 옵션으로
+- **트리**: 모델 계열(source/이름 정규화)로 그룹 → 그 아래 변형(deploy)들을 나열. 같은 모델의 여러 배치(다른 TP/양자화/HW)를 한눈에.
+- **저장 노드**: 각 변형이 어느 노드에 저장/구동되는지(`@node`) 표시.
+- **NPU 컴파일 옵션 확장**: 공통(TP/PP/DP·max-len·batch·dtype·quant·kv-dtype·block) + RBLN(`RBLN_*`, `--rbln*`, 타깃 NPU) + Furiosa(`--bucket-config`/prefill·decode bucket, `--devices`, `-tp`/`-pp`/`-dp`) 를 컨테이너 args/env 에서 추출. `⏎` 로 전체.
+
 ## [0.23.0]
 ### Added — Store 뷰(모델 저장 위치 + 컴파일/서빙 옵션)
 - 새 탭 **Store**(Tab 접근) — deploy 컨테이너 spec 에서 모델 소스(HF id/경로), 저장 위치(mountPath ← PVC/host/emptyDir), 컴파일/서빙 옵션(TP·max-len·batch·dtype·quant·NPU 등) 추출·표시. `⏎` 로 전체 옵션 상세.

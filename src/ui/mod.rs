@@ -1936,50 +1936,96 @@ fn view_events(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-// ── Store (모델 저장 위치 + 컴파일/서빙 옵션) ───────────
+// ── Store (모델 계열 → 변형 트리: 저장 노드 + 컴파일 옵션) ───────────
+/// 변형 한 줄에 넣을 컴파일 옵션 요약 — 중요 순으로 몇 개만.
+fn opts_summary(a: &crate::collect::ModelArtifact) -> String {
+    const PRI: [&str; 12] = ["tp", "pp", "dp", "max-len", "batch", "bucket", "quant", "dtype", "kv-dtype", "npu", "devices", "device"];
+    let mut out: Vec<String> = Vec::new();
+    for k in PRI {
+        if let Some((_, v)) = a.opts.iter().find(|(kk, _)| kk == k) {
+            out.push(format!("{}={}", k, v));
+        }
+        if out.len() >= 5 {
+            break;
+        }
+    }
+    // NPU 벤더 특유 키(rbln_*/furiosa_*)도 하나 끌어올림.
+    if out.len() < 6 {
+        if let Some((k, v)) = a.opts.iter().find(|(k, _)| { let l = k.to_lowercase(); l.starts_with("rbln") || l.starts_with("furiosa") }) {
+            out.push(format!("{}={}", k, truncw(v, 14)));
+        }
+    }
+    out.join(" ")
+}
+
 fn view_store(f: &mut Frame, area: Rect, app: &App) {
     let order = app.order();
     if order.is_empty() {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled("no model artifacts", Style::default().fg(C_DIM()))),
-                Line::from(Span::styled("source path / storage / compile options are read from each deployment's container spec.", Style::default().fg(C_DIM()))),
+                Line::from(Span::styled("source / storage node / compile options are read from each deployment's container spec.", Style::default().fg(C_DIM()))),
             ])
-            .block(block("Store · model files & compile options")),
+            .block(block("Store · model family → variants")),
             area,
         );
         return;
     }
-    let rows: Vec<Row> = order
-        .iter()
-        .map(|&i| {
+    let sel_orig = app.sel_orig();
+    // family 별 그룹(최초 등장 순 유지).
+    let mut fams: Vec<(String, Vec<usize>)> = Vec::new();
+    for &i in &order {
+        let fam = app.snap.artifacts[i].family.clone();
+        if let Some(e) = fams.iter_mut().find(|(k, _)| *k == fam) {
+            e.1.push(i);
+        } else {
+            fams.push((fam, vec![i]));
+        }
+    }
+    let mut lines: Vec<Line> = Vec::new();
+    let mut sel_line = 0usize;
+    for (fam, idxs) in &fams {
+        lines.push(Line::from(vec![
+            Span::styled("▪ ", Style::default().fg(C_ACC())),
+            Span::styled(fam.clone(), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  ({} variant{})", idxs.len(), if idxs.len() == 1 { "" } else { "s" }), Style::default().fg(C_DIM())),
+        ]));
+        let last = idxs.len();
+        for (j, &i) in idxs.iter().enumerate() {
             let a = &app.snap.artifacts[i];
-            let opts = if a.opts.is_empty() {
-                "–".to_string()
+            let selected = sel_orig == Some(i);
+            if selected {
+                sel_line = lines.len();
+            }
+            let br = if j + 1 == last { "  └─ " } else { "  ├─ " };
+            let opts = opts_summary(a);
+            let mut sp = vec![
+                Span::styled(br.to_string(), Style::default().fg(C_TRACK())),
+                Span::styled(format!("{:<22} ", truncw(&a.model, 22)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:<12} ", truncw(&a.engine, 12)), Style::default().fg(C_ACC())),
+                Span::styled(format!("@{:<14} ", if a.node.is_empty() { "?" } else { &a.node }), Style::default().fg(C_DIM())),
+            ];
+            if opts.is_empty() {
+                sp.push(Span::styled("· no compile opts detected", Style::default().fg(C_DIM())));
             } else {
-                a.opts.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(" ")
-            };
-            let npu = a.opts.iter().any(|(k, _)| { let k = k.to_lowercase(); k.starts_with("rbln") || k.starts_with("furiosa") || k.contains("compile") });
-            Row::new(vec![
-                cellw(a.model.clone(), 20),
-                Cell::from(Span::styled(truncw(&a.engine, 12), Style::default().fg(C_ACC()))),
-                Cell::from(Span::styled(if a.source.is_empty() { "–".into() } else { truncw(&a.source, 28) }, Style::default().fg(Color::White))),
-                Cell::from(Span::styled(if a.mount.is_empty() { "–".into() } else { truncw(&a.mount, 30) }, Style::default().fg(C_DIM()))),
-                Cell::from(Span::styled(opts, Style::default().fg(if npu { C_WARN() } else { C_DIM() }))),
-            ])
-        })
-        .collect();
-    let widths = [
-        Constraint::Min(14),
-        Constraint::Length(12),
-        Constraint::Length(28),
-        Constraint::Length(30),
-        Constraint::Min(18),
-    ];
-    render_list_table(
-        f, area, rows, &widths,
-        &["MODEL", "ENGINE", "SOURCE", "STORAGE", "COMPILE / SERVE OPTS"],
-        "Store · model files & compile options · ⏎ full", app.selected, order.len(),
+                let npu = matches!(a.engine.as_str(), "vLLM-RBLN" | "Furiosa-LLM") || a.engine.contains("RBLN");
+                sp.push(Span::styled(opts, Style::default().fg(if npu { C_WARN() } else { Color::Gray })));
+            }
+            let mut line = Line::from(sp);
+            if selected {
+                line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+            }
+            lines.push(line);
+        }
+    }
+    // 선택 행이 보이도록 스크롤(Nodes 뷰와 동일 방식).
+    let vis = (area.height as usize).saturating_sub(2);
+    let scroll = if sel_line + 2 > vis { (sel_line + 3).saturating_sub(vis) as u16 } else { 0 };
+    f.render_widget(
+        Paragraph::new(lines)
+            .scroll((scroll, 0))
+            .block(block(&format!("Store · model family → variants · ⏎ full{}", count_suffix(app.selected, order.len())))),
+        area,
     );
 }
 
