@@ -1557,6 +1557,54 @@ impl App {
         FitEstimate { params_b, weight_gb, kv_gb, overhead_gb, chips, per_chip_gb, avail_gb, verdict, tips }
     }
 
+    /// 컴파일 사전 점검(preflight) — 긴 컴파일 전에 전제조건 충족 여부를 미리 검사.
+    /// 실기에서 발견한 함정(레지스트리 미등록·aarch64 툴체인·노드 드라이버·컴파일러 이미지)을 사전 방어.
+    /// 반환: (충족?, 메시지). 하나라도 false 면 컴파일 실패 가능 → 폼에서 경고 표시.
+    pub fn compile_preflight(&self, form: &CompileForm) -> Vec<(bool, String)> {
+        let mut out: Vec<(bool, String)> = Vec::new();
+        let mid = form.model_id.to_lowercase();
+        if form.vendor == "furiosa" {
+            // fxb build 는 furiosa-ai 조직의 양자화 체크포인트만 컴파일(실기 확인).
+            let quant = ["fp8", "nvfp4", "-w8", "-w4", "awq", "gptq", "int4", "int8"].iter().any(|q| mid.contains(q));
+            let org = mid.starts_with("furiosa-ai/");
+            out.push((
+                org && quant,
+                if org && quant {
+                    "registry: furiosa-ai 양자화 체크포인트 — fxb 등록 대상".into()
+                } else {
+                    format!("registry: fxb 는 furiosa-ai 양자화 모델만 빌드(예: furiosa-ai/Qwen3-4B-FP8) — '{}' 미등록 가능성", form.model_id)
+                },
+            ));
+            // RNGD 는 ARM64 제어 프로세서 → EDF 최종 코드젠에 aarch64 크로스컴파일러 필요(매니페스트가 자동 설치).
+            out.push((true, "toolchain: aarch64 크로스컴파일러 매니페스트가 자동 설치".into()));
+            out.push((true, "build I/O: 로컬 emptyDir 빌드→스토어 복사(SMB os error 95 회피)".into()));
+        } else {
+            let has_img = self.img_rbln.is_some();
+            out.push((
+                has_img,
+                if has_img {
+                    "image: LMD_COMPILE_IMAGE_RBLN 지정됨".into()
+                } else {
+                    "image: RBLN 컴파일러 이미지 미지정 — optimum-rbln+rebel-compiler(pypi.rbln.ai 인증) 이미지를 LMD_COMPILE_IMAGE_RBLN 로".into()
+                },
+            ));
+            let compat_ok = crate::compat::compilable_vendors(&form.model_id).contains(&"rbln");
+            out.push((compat_ok, format!("registry: RBLN 지원 계열 {}", if compat_ok { "확인됨(npu-compat)" } else { "미확인" })));
+        }
+        // 공통: 타깃 노드에 해당 NPU 드라이버가 설치돼 있는지(컴파일은 드라이버 노드에서만).
+        let node = form.get("node");
+        let node = node.split('(').next().unwrap_or("any").trim();
+        let want = if form.vendor == "rbln" { "RBLN" } else { "RNGD" };
+        if node != "any" && !node.is_empty() {
+            let has = self.snap.nodes.iter().find(|n| n.name == node).map(|n| n.npu.to_uppercase().contains(want)).unwrap_or(false);
+            out.push((has, format!("node {}: {} 드라이버 {}", node, want, if has { "설치됨" } else { "없음 — 컴파일 실패" })));
+        } else {
+            let any_node = self.snap.nodes.iter().any(|n| n.npu.to_uppercase().contains(want));
+            out.push((any_node, format!("node: any — {} 드라이버 노드 {}", want, if any_node { "있음" } else { "없음(클러스터에 미설치)" })));
+        }
+        out
+    }
+
     /// Enter — 선택 항목의 컨텍스트 액션 메뉴를 연다(단축키를 몰라도 되게).
     pub fn open_action_menu(&mut self) {
         let mut items: Vec<ActionItem> = Vec::new();
@@ -2202,6 +2250,41 @@ mod tests {
         assert!(!yaml.contains("compile-script"), "no custom script needed for furiosa");
         assert!(yaml.contains("furiosa.ai/rngd"));
         serde_yaml::from_str::<serde_yaml::Value>(&yaml).expect("furiosa manifest is valid YAML");
+    }
+
+    #[test]
+    fn compile_preflight_flags_prereqs() {
+        use crate::collect::ModelArtifact;
+        let mk = |source: &str| {
+            let mut a = App::new();
+            a.snap = Snapshot {
+                artifacts: vec![ModelArtifact {
+                    model: "m".into(),
+                    family: "f".into(),
+                    engine: "Furiosa-LLM".into(),
+                    node: "etri-001".into(),
+                    image: String::new(),
+                    source: source.into(),
+                    mount: String::new(),
+                    opts: vec![],
+                }],
+                ..Default::default()
+            };
+            a.view = View::Launch;
+            a.panel_focus = 0;
+            a.selected = 0;
+            a
+        };
+        // 등록 furiosa 양자화 모델 → registry preflight 통과.
+        let mut a = mk("furiosa-ai/Qwen3-4B-FP8");
+        a.compile_preview();
+        let pf = a.compile_preflight(a.compile_form.as_ref().unwrap());
+        assert!(pf.iter().any(|(ok, m)| *ok && m.starts_with("registry")), "registered model passes registry check");
+        // 원본(미양자화) 모델 → registry preflight 실패(사전 경고).
+        let mut b = mk("Qwen/Qwen2.5-0.5B-Instruct");
+        b.compile_preview();
+        let pfb = b.compile_preflight(b.compile_form.as_ref().unwrap());
+        assert!(pfb.iter().any(|(ok, m)| !*ok && m.starts_with("registry")), "unregistered model flagged before compile");
     }
 
     #[test]
