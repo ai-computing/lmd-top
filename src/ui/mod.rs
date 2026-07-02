@@ -104,7 +104,7 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
 fn confirm_overlay(f: &mut Frame, app: &App) {
     let Some(pending) = &app.confirm else { return };
     let full = f.area();
-    let area = centered(full, 62, 8);
+    let area = centered(full, 80, 9);
     f.render_widget(Clear, area);
     let yes = app.confirm_yes;
     let btn = |label: &str, on: bool| {
@@ -114,19 +114,28 @@ fn confirm_overlay(f: &mut Frame, app: &App) {
             Span::styled(format!("  {}  ", label), Style::default().fg(C_DIM()))
         }
     };
-    let lines = vec![
+    let is_apply = matches!(pending, crate::app::Pending::Apply { .. });
+    let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(format!("  {}", pending.prompt()), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
-        Line::from(Span::styled("  이 작업을 실행할까요? (되돌릴 수 있는 변경)", Style::default().fg(C_DIM()))),
-        Line::from(""),
-        Line::from(vec![
-            Span::raw("      "),
-            btn("▶ Yes 실행", yes),
-            Span::raw("        "),
-            btn("No 취소", !yes),
-        ]),
     ];
-    let title = "confirm · ←→ 선택 · Enter 결정 · Esc 취소";
+    if is_apply {
+        lines.push(Line::from(Span::styled("  자동 생성된 매니페스트를 적용합니다 · e=vi로 열어 수정 · v=검증(dry-run)", Style::default().fg(C_DIM()))));
+    } else {
+        lines.push(Line::from(Span::styled("  이 작업을 실행할까요? (되돌릴 수 있는 변경)", Style::default().fg(C_DIM()))));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("      "),
+        btn("▶ Yes 실행", yes),
+        Span::raw("        "),
+        btn("No 취소", !yes),
+    ]));
+    let title = if is_apply {
+        "confirm apply · ←→ 선택 · Enter 결정 · e vi편집 · v 검증 · Esc 취소"
+    } else {
+        "confirm · ←→ 선택 · Enter 결정 · Esc 취소"
+    };
     f.render_widget(
         Paragraph::new(lines).block(block(title).border_style(Style::default().fg(C_WARN()))),
         area,
