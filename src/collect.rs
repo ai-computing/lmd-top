@@ -529,25 +529,49 @@ fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtif
     ModelArtifact { model: name.to_string(), family, engine: engine.to_string(), node: String::new(), image, source, mount, opts }
 }
 
-/// 트리 그룹 키(모델 계열) — HF id/경로면 모델명 부분, 아니면 deploy 이름에서 엔진/HW/양자화 접사 제거.
-fn model_family(source: &str, name: &str) -> String {
-    let base = if source.contains('/') && !source.starts_with('/') {
-        source.rsplit('/').next().unwrap_or(source).to_string() // org/Model → Model
-    } else if source.starts_with('/') {
-        source.rsplit('/').find(|s| !s.is_empty()).unwrap_or(source).to_string() // /a/b/model → model
-    } else {
-        name.to_string()
-    };
-    let mut b = base.to_lowercase();
+/// 변형(양자화/정밀도/HW/엔진) 태그를 벗겨 모델 "베이스" 이름만 남김.
+fn strip_variant_tags(s: &str) -> String {
+    let mut b = s.to_lowercase();
     for pre in ["vllm-", "sglang-", "ollama-", "furiosa-", "k-"] {
         if let Some(x) = b.strip_prefix(pre) {
             b = x.to_string();
         }
     }
-    for suf in ["-instruct", "-awq", "-gptq", "-fp8", "-bf16", "-fp16", "-int8", "-int4", "-w4a16", "-rbln", "-gb10", "-npu", "-cpu", "-llm-d", "-proxy", "-server", "-n2", "-n3"] {
+    for suf in [
+        "-instruct", "-chat", "-awq", "-gptq", "-fp8", "-bf16", "-fp16", "-int8", "-int4", "-w4a16", "-w8a8",
+        "-nvfp4a16", "-nvfp4", "-mxfp4", "-rbln", "-gb10", "-npu", "-cpu", "-gpu", "-llm-d", "-modelservice",
+        "-decode", "-prefill", "-proxy", "-server", "-n2", "-n3", "-v2", "-hf",
+    ] {
         b = b.replace(suf, "");
     }
-    let b = b.trim_matches(|c| c == '-' || c == '_').to_string();
+    b.trim_matches(|c| c == '-' || c == '_' || c == '.').to_string()
+}
+
+/// 트리 그룹 키(모델 계열) — 표준 정체성. 우선순위: HF repo id(org/name) > 경로 leaf > deploy 이름.
+/// 같은 모델의 여러 배포/컴파일본(다른 TP·양자화·노드)이 한 계열로 묶이도록 정규화.
+fn model_family(source: &str, name: &str) -> String {
+    // 1) HF id: "org/Name" — org 유지(중복 방지) + name 부분 변형태그 제거.
+    if source.contains('/') && !source.starts_with('/') && !source.chars().any(|c| c.is_whitespace()) {
+        let mut it = source.rsplitn(2, '/');
+        let leaf = it.next().unwrap_or(source);
+        let org = it.next();
+        let base = strip_variant_tags(leaf);
+        let base = if base.is_empty() { leaf.to_lowercase() } else { base };
+        return match org {
+            Some(o) if !o.is_empty() => format!("{}/{}", o.to_lowercase(), base),
+            _ => base,
+        };
+    }
+    // 2) 로컬 경로: leaf 디렉터리 이름.
+    if source.starts_with('/') {
+        let leaf = source.rsplit('/').find(|s| !s.is_empty()).unwrap_or(source);
+        let b = strip_variant_tags(leaf);
+        if !b.is_empty() {
+            return b;
+        }
+    }
+    // 3) deploy 이름.
+    let b = strip_variant_tags(name);
     if b.is_empty() {
         name.to_string()
     } else {
