@@ -137,9 +137,10 @@ fn help_overlay(f: &mut Frame) {
     let sec = |t: &str| Line::from(Span::styled(format!(" {}", t), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD)));
     let lines = vec![
         sec("navigation"),
-        g("0-8 / Tab", "view (Overview/Accel/Models/EPP/Topo/Pods/Perf/Launch/Events)"),
+        g("0-9 Tab ⇧Tab", "switch view (Overview/Accel/Models/EPP/Flow/Pods/Perf/Deploy/Events/Nodes)"),
         g("up/dn j k", "select row (mouse scroll works too)"),
         g("Enter", "detail (drill-down)"),
+        g("w", "focus panel (multi-panel views: Deploy/EPP/Flow/Perf)"),
         g("p i r e m", "cross-layer pivot (model↔pods↔infra↔route↔epp), esc retraces"),
         g("o", "cycle sort"),
         g("/", "filter (substring)"),
@@ -148,7 +149,7 @@ fn help_overlay(f: &mut Frame) {
         g("S", "rollout restart selected model (admin+, confirms y/n)"),
         g("A", "alert history (threshold/health events)"),
         g("R", "reset energy session (per-accel Wh)"),
-        g("t", "cycle theme (default/high-contrast/colorblind)"),
+        g("t", "cycle theme (soft/classic/high-contrast/colorblind)"),
         g("f", "animations on/off"),
         g("g", "open Grafana dashboard"),
         g("z", "zoom/focus (hide header+tabs)"),
