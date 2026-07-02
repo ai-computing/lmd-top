@@ -1977,17 +1977,6 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
 }
 
 // ── Launch (모델 카탈로그 + 배치 솔버, 읽기전용) ────────
-/// status 문자열("● Running" 등) 앞 글리프 → (글리프, 색).
-fn status_dot(status: &str) -> (String, Color) {
-    let g = status.chars().next().unwrap_or('·');
-    let c = match g {
-        '●' => C_OK(),
-        '◐' => C_WARN(),
-        _ => C_DIM(),
-    };
-    (g.to_string(), c)
-}
-
 // Deploy — 모델 라이프사이클: 컴파일 변형(어디 저장/어떤 옵션) → 배치 타깃 → 카탈로그(가능성).
 // 컴파일/배포 실행은 Phase 2(게이팅) 예정 — 지금은 관측·계획.
 fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
@@ -2018,6 +2007,20 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
     let vsel = if focus == 0 { app.sel_orig() } else { None };
     let mut lines: Vec<Line> = Vec::new();
     let mut sel_line = 0usize;
+    // 범례 — 상태(운영중/중지/배포가능)와 타입(원본/컴파일본) 구별.
+    lines.push(Line::from(vec![
+        Span::styled("상태: ", Style::default().fg(C_DIM())),
+        Span::styled("● 운영중 ", Style::default().fg(C_OK())),
+        Span::styled("◑ 시작중 ", Style::default().fg(C_WARN())),
+        Span::styled("○ 중지 ", Style::default().fg(C_DIM())),
+        Span::styled("◇ 배포가능(스토어)   ", Style::default().fg(C_ACC())),
+        Span::styled("타입: ", Style::default().fg(C_DIM())),
+        tag("HF", C_ACC()),
+        Span::styled("원본 ", Style::default().fg(C_DIM())),
+        tag("RBLN", Color::Magenta),
+        tag("RNGD", C_WARN()),
+        Span::styled("컴파일본", Style::default().fg(C_DIM())),
+    ]));
     if fams.is_empty() {
         lines.push(Line::from(Span::styled("(no models — deploy one, or set up the shared model-store)", Style::default().fg(C_DIM()))));
     }
@@ -2037,13 +2040,29 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
                 sel_line = lines.len();
             }
             let br = if j + 1 == last { "  └─ " } else { "  ├─ " };
-            let (g, gc) = app.snap.models.iter().find(|m| m.name == a.model).map(|m| status_dot(&m.status)).unwrap_or(("·".into(), C_DIM()));
+            // 상태(운영중/시작중/중지/미배포) — 모델 ready/desired 기준으로 명확히.
+            let m = app.snap.models.iter().find(|m| m.name == a.model);
+            let (g, gc) = match m {
+                Some(m) if m.ready > 0 => ("●", C_OK()),
+                Some(m) if m.desired > 0 => ("◑", C_WARN()),
+                Some(_) => ("○", C_DIM()),
+                None => ("○", C_DIM()),
+            };
+            // 타입 배지 — 엔진으로 원본(HF)/컴파일본(RBLN/RNGD) 구별.
+            let tbadge = if a.engine.contains("RBLN") {
+                tag("RBLN", Color::Magenta)
+            } else if a.engine.contains("Furiosa") {
+                tag("RNGD", C_WARN())
+            } else {
+                tag("HF", C_ACC())
+            };
             let opts = opts_summary(a);
             let npu = matches!(a.engine.as_str(), "vLLM-RBLN" | "Furiosa-LLM") || a.engine.contains("RBLN");
             let mut sp = vec![
                 Span::styled(br.to_string(), Style::default().fg(C_TRACK())),
                 Span::styled(format!("{} ", g), Style::default().fg(gc)),
-                Span::styled(format!("{:<20} ", truncw(&a.model, 20)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                tbadge,
+                Span::styled(format!(" {:<18} ", truncw(&a.model, 18)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("{:<11} ", truncw(&a.engine, 11)), Style::default().fg(C_ACC())),
                 Span::styled(format!("{:<26} ", truncw(if opts.is_empty() { "–" } else { &opts }, 26)), Style::default().fg(if npu { C_WARN() } else { Color::Gray })),
                 Span::styled(format!("@{}", if a.node.is_empty() { "?" } else { &a.node }), Style::default().fg(C_DIM())),
@@ -2061,18 +2080,25 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
         let slast = stored.len();
         for (k, s) in stored.iter().enumerate() {
             let br = if k + 1 == slast && idxs.is_empty() { "  └─ " } else { "  ├─ " };
-            let tag = if s.format == "hf" {
-                if s.revision.is_empty() || s.revision == "-" { "in store".to_string() } else { format!("in store @{}", truncw(&s.revision, 8)) }
+            // 배포가능(스토어에만 있고 운영 안 됨) — ◇. 타입 배지 + 원본/컴파일본 라벨.
+            let tbadge = match s.format.as_str() {
+                "rbln" => tag("RBLN", Color::Magenta),
+                "furiosa" => tag("RNGD", C_WARN()),
+                _ => tag("HF", C_ACC()),
+            };
+            let label = if s.format == "hf" {
+                if s.revision.is_empty() || s.revision == "-" { "원본 가중치(HF)".to_string() } else { format!("원본 @{}", truncw(&s.revision, 8)) }
             } else {
-                format!("{} · {}", s.format, s.compiled_for)
+                format!("컴파일본 · {}", s.compiled_for)
             };
             lines.push(Line::from(vec![
                 Span::styled(br.to_string(), Style::default().fg(C_TRACK())),
-                Span::styled("○ ", Style::default().fg(C_DIM())),
-                Span::styled(format!("{:<32} ", truncw(&s.repo, 32)), Style::default().fg(C_DIM())),
-                Span::styled(format!("{:<24} ", truncw(&tag, 24)), Style::default().fg(if s.format == "hf" { C_DIM() } else { C_WARN() })),
+                Span::styled("◇ ", Style::default().fg(C_ACC())),
+                tbadge,
+                Span::styled(format!(" {:<30} ", truncw(&s.repo, 30)), Style::default().fg(Color::Gray)),
+                Span::styled(format!("{:<22} ", truncw(&label, 22)), Style::default().fg(if s.format == "hf" { C_DIM() } else { C_WARN() })),
                 Span::styled(format!("{}  ", s.size), Style::default().fg(C_DIM())),
-                Span::styled(truncw(&s.path, 24), Style::default().fg(C_TRACK())),
+                Span::styled(truncw(&s.path, 22), Style::default().fg(C_TRACK())),
             ]));
         }
     }
@@ -2080,7 +2106,7 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
     let scroll = if sel_line + 2 > vis { (sel_line + 3).saturating_sub(vis) as u16 } else { 0 };
     let vtotal = app.snap.artifacts.len();
     f.render_widget(
-        Paragraph::new(lines).scroll((scroll, 0)).block(blk(&format!("compiled variants (family → build · @node) · ⏎ actions{}", if focus == 0 { count_suffix(app.selected, vtotal) } else { String::new() }), focus == 0)),
+        Paragraph::new(lines).scroll((scroll, 0)).block(blk(&format!("모델 (계열 → 빌드) · ●운영중 ◇배포가능 · [HF]원본 [RBLN/RNGD]컴파일본 · ⏎ actions{}", if focus == 0 { count_suffix(app.selected, vtotal) } else { String::new() }), focus == 0)),
         rows[0],
     );
 
