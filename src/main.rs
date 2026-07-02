@@ -312,6 +312,27 @@ fn save_manifest(title: &str, yaml: &str) -> Result<String> {
     Ok(path)
 }
 
+/// 매니페스트를 $EDITOR(기본 vi)로 편집 — TUI 를 잠시 내리고 편집기 실행 후 복원.
+/// 저장하고 정상 종료하면 편집된 내용을 반환, 아니면 None.
+fn edit_in_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, content: &str) -> Option<String> {
+    let path = std::env::temp_dir().join("lmd-top-manifest.yaml");
+    if std::fs::write(&path, content).is_err() {
+        return None;
+    }
+    let editor = std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL")).unwrap_or_else(|_| "vi".into());
+    // TUI 정지(대체화면 나가고 raw 해제) → 편집기 → 복원.
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    let status = std::process::Command::new(&editor).arg(&path).status();
+    let _ = enable_raw_mode();
+    let _ = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture);
+    let _ = terminal.clear();
+    match status {
+        Ok(s) if s.success() => std::fs::read_to_string(&path).ok(),
+        _ => None,
+    }
+}
+
 /// 헤드리스 렌더 검증 — TestBackend 로 각 뷰를 한 프레임 그려 텍스트로 출력.
 fn render_dump(snap: collect::Snapshot) {
     use app::View;
@@ -460,6 +481,26 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                     }
                     // 변경 작업 확인(y/n) — 다른 키 무시. 실행은 여기서(권한 검증은 트리거 시점).
                     if let Some(pending) = app.confirm.clone() {
+                        // Apply 확인일 때만: e=vi 편집, v=서버 dry-run 검증 (YAML 은 특정 키로만 접근).
+                        if let Pending::Apply { yaml, title } = &pending {
+                            match k.code {
+                                KeyCode::Char('e') | KeyCode::Char('E') => {
+                                    if let Some(edited) = edit_in_editor(&mut terminal, yaml) {
+                                        app.confirm = Some(Pending::Apply { title: title.clone(), yaml: edited });
+                                        app.notify("manifest 편집됨 (vi) — Enter 로 적용".to_string());
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('v') | KeyCode::Char('V') => {
+                                    match kube::apply_manifest(&ns, yaml, true) {
+                                        Ok(o) => app.notify(format!("valid ✓ {}", o.lines().next().unwrap_or("ok"))),
+                                        Err(e) => app.notify(format!("invalid: {}", e.to_string().lines().next().unwrap_or(""))),
+                                    }
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
                         // ←→/h/l 로 Yes/No 토글, Enter 로 선택 결정, y 즉시 실행, n/esc 취소.
                         let execute = match k.code {
                             KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Tab => {

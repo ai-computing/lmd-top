@@ -1409,7 +1409,7 @@ impl App {
             );
             (
                 "        - { name: work, emptyDir: {} }\n".to_string(),
-                "             \x20           - { name: HF_HOME, value: /work/hub }\n".to_string(),
+                "            - { name: HF_HOME, value: /work/hub }\n".to_string(),
                 "            - { name: work, mountPath: /work }\n".to_string(),
                 format!("[\"sh\", \"-c\", \"{}\"]", cmd),
                 "# Furiosa: fxb build 직접(레지스트리=furiosa-ai 양자화 체크포인트). aarch64 xcc 설치+로컬빌드→스토어복사.",
@@ -1422,7 +1422,7 @@ impl App {
             //  - SMB 스토어 I/O(os error 95) 회피: 로컬 /work 에 save 후 스토어로 복사.
             let env_lines: String = envs
                 .iter()
-                .map(|(k, v)| format!("             \x20           - {{ name: {}, value: \"{}\" }}\n", k, v))
+                .map(|(k, v)| format!("            - {{ name: {}, value: \"{}\" }}\n", k, v))
                 .collect();
             let script_doc = format!(
                 "# RBLN 컴파일 스크립트(인라인) — create_runtimes=False + 로컬빌드→스토어복사(실기 검증).\n\
@@ -1461,7 +1461,7 @@ impl App {
                     cm = cm_vol
                 );
                 let host_mounts = "            - { name: script, mountPath: /scripts, readOnly: true }\n            - { name: work, mountPath: /work }\n            - { name: hp-local, mountPath: /home/gspark/.local/lib/python3.10/site-packages }\n            - { name: hp-sys, mountPath: /host-sys }\n            - { name: hp-lib, mountPath: /host-lib }\n".to_string();
-                let host_env = "             \x20           - { name: PYTHONPATH, value: \"/home/gspark/.local/lib/python3.10/site-packages:/host-sys\" }\n             \x20           - { name: LD_LIBRARY_PATH, value: \"/host-lib:/host-lib/x86_64-linux-gnu\" }\n";
+                let host_env = "            - { name: PYTHONPATH, value: \"/home/gspark/.local/lib/python3.10/site-packages:/host-sys\" }\n            - { name: LD_LIBRARY_PATH, value: \"/host-lib:/host-lib/x86_64-linux-gnu\" }\n";
                 let cmd = "set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq --no-install-recommends python3.10 libnuma1 libgomp1 ca-certificates >/dev/null 2>&1; ln -sf /usr/bin/python3.10 /usr/local/bin/python3; python3 /scripts/compile.py";
                 (
                     host_vols,
@@ -1527,9 +1527,9 @@ impl App {
             mounts_extra = mounts_extra,
             command = command,
         );
-        self.preview = Some((format!("compile · {} → {}", form.model, target), yaml));
-        self.preview_scroll = 0;
-        self.preview_apply = true;
+        // 자동화: YAML 덤프 대신 바로 apply 확인 팝업. (YAML 은 팝업에서 e=vi 편집·v=검증)
+        self.confirm = Some(Pending::Apply { title: format!("compile {} → {}", form.model, target), yaml });
+        self.confirm_yes = true;
     }
 
     /// 모델 이름에서 파라미터 수(B) 추정 — "8B", "1.5b", "0.5B", "32b" 등 첫 매치.
@@ -2258,9 +2258,9 @@ impl App {
         } else {
             yaml
         };
-        self.preview = Some((format!("deploy · {} ×{}", form.model, replicas), yaml));
-        self.preview_scroll = 0;
-        self.preview_apply = true;
+        // 자동화: YAML 을 덤프하지 않고 바로 apply 확인 팝업. (YAML 은 팝업에서 e=vi 편집·v=검증)
+        self.confirm = Some(Pending::Apply { title: format!("deploy {} ×{}", form.model, replicas), yaml });
+        self.confirm_yes = true;
     }
 
     /// llm-d 게이트웨이 라우팅 리소스 문서들(서빙 Deployment 뒤에 붙임).
@@ -2453,6 +2453,14 @@ pub fn diagnose(s: &Snapshot) -> (String, Option<Sev>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// form_submit 후 확인 팝업(Pending::Apply)에 담긴 (title, yaml) 추출 — 테스트 헬퍼.
+    fn submitted(a: &App) -> (String, String) {
+        match a.confirm.as_ref() {
+            Some(Pending::Apply { title, yaml }) => (title.clone(), yaml.clone()),
+            _ => panic!("expected Apply confirm after form_submit"),
+        }
+    }
     use crate::collect::{ModelRow, PodRow, Snapshot};
 
     fn model(name: &str) -> ModelRow {
@@ -2549,7 +2557,7 @@ mod tests {
         assert!(form.target().contains("tp4-s8192"));
         // Enter → 폼 값으로 Job 매니페스트 생성(모델 id/타깃/스토어 경로/옵션 env 포함).
         a.compile_form_submit();
-        let (title, yaml) = a.preview.clone().expect("compile preview");
+        let (title, yaml) = submitted(&a);
         assert!(title.contains("compile"));
         assert!(yaml.contains("kind: Job"));
         assert!(yaml.contains("KISTI-KONI/KONI-Llama3.1-8B-Instruct"));
@@ -2566,7 +2574,7 @@ mod tests {
         assert_eq!(dform.vendor, "rbln");
         assert_eq!(dform.get("devices"), "4"); // 아티팩트 TP
         a.deploy_form_submit();
-        let (_, dyaml) = a.preview.clone().expect("deploy preview");
+        let (_, dyaml) = submitted(&a);
         assert!(dyaml.contains("kind: Deployment"));
         assert!(dyaml.contains("model-store"));
         assert!(dyaml.contains("rebellions.ai/ATOM: 4"));
@@ -2610,7 +2618,7 @@ mod tests {
         a.selected = 0;
         a.compile_preview(); // Furiosa 엔진 → 폼 열림
         a.compile_form_submit();
-        let (_, yaml) = a.preview.clone().expect("furiosa compile preview");
+        let (_, yaml) = submitted(&a);
         assert!(yaml.contains("fxb build"), "furiosa uses fxb build CLI directly");
         assert!(yaml.contains("furiosaai/furiosa-llm:latest"), "default furiosa image");
         assert!(!yaml.contains("compile-script"), "no custom script needed for furiosa");
@@ -2647,7 +2655,7 @@ mod tests {
         let mut fa = mk("Furiosa-LLM", "furiosa-ai/Qwen3-4B-FP8");
         fa.open_deploy_form();
         fa.deploy_form_submit();
-        let (_, fy) = fa.preview.clone().expect("furiosa deploy");
+        let (_, fy) = submitted(&fa);
         assert!(fy.contains("furiosaai/furiosa-llm:latest"));
         assert!(fy.contains("\"serve\", \"furiosa-ai/Qwen3-4B-FP8\""), "serve subcommand + model positional");
         assert!(fy.contains("--tensor-parallel-size"));
@@ -2662,7 +2670,7 @@ mod tests {
         let mut gp = mk("vLLM", "Qwen/Qwen2.5-7B-Instruct");
         gp.open_deploy_form();
         gp.deploy_form_submit();
-        let (_, gy) = gp.preview.clone().expect("gpu deploy");
+        let (_, gy) = submitted(&gp);
         assert!(gy.contains("\"serve\""));
         assert!(gy.contains("nvidia.com/gpu:"));
         assert!(gy.contains("value: /gpu/"), "gpu → /gpu/<model> route");
@@ -2677,7 +2685,7 @@ mod tests {
             if let Some(fld) = f.fields.iter_mut().find(|x| x.key == "routing") { fld.value = "direct".into(); }
         }
         d.deploy_form_submit();
-        let (_, dy) = d.preview.clone().expect("direct deploy");
+        let (_, dy) = submitted(&d);
         assert!(!dy.contains("kind: InferencePool"), "direct = no routing resources");
         assert!(!dy.contains("kind: HTTPRoute"));
     }
