@@ -1674,7 +1674,8 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     // per-model 성능(모델=하드웨어 배치별) + per-pod 큐
     let (bodyc_l, bodyc_r) = two_panes(rows[2], 72);
 
-    let order = app.order(); // Perf: active(서빙 중) 모델만 + 정렬
+    let mfocus = app.panel_focus == 0; // per-model 패널 포커스
+    let order = app.perf_rows_order(); // per-model: active(서빙 중) 만 + 정렬(포커스 무관)
     if app.snap.perf_rows.is_empty() || order.is_empty() {
         let msg = if app.snap.perf_rows.is_empty() {
             "shows per model once EPP-path traffic + vLLM metrics are present."
@@ -1728,31 +1729,40 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
                 Constraint::Length(6),
             ],
         )
-        .header(hrow(&["MODEL", "req/s", "tok/s", "TTFT", "QUEUE", "PFILL", "DECODE", "TPOT", "E2E", "premt"]))
-        .column_spacing(1)
-        .row_highlight_style(hl_style())
-        .highlight_symbol("▎")
-        .block(block(&format!("Per-model perf · active · o sort:{} · ⏎ drill{}", app.sort_label(), count_suffix(app.selected, order.len()))));
+        .header(hrow(&["MODEL", "req/s", "tok/s", "TTFT", "QUEUE", "PFILL", "DECODE", "TPOT", "E2E", "premt"]));
+        let title = format!("Per-model perf · active · o sort:{} · ⏎ drill{}", app.sort_label(), if mfocus { count_suffix(app.selected, order.len()) } else { String::new() });
+        let mut mt = mt.column_spacing(1).block(if mfocus { block_active(&title) } else { block(&title) });
+        if mfocus {
+            mt = mt.row_highlight_style(hl_style()).highlight_symbol("▎");
+        }
         let mut st = TableState::default();
-        st.select(Some(app.selected));
+        st.select(if mfocus { Some(app.selected) } else { None });
         f.render_stateful_widget(mt, bodyc_l, &mut st);
-        list_scrollbar(f, bodyc_l, order.len(), app.selected, 1);
+        if mfocus {
+            list_scrollbar(f, bodyc_l, order.len(), app.selected, 1);
+        }
     }
 
-    // per-pod queue (요청 분배 — 절대 큐 깊이)
+    // per-pod queue (요청 분배 — 절대 큐 깊이). focus 1 이면 선택 강조.
+    let qfocus = app.panel_focus == 1;
     let mut ql: Vec<Line> = Vec::new();
     let maxq = app.snap.pod_queues.iter().map(|(_, q)| *q).fold(1.0, f64::max);
     if app.snap.pod_queues.is_empty() {
         ql.push(Line::from(Span::styled("no per-pod queue data", Style::default().fg(C_DIM()))));
     } else {
-        for (pod, q) in app.snap.pod_queues.iter().take(8) {
+        for (j, (pod, q)) in app.snap.pod_queues.iter().enumerate().take(12) {
             let mut sp = vec![Span::styled(format!("{:<20} ", truncw(pod, 20)), Style::default().fg(Color::White))];
             sp.extend(bar_line(q / maxq * 100.0, 8, C_ACC()).spans);
             sp.push(Span::styled(format!(" {:.0}", q), Style::default().fg(C_DIM())));
-            ql.push(Line::from(sp));
+            let mut line = Line::from(sp);
+            if qfocus && app.selected == j {
+                line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+            }
+            ql.push(line);
         }
     }
-    f.render_widget(Paragraph::new(ql).block(block("request distribution (per-pod queue, absolute)")), bodyc_r);
+    let qtitle = format!("request distribution (per-pod queue){}", if qfocus { count_suffix(app.selected, app.snap.pod_queues.len()) } else { String::new() });
+    f.render_widget(Paragraph::new(ql).block(if qfocus { block_active(&qtitle) } else { block(&qtitle) }), bodyc_r);
 }
 
 // ── Launch (모델 카탈로그 + 배치 솔버, 읽기전용) ────────
