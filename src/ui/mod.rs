@@ -67,6 +67,9 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
     if app.logs_mode {
         logs_overlay(f, app);
     }
+    if app.preview.is_some() {
+        preview_overlay(f, app);
+    }
     if app.alerts_panel {
         alerts_overlay(f, app);
     }
@@ -187,6 +190,31 @@ fn help_overlay(f: &mut Frame) {
                 .border_style(Style::default().fg(C_ACC()))
                 .title(Span::styled(" lmd-top · help (press any key to close) ", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD))),
         ),
+        area,
+    );
+}
+
+/// 매니페스트 미리보기 오버레이(compile/deploy dry-run) — YAML 을 그대로 표시. `q`/esc 닫기, ↑↓ 스크롤.
+fn preview_overlay(f: &mut Frame, app: &App) {
+    let Some((title, body)) = &app.preview else { return };
+    let full = f.area();
+    let area = centered(full, 92, 30);
+    f.render_widget(Clear, area);
+    let lines: Vec<Line> = body
+        .lines()
+        .map(|l| {
+            let col = if l.trim_start().starts_with("# TODO") || l.contains("TODO-") {
+                C_WARN()
+            } else if l.trim_start().starts_with('#') {
+                C_DIM()
+            } else {
+                Color::Gray
+            };
+            Line::from(Span::styled(l.to_string(), Style::default().fg(col)))
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(lines).scroll((app.preview_scroll, 0)).block(block(&format!("{} · dry-run · ↑↓ scroll · q close · review then `kubectl apply`", title))),
         area,
     );
 }
@@ -428,6 +456,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         Perf => parts.push("p/i/e pivot".into()),
         Routing => parts.push("p/i/m/e pivot".into()),
         Epp => parts.push("+/- weight".into()),
+        Launch => parts.push("c compile · d deploy".into()),
         _ => {}
     }
     if matches!(v, Pods | Models | Overview | Accel) {

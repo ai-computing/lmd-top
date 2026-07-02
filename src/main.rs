@@ -251,6 +251,16 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                         }
                         continue;
                     }
+                    // 매니페스트 미리보기 오버레이(compile/deploy dry-run)
+                    if app.preview.is_some() {
+                        match k.code {
+                            KeyCode::Esc | KeyCode::Char('q') => app.preview = None,
+                            KeyCode::Up | KeyCode::Char('k') => app.preview_scroll = app.preview_scroll.saturating_sub(1),
+                            KeyCode::Down | KeyCode::Char('j') => app.preview_scroll = app.preview_scroll.saturating_add(3),
+                            _ => {}
+                        }
+                        continue;
+                    }
                     // 로그 오버레이 모드
                     if app.logs_mode {
                         match k.code {
@@ -391,6 +401,18 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                                 app.confirm = Some(Pending::Restart { name: m.name.clone() });
                             } else {
                                 app.notify("restart: select a model in Models/Overview".to_string());
+                            }
+                        }
+                        // Deploy: compile(NPU)/deploy 매니페스트 미리보기(dry-run, admin+).
+                        KeyCode::Char('c') | KeyCode::Char('d') if app.view == View::Launch => {
+                            if !app.can(Mode::Admin) {
+                                app.notify(format!("compile/deploy needs --mode admin+ (current: {})", app.mode.name()));
+                            } else if app.selected_artifact().is_none() {
+                                app.notify("select a model build in Deploy (variants panel)".to_string());
+                            } else if k.code == KeyCode::Char('c') {
+                                app.compile_preview();
+                            } else {
+                                app.deploy_preview();
                             }
                         }
                         _ => {
