@@ -1537,6 +1537,17 @@ impl App {
                 }
             }
         }
+        // 선택 노드가 이 NPU 드라이버를 갖고 있는지 — 컴파일은 드라이버 설치 노드에서만 가능.
+        let node_host = form.get("node");
+        let node_host = node_host.split('(').next().unwrap_or("any").trim();
+        if node_host != "any" && !node_host.is_empty() {
+            if let Some(nd) = self.snap.nodes.iter().find(|n| n.name == node_host) {
+                let want = if rbln { "RBLN" } else { "RNGD" };
+                if !nd.npu.to_uppercase().contains(want) {
+                    tips.push(format!("⚠ 노드 {} 에 {} 드라이버 없음(npu: {}) — 컴파일 실패", node_host, want, if nd.npu.is_empty() { "none" } else { &nd.npu }));
+                }
+            }
+        }
         FitEstimate { params_b, weight_gb, kv_gb, overhead_gb, chips, per_chip_gb, avail_gb, verdict, tips }
     }
 
