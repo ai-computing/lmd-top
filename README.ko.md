@@ -79,6 +79,7 @@ lmd-top                      # TUI 실행 (권한 모드: observe)
 lmd-top --mode admin         # scale / rollout 액션 허용
 lmd-top --json               # 기계가 읽는 agent 상태(JSON) 출력
 lmd-top --doctor             # Prometheus 전수조사: exporter, 지표 커버리지, 누락
+lmd-top --audit              # 적용한 변경 작업 감사 로그 출력
 lmd-top --snapshot | --render | --cast   # 헤드리스 텍스트 / CI 렌더 / 데모 asciicast
 LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # 다른 클러스터 지정
 ```
@@ -86,19 +87,23 @@ LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # 다른 클러스터 지정
 **권한 모드**(`--mode`, 헤더에 배지로 표시) 는 변경 액션을 단계적으로 잠급니다.
 `observe`(기본, 보기 전용) → `debug`(로그 `l` 추가) → `admin`(`scale` 추가, y/n 확인) →
 `danger`(예약). admin 액션은 적용 전에 항상 확인을 받습니다.
+적용된 모든 변경 작업(scale·stop·restart·cordon·delete·route 편집·apply)은 시각·모드·작업·
+대상·결과와 함께 **감사 로그**(`~/.config/lmd-top/audit.log`, 또는 `$LMD_AUDIT`)에 남습니다 —
+`lmd-top --audit` 로 확인.
 
 **키.**
 
 | | |
 |---|---|
 | 이동 | `↑↓`/`kj` 선택 · `⏎` 액션 메뉴(또는 상세) · `w` Nodes 허브/패널 포커스 · `←→` 항목 · `p i r e m` 크로스레이어 pivot |
-| 액션 | `/` 필터 · `o` 정렬 · `y` live YAML · `l` 로그 · 액션 메뉴 → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (admin 게이팅·y/n 확인) |
+| 액션 | `/` 필터 · `:` 커맨드 팔레트(뷰/표시 액션 퍼지 점프) · `o`/`O` 컬럼 정렬(컬럼 순환 / ▲▼ 방향 토글) · `y` live YAML · `l` 로그 · 액션 메뉴 → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (admin 게이팅·y/n 확인) |
 | 표시 | `t` 테마 · `f` 애니메이션 · `z` zoom · `Space` 일시정지 · `g` Grafana · `A` 알림 · `?` 도움말 · `q` 종료 |
 
 **환경 변수.**
 
 - `LMD_PROM`, `LMD_NS`(기본 `llm-serving`), `LMD_GRAFANA` — 대상 클러스터 지정.
 - `LMD_THEME` — 시작 테마: `soft`, `default`, `high-contrast`, `colorblind`.
+- `LMD_AUDIT` — 감사 로그 경로(기본: `~/.config/lmd-top/audit.log`).
 - `LMD_COMPILE_IMAGE_RBLN`, `LMD_COMPILE_IMAGE_FURIOSA`, `LMD_SERVING_IMAGE` — 생성되는 compile/deploy 매니페스트의 컨테이너 이미지. 지정 전에는 `TODO-…` placeholder 라 앱 내 apply(`a`)가 막히고, `w` 로 저장해 직접 편집·적용은 가능.
 - `LMD_SAVE_DIR` — `w` 저장 위치(기본: 현재 디렉터리).
 - `LMD_W` / `LMD_H` — `--render` 크기.

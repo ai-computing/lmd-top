@@ -43,6 +43,18 @@ pub fn logs(ns: &str, pod: &str, tail: u32) -> Result<Vec<String>> {
     Ok(String::from_utf8_lossy(&out.stdout).lines().map(|l| l.to_string()).collect())
 }
 
+/// 파드 로그 마지막 비어있지 않은 줄(진행 힌트용). async·짧은 타임아웃. 실패 시 None.
+pub async fn last_log_line(ns: &str, pod: &str) -> Option<String> {
+    let out = Command::new("kubectl").args(["logs", pod, "-n", ns, "--tail=5", "--request-timeout=4s"]).output().await.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).lines().rev().map(|l| l.trim()).find(|l| !l.is_empty()).map(|l| {
+        // 너무 길면 자름(패널 폭 보호).
+        if l.chars().count() > 60 { format!("{}…", l.chars().take(60).collect::<String>()) } else { l.to_string() }
+    })
+}
+
 /// 변경 액션: deploy scale. (M5) — 동기 std 사용(블로킹 UI 스레드에서 호출).
 pub fn scale_deploy(ns: &str, name: &str, replicas: i64) -> Result<()> {
     let out = std::process::Command::new("kubectl")
@@ -65,11 +77,37 @@ pub fn scale_deploy(ns: &str, name: &str, replicas: i64) -> Result<()> {
     Ok(())
 }
 
+/// 매니페스트(다중 문서)에서 `kind: Job` 인 문서의 metadata.name 을 모은다.
+/// 컴파일 Job 재적용 전 기존 Job 선삭제용. 파싱 실패 문서는 조용히 건너뜀.
+fn job_names(yaml: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for doc in yaml.split("\n---\n") {
+        if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(doc) {
+            if v.get("kind").and_then(|k| k.as_str()) == Some("Job") {
+                if let Some(n) = v.get("metadata").and_then(|m| m.get("name")).and_then(|n| n.as_str()) {
+                    names.push(n.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
 /// 매니페스트를 stdin 으로 `kubectl apply -f -` 적용. dry_run=true 면 서버 dry-run(무변경 검증).
 /// 성공 시 kubectl 출력(생성/변경 요약)을 반환.
 pub fn apply_manifest(ns: &str, yaml: &str, dry_run: bool) -> Result<String> {
     use std::io::Write;
     use std::process::Stdio;
+    // Job 은 spec.template 이 immutable → 같은 이름 Job 이 이미 있으면 `apply` 가
+    // "field is immutable" 로 거부한다(컴파일 재시도가 실패하는 원인). 컴파일 Job 은
+    // 일회성이라 재적용 = 재실행이 맞으므로, 실적용 전 기존 Job 을 먼저 지운다(있으면).
+    if !dry_run {
+        for name in job_names(yaml) {
+            let _ = std::process::Command::new("kubectl")
+                .args(["delete", "job", &name, "-n", ns, "--ignore-not-found", "--wait=true", "--request-timeout=8s"])
+                .output();
+        }
+    }
     let mut cmd = std::process::Command::new("kubectl");
     cmd.args(["apply", "-n", ns, "-f", "-", "--request-timeout=8s"]);
     if dry_run {
@@ -88,6 +126,17 @@ pub fn apply_manifest(ns: &str, yaml: &str, dry_run: bool) -> Result<String> {
 /// 파드 삭제(`kubectl delete pod <name> -n ns`) — 재스케줄 유도. admin 액션.
 pub fn delete_pod(ns: &str, name: &str) -> Result<()> {
     let out = std::process::Command::new("kubectl").args(["delete", "pod", name, "-n", ns, "--wait=false", "--request-timeout=8s"]).output()?;
+    if !out.status.success() {
+        return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(())
+}
+
+/// 컴파일 Job 삭제(`kubectl delete job <name>`) — 진행 취소/정리. 파드도 함께 정리됨.
+pub fn delete_job(ns: &str, name: &str) -> Result<()> {
+    let out = std::process::Command::new("kubectl")
+        .args(["delete", "job", name, "-n", ns, "--ignore-not-found", "--wait=false", "--request-timeout=8s"])
+        .output()?;
     if !out.status.success() {
         return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
     }
@@ -230,4 +279,19 @@ pub fn rollout_restart(ns: &str, name: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_names_extracts_only_jobs() {
+        // 다중 문서(ConfigMap---Job) 에서 Job 이름만. flow 스타일 metadata 파싱.
+        let yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata: { name: foo-script, namespace: llm-serving }\ndata: { a: b }\n---\napiVersion: batch/v1\nkind: Job\nmetadata: { name: compile-foo-rbln-tp4, namespace: llm-serving }\nspec: { backoffLimit: 0 }\n";
+        assert_eq!(job_names(yaml), vec!["compile-foo-rbln-tp4".to_string()]);
+        // Job 없는 매니페스트(Deployment 등) → 빈 목록(선삭제 안 함).
+        let dep = "apiVersion: apps/v1\nkind: Deployment\nmetadata: { name: srv }\n";
+        assert!(job_names(dep).is_empty());
+    }
 }

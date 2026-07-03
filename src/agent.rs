@@ -37,6 +37,7 @@ struct AgentState {
     models: Vec<Mdl>,
     artifacts: Vec<Artifact>,
     stored: Vec<Stored>,
+    compiles: Vec<Compile>,
     pools: Vec<Pl>,
     per_model_perf: Vec<Pm>,
     diagnosis: Diag,
@@ -166,6 +167,19 @@ struct Stored {
     path: String,
 }
 
+/// 진행/최근 컴파일 Job(compile-*) — 상태·경과·진행 힌트.
+#[derive(Serialize)]
+struct Compile {
+    name: String,
+    model: String,
+    vendor: String,
+    target: String,
+    status: String,
+    age_s: u64,
+    duration_s: Option<u64>,
+    phase: String,
+}
+
 #[derive(Serialize)]
 struct Diag {
     message: String,
@@ -246,6 +260,21 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             revision: noneify(&m.revision),
             size: m.size.clone(),
             path: m.path.clone(),
+        })
+        .collect();
+
+    let compiles = s
+        .compiles
+        .iter()
+        .map(|c| Compile {
+            name: c.name.clone(),
+            model: c.model.clone(),
+            vendor: c.vendor.clone(),
+            target: c.target.clone(),
+            status: c.status.clone(),
+            age_s: c.age_secs,
+            duration_s: c.duration_secs,
+            phase: c.phase.clone(),
         })
         .collect();
 
@@ -379,6 +408,7 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
         models,
         artifacts,
         stored,
+        compiles,
         pools,
         per_model_perf,
         diagnosis,
