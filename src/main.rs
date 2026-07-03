@@ -331,11 +331,23 @@ fn dispatch_palette(
 }
 
 /// 액션 메뉴에서 고른 동작 실행 — 권한 게이팅 포함. 폼/확인은 오버레이로, 로그는 즉시.
+fn require_action(app: &mut App, action: app::Action) -> bool {
+    let required = action.required_mode();
+    if app.can(required) {
+        true
+    } else {
+        app.notify(format!("{} needs --mode {}+ (current: {})", action.verb(), required.name(), app.mode.name()));
+        false
+    }
+}
+
 fn dispatch_action(app: &mut App, action: app::Action, subject: &str, ns: &str, prom: &str, rt: &tokio::runtime::Handle) {
-    use app::{Action, Mode, Pending, View};
+    use app::{Action, Pending, View};
     match action {
         Action::Info => {
-            if app.view == View::Launch && app.panel_focus == 1 {
+            if app.view == View::Routing {
+                app.drill_route();
+            } else if app.view == View::Launch && app.panel_focus == 1 {
                 app.pivot_to_node(subject); // 노드 상세로 점프
             } else if app.view == View::Launch && app.panel_focus == 2 {
                 let s = app.catalog_feasibility(subject);
@@ -345,38 +357,28 @@ fn dispatch_action(app: &mut App, action: app::Action, subject: &str, ns: &str, 
             }
         }
         Action::Compile(vendor) => {
-            if !app.can(Mode::Admin) {
-                app.notify(format!("compile needs --mode admin+ (current: {})", app.mode.name()));
-            } else {
+            if require_action(app, action) {
                 app.compile_form_for(vendor);
             }
         }
         Action::Deploy => {
-            if !app.can(Mode::Admin) {
-                app.notify(format!("deploy needs --mode admin+ (current: {})", app.mode.name()));
-            } else {
+            if require_action(app, action) {
                 app.open_deploy_form();
             }
         }
         Action::Stop => {
-            if !app.can(Mode::Admin) {
-                app.notify(format!("stop needs --mode admin+ (current: {})", app.mode.name()));
-            } else {
+            if require_action(app, action) {
                 app.confirm = Some(Pending::Stop { name: subject.to_string() });
             }
         }
         Action::Scale => {
-            if !app.can(Mode::Admin) {
-                app.notify(format!("scale needs --mode admin+ (current: {})", app.mode.name()));
-            } else {
+            if require_action(app, action) {
                 let target = app.selected_model().map(|m| if m.desired == 0 { 1 } else { 0 }).unwrap_or(1);
                 app.confirm = Some(Pending::Scale { name: subject.to_string(), target });
             }
         }
         Action::Restart => {
-            if !app.can(Mode::Admin) {
-                app.notify(format!("restart needs --mode admin+ (current: {})", app.mode.name()));
-            } else {
+            if require_action(app, action) {
                 app.confirm = Some(Pending::Restart { name: subject.to_string() });
             }
         }
@@ -394,51 +396,40 @@ fn dispatch_action(app: &mut App, action: app::Action, subject: &str, ns: &str, 
             }
         }
         Action::Delete => {
-            if !app.can(Mode::Admin) {
-                app.notify(format!("delete needs --mode admin+ (current: {})", app.mode.name()));
-            } else {
+            if require_action(app, action) {
                 app.confirm = Some(Pending::DeletePod { name: subject.to_string() });
             }
         }
         Action::DeleteJob => {
-            if !app.can(Mode::Admin) {
-                app.notify(format!("delete needs --mode admin+ (current: {})", app.mode.name()));
-            } else {
+            if require_action(app, action) {
                 app.confirm = Some(Pending::DeleteJob { name: subject.to_string() });
             }
         }
         Action::Objective => app.open_objective_form(), // 목표 설정(관측 전용, 권한 불필요)
         Action::Cordon | Action::Uncordon => {
-            if !app.can(Mode::Admin) {
-                app.notify(format!("cordon needs --mode admin+ (current: {})", app.mode.name()));
-            } else {
+            if require_action(app, action) {
                 app.confirm = Some(Pending::Cordon { node: subject.to_string(), on: matches!(action, Action::Cordon) });
             }
         }
         Action::RouteRename => {
-            if !app.can(Mode::Admin) {
-                app.notify(format!("route edit needs --mode admin+ (current: {})", app.mode.name()));
-            } else {
+            if require_action(app, action) {
                 app.open_route_rename();
             }
         }
         Action::RouteRetarget => {
-            if !app.can(Mode::Admin) {
-                app.notify(format!("route edit needs --mode admin+ (current: {})", app.mode.name()));
-            } else {
+            if require_action(app, action) {
                 app.open_route_retarget();
             }
         }
         Action::RouteDelete => {
-            if !app.can(Mode::Admin) {
-                app.notify(format!("route edit needs --mode admin+ (current: {})", app.mode.name()));
-            } else if let Some(r) = app.selected_route() {
-                app.confirm = Some(Pending::RouteDelete { route: r.route, path: r.path });
+            if require_action(app, action) {
+                if let Some(r) = app.selected_route() {
+                    app.confirm = Some(Pending::RouteDelete { route: r.route, path: r.path });
+                }
             }
         }
         Action::Logs => {
-            if !app.can(Mode::Debug) {
-                app.notify(format!("logs needs --mode debug+ (current: {})", app.mode.name()));
+            if !require_action(app, action) {
             } else if let Some(pod) = app.logs_target_pod() {
                 match kube::logs(ns, &pod, 400) {
                     Ok(l) => {
@@ -713,7 +704,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                             _ => continue, // 그 외 키는 무시(팝업 유지)
                         };
                         app.confirm = None;
-                        app.confirm_yes = true; // 다음 팝업 기본값 Yes(엔터로 진행)
+                        app.confirm_yes = false; // 다음 팝업 기본값 No
                         if !execute {
                             app.notify("cancelled".to_string());
                             continue;
@@ -1014,7 +1005,10 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                                     app.detail = true;
                                 }
                             } else if app.view == View::Routing {
-                                app.drill_route(); // Flow: route → backend 모델 상세
+                                app.open_action_menu();
+                                if app.action_menu.is_none() {
+                                    app.drill_route();
+                                }
                             } else if matches!(app.view, View::Launch | View::Models | View::Overview | View::Pods) {
                                 // Enter = 컨텍스트 액션 메뉴(변형/노드/카탈로그/모델/파드). 없으면 상세로 폴백.
                                 app.open_action_menu();

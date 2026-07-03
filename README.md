@@ -77,7 +77,7 @@ git clone https://github.com/gspark-etri/lmd-top.git && cd lmd-top
 
 ```bash
 lmd-top                      # launch the TUI (permission mode: observe)
-lmd-top --mode admin         # allow scale / rollout actions
+lmd-top --mode admin         # allow operational actions (scale / restart / apply)
 lmd-top --json               # print machine-readable agent state (JSON)
 lmd-top --doctor             # survey Prometheus: exporters, metric coverage, gaps
 lmd-top --audit              # print the audit log of applied mutations
@@ -85,9 +85,10 @@ lmd-top --snapshot | --render | --cast   # headless text / CI render / demo asci
 LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # point at another cluster
 ```
 
-**Permission modes** (`--mode`, shown as a header badge) gate mutating actions:
-`observe` (default, view only) → `debug` (adds logs, `l`) → `admin` (adds `scale`, with a
-y/n confirmation) → `danger` (reserved). Admin actions always ask before applying.
+**Permission modes** (`--mode`, shown as a header badge) gate actions:
+`observe` (default, view only) → `debug` (adds logs, `l`) → `admin` (scale, restart, stop,
+compile/deploy apply, cordon, route rename/retarget) → `danger` (delete pod/job/route rule).
+Mutating actions open a confirmation popup that defaults to **No**.
 Every applied mutation (scale, stop, restart, cordon, delete, route edit, apply) is appended
 to an **audit log** (`~/.config/lmd-top/audit.log`, or `$LMD_AUDIT`) with timestamp, mode,
 action, target, and result — view it with `lmd-top --audit`.
@@ -97,7 +98,7 @@ action, target, and result — view it with `lmd-top --audit`.
 | | |
 |---|---|
 | Navigate | `↑↓`/`kj` select · `⏎` action menu (or drill) · `w` Nodes-hub / panel focus · `←→` step · `p i r e m` cross-layer pivot |
-| Act | `/` filter · `:` command palette (fuzzy-jump to any view/display action) · `o`/`O` column sort (cycle column / toggle ▲▼) · `y` live YAML · `l` logs · action menu → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (admin gated, y/n confirm) |
+| Act | `/` filter · `:` command palette (fuzzy-jump to any view/display action) · `o`/`O` column sort (cycle column / toggle ▲▼) · `y` live YAML · `l` logs · action menu → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (mode-gated, default-No confirm) |
 | Display | `t` theme · `f` animations · `z` zoom · `Space` pause · `g` Grafana · `A` alerts · `?` help · `q` quit |
 
 **Environment.**

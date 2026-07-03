@@ -149,7 +149,7 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
     }
 }
 
-/// 변경 작업 확인 팝업 — ←→ 로 Yes/No 선택, Enter 실행/취소. (엔터만으로 진행 가능하게)
+/// 변경 작업 확인 팝업 — 기본은 No. ←→ 로 Yes/No 선택, Enter 결정.
 fn confirm_overlay(f: &mut Frame, app: &App) {
     let Some(pending) = &app.confirm else { return };
     let full = f.area();
@@ -171,19 +171,19 @@ fn confirm_overlay(f: &mut Frame, app: &App) {
     if is_apply {
         lines.push(Line::from(Span::styled("  자동 생성된 매니페스트를 적용합니다 · e=vi로 열어 수정 · v=검증(dry-run)", Style::default().fg(C_DIM()))));
     } else {
-        lines.push(Line::from(Span::styled("  이 작업을 실행할까요? (되돌릴 수 있는 변경)", Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled("  이 작업을 실행할까요? 기본 선택은 No 입니다.", Style::default().fg(C_DIM()))));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::raw("      "),
-        btn("▶ Yes 실행", yes),
+        btn("Yes 실행", yes),
         Span::raw("        "),
         btn("No 취소", !yes),
     ]));
     let title = if is_apply {
-        "confirm apply · ←→ 선택 · Enter 결정 · e vi편집 · v 검증 · Esc 취소"
+        "confirm apply · default No · ←→ 선택 · Enter 결정 · e vi편집 · v 검증 · Esc 취소"
     } else {
-        "confirm · ←→ 선택 · Enter 결정 · Esc 취소"
+        "confirm · default No · ←→ 선택 · Enter 결정 · Esc 취소"
     };
     f.render_widget(
         Paragraph::new(lines).block(block(title).border_style(Style::default().fg(C_WARN()))),
@@ -255,15 +255,15 @@ fn help_overlay(f: &mut Frame) {
         sec("navigation"),
         g("0-7 Tab ⇧Tab", "switch view (Overview/Nodes/Models/EPP/Flow/Pods/Deploy/Events)"),
         g("up/dn j k", "select row (mouse scroll works too)"),
-        g("Enter", "actions menu (Deploy/Models/Pods/Overview) · detail on other views"),
+        g("Enter", "actions menu (Deploy/Models/Pods/Overview/Flow) · detail on other views"),
         g("w", "Nodes hub: nodes→devices→serving→map · focus panel (Deploy/EPP/Flow)"),
         g("p i r e m", "cross-layer pivot (model↔pods↔infra↔route↔epp), esc retraces"),
         g("o / O", "sort: o cycles the column, O toggles ▲/▼ direction (header/footer shows active)"),
         g("/", "filter (substring) — list header shows Σ aggregate of shown rows"),
         g(":", "command palette — fuzzy-jump to any view / display action"),
         g("actions", "Enter menu: Info/Compile→RBLN·Furiosa/Deploy/Stop/Scale/Restart/Logs/YAML/Delete/Cordon/Objective"),
-        g("Flow route", "Enter on a route → Rename/Retarget/Delete (gateway 경로 관리, admin+)"),
-        g("apply", "deploy/compile Enter → Yes/No 확인 팝업(←→ Enter) · e=vi로 매니페스트 편집 · v=dry-run 검증"),
+        g("Flow route", "Enter on a route → Backend/Rename/Retarget/Delete (delete requires danger)"),
+        g("apply", "deploy/compile Enter → 확인 팝업(default No) · e=vi로 매니페스트 편집 · v=dry-run 검증"),
         g("Objective", "set per-model SLO (TTFT/TPOT/E2E/tok·s) → Perf shows met/violated + data-driven advice"),
         g("l s S x y", "accelerators (also in the actions menu): logs/scale/restart/stop/yaml"),
         g("A", "alert history (threshold/health events)"),
@@ -487,12 +487,43 @@ fn tabs(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+fn compact_footer(parts: &[String], width: usize) -> String {
+    let full = parts.join("  ");
+    if dwidth(&full) <= width {
+        return full;
+    }
+    let suffix_parts = ["? help", "q quit"];
+    let suffix = suffix_parts.join("  ");
+    let reserve = dwidth(&format!("  …  {}", suffix));
+    let mut kept: Vec<String> = Vec::new();
+    for p in parts {
+        if suffix_parts.contains(&p.as_str()) {
+            continue;
+        }
+        let candidate = if kept.is_empty() {
+            p.clone()
+        } else {
+            format!("{}  {}", kept.join("  "), p)
+        };
+        if dwidth(&candidate) + reserve <= width {
+            kept.push(p.clone());
+        } else {
+            break;
+        }
+    }
+    if kept.is_empty() {
+        truncw(&full, width)
+    } else {
+        format!("{}  …  {}", kept.join("  "), suffix)
+    }
+}
+
 fn footer(f: &mut Frame, area: Rect, app: &App) {
     // 확인은 이제 팝업(confirm_overlay)으로 표시 — 푸터에는 안내만.
     if app.confirm.is_some() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " confirm popup — ←→ Yes/No · Enter 결정 · Esc 취소",
+                " confirm popup — default No · ←→ Yes/No · Enter 결정 · Esc 취소",
                 Style::default().fg(C_WARN()).add_modifier(Modifier::BOLD),
             ))),
             area,
@@ -537,7 +568,6 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         // Models/Overview/Pods/Launch 은 Enter=액션 메뉴(아래 "⏎ actions") 라 여기선 제외.
         Accel | Nodes | Events => parts.push("⏎ detail".into()),
         Perf => parts.push("⏎ p50/95/99".into()),
-        Routing => parts.push("⏎ model".into()),
         _ => {}
     }
     if matches!(v, Accel | Models | Overview | Pods | Launch | Epp | Events | Nodes) {
@@ -562,7 +592,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         parts.push(format!("w hub:{} (nodes→devices→serving→map)", sub));
     }
     // Enter 동작 — 액션 메뉴가 있는 뷰는 개별 키(l/y/s/S/x/c/d) 를 푸터에서 빼고 "⏎ actions" 로 모음(과밀 방지, 발견성↑).
-    let has_menu = matches!(v, Models | Overview | Pods | Launch);
+    let has_menu = matches!(v, Models | Overview | Pods | Launch | Routing);
     if has_menu {
         parts.push("⏎ actions".into());
     }
@@ -590,7 +620,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     parts.push("t theme".into());
     parts.push("? help".into());
     parts.push("q quit".into());
-    spans.push(Span::styled(parts.join("  "), Style::default().fg(C_DIM())));
+    spans.push(Span::styled(compact_footer(&parts, area.width.saturating_sub(1) as usize), Style::default().fg(C_DIM())));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -983,11 +1013,19 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         Span::raw(" "),
         Span::styled(gw, Style::default().fg(c_gw()).add_modifier(Modifier::BOLD)),
     ]));
-    lines.push(Line::from(vec![
-        Span::styled("└─ ", Style::default().fg(C_DIM())),
-        tag("ROUTE", Color::White),
-        Span::styled(" openai-route", Style::default().fg(Color::White)),
-    ]));
+    if s.routes.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("└─ ", Style::default().fg(C_DIM())),
+            tag("ROUTE", Color::White),
+            Span::styled(" no HTTPRoute discovered in namespace", Style::default().fg(C_DIM())),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("└─ ", Style::default().fg(C_DIM())),
+            tag("ROUTE", Color::White),
+            Span::styled(format!(" {} route rule{}", s.routes.len(), if s.routes.len() == 1 { "" } else { "s" }), Style::default().fg(Color::White)),
+        ]));
+    }
     let n = s.routes.len();
     for (i, r) in s.routes.iter().enumerate() {
         let last = i + 1 == n;
