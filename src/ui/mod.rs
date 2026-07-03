@@ -19,6 +19,79 @@ mod overlays;
 use overlays::*;
 
 
+/// 오버레이 종류 — z-order(그리기 순서)와 입력 우선순위의 **단일 출처**.
+/// 지금까지 draw()의 그리기 순서와 main 의 입력 처리 순서가 따로 관리돼 드리프트 위험이 있었다.
+/// 여기 PRECEDENCE 하나로 통일: 위(topmost)일수록 나중에 그려지고(=화면 맨 앞), 키를 먼저 소비.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Overlay {
+    Help,
+    Confirm,
+    Palette,
+    Alerts,
+    Preview,
+    RouteForm,
+    ObjectiveForm,
+    DeployForm,
+    CompileForm,
+    ActionMenu,
+    Logs,
+}
+
+impl Overlay {
+    /// topmost 우선. 입력 소비·z-order 공용. (Help 가 가장 위, Logs 가 가장 아래)
+    pub const PRECEDENCE: [Overlay; 11] = [
+        Overlay::Help,
+        Overlay::Confirm,
+        Overlay::Palette,
+        Overlay::Alerts,
+        Overlay::Preview,
+        Overlay::RouteForm,
+        Overlay::ObjectiveForm,
+        Overlay::DeployForm,
+        Overlay::CompileForm,
+        Overlay::ActionMenu,
+        Overlay::Logs,
+    ];
+
+    /// 이 오버레이가 현재 열려 있는가(App 상태 기준).
+    pub fn is_open(self, app: &App) -> bool {
+        match self {
+            Overlay::Help => app.help,
+            Overlay::Confirm => app.confirm.is_some(),
+            Overlay::Palette => app.palette.is_some(),
+            Overlay::Alerts => app.alerts_panel,
+            Overlay::Preview => app.preview.is_some(),
+            Overlay::RouteForm => app.route_form.is_some(),
+            Overlay::ObjectiveForm => app.objective_form.is_some(),
+            Overlay::DeployForm => app.deploy_form.is_some(),
+            Overlay::CompileForm => app.compile_form.is_some(),
+            Overlay::ActionMenu => app.action_menu.is_some(),
+            Overlay::Logs => app.logs_mode,
+        }
+    }
+
+    /// 현재 최상위(키를 소비할) 오버레이. 없으면 None(단일키 디스패치로).
+    pub fn top(app: &App) -> Option<Overlay> {
+        Overlay::PRECEDENCE.iter().copied().find(|ov| ov.is_open(app))
+    }
+
+    fn render(self, f: &mut Frame, app: &App) {
+        match self {
+            Overlay::Help => help_overlay(f),
+            Overlay::Confirm => confirm_overlay(f, app),
+            Overlay::Palette => palette_overlay(f, app),
+            Overlay::Alerts => alerts_overlay(f, app),
+            Overlay::Preview => preview_overlay(f, app),
+            Overlay::RouteForm => route_form_overlay(f, app),
+            Overlay::ObjectiveForm => objective_form_overlay(f, app),
+            Overlay::DeployForm => deploy_form_overlay(f, app),
+            Overlay::CompileForm => compile_form_overlay(f, app),
+            Overlay::ActionMenu => action_menu_overlay(f, app),
+            Overlay::Logs => logs_overlay(f, app),
+        }
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
     let dt = fxs.begin(app); // 경과시간 + 상태변화 감지(이펙트 무장)
     let (body, footer_area, summary) = if app.zoom {
@@ -67,36 +140,12 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
     if let Some(sa) = summary {
         fxs.flash(f, sa, dt); // 신규 알림 플래시
     }
-    if app.logs_mode {
-        logs_overlay(f, app);
-    }
-    if app.action_menu.is_some() {
-        action_menu_overlay(f, app);
-    }
-    if app.compile_form.is_some() {
-        compile_form_overlay(f, app);
-    }
-    if app.deploy_form.is_some() {
-        deploy_form_overlay(f, app);
-    }
-    if app.objective_form.is_some() {
-        objective_form_overlay(f, app);
-    }
-    if app.route_form.is_some() {
-        route_form_overlay(f, app);
-    }
-    if app.preview.is_some() {
-        preview_overlay(f, app);
-    }
-    if app.alerts_panel {
-        alerts_overlay(f, app);
-    }
-    // 확인 팝업 — 가장 위(다른 오버레이보다 앞). Yes/No 선택.
-    if app.confirm.is_some() {
-        confirm_overlay(f, app);
-    }
-    if app.help {
-        help_overlay(f);
+    // 오버레이 — 단일 우선순위(Overlay::PRECEDENCE)로 아래→위 순서로 그린다.
+    // (역순 순회 = 가장 낮은 것 먼저 그림 → topmost 가 화면 맨 앞. 입력 우선순위와 동일 정의.)
+    for ov in Overlay::PRECEDENCE.iter().rev().copied() {
+        if ov.is_open(app) {
+            ov.render(f, app);
+        }
     }
 }
 
@@ -209,8 +258,9 @@ fn help_overlay(f: &mut Frame) {
         g("Enter", "actions menu (Deploy/Models/Pods/Overview) · detail on other views"),
         g("w", "Nodes hub: nodes→devices→serving→map · focus panel (Deploy/EPP/Flow)"),
         g("p i r e m", "cross-layer pivot (model↔pods↔infra↔route↔epp), esc retraces"),
-        g("o", "cycle sort"),
+        g("o / O", "sort: o cycles the column, O toggles ▲/▼ direction (header/footer shows active)"),
         g("/", "filter (substring) — list header shows Σ aggregate of shown rows"),
+        g(":", "command palette — fuzzy-jump to any view / display action"),
         g("actions", "Enter menu: Info/Compile→RBLN·Furiosa/Deploy/Stop/Scale/Restart/Logs/YAML/Delete/Cordon/Objective"),
         g("Flow route", "Enter on a route → Rename/Retarget/Delete (gateway 경로 관리, admin+)"),
         g("apply", "deploy/compile Enter → Yes/No 확인 팝업(←→ Enter) · e=vi로 매니페스트 편집 · v=dry-run 검증"),
@@ -333,7 +383,7 @@ fn title_bar(f: &mut Frame, area: Rect, app: &App) {
         Mode::Admin => (C_WARN(), Modifier::BOLD),
         Mode::Danger => (C_BAD(), Modifier::BOLD),
     };
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!("{} ", spin), Style::default().fg(if paused { C_WARN() } else { C_ACC() })),
         Span::styled("lmd-top", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
         Span::styled(format!(" [{}]", app.mode.name()), Style::default().fg(mcol).add_modifier(mmod)),
@@ -341,8 +391,13 @@ fn title_bar(f: &mut Frame, area: Rect, app: &App) {
         gw,
         fresh,
         Span::styled(if paused { "  ⏸ PAUSED (space)" } else { "" }, Style::default().fg(C_WARN())),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+    ];
+    // 변경 작업 진행 중 — 스피너로 표시(UI 는 안 얼고 워커 스레드가 kube 수행).
+    if let Some(label) = &app.inflight {
+        let sp = SPINNER[(tick as usize) % SPINNER.len()];
+        spans.push(Span::styled(format!("  {} {}", sp, truncw(label, 40)), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
@@ -489,7 +544,8 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         parts.push("/ filter".into());
     }
     if app.sort_modes() > 1 {
-        parts.push(format!("o sort:{}", app.sort_label()));
+        // 컬럼 + 방향(▼/▲). O 로 방향 토글.
+        parts.push(format!("o sort:{}{} O⇅", app.sort_label(), app.sort_arrow()));
     }
     if app.panel_count() > 1 {
         parts.push(format!("w panel {}/{}", app.panel_focus + 1, app.panel_count()));
@@ -1990,15 +2046,44 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(ql).block(if qfocus { block_active(&qtitle) } else { block(&qtitle) }), bodyc_r);
 }
 
+/// 컴파일 진행바 스팬 — progress Some 이면 실측 determinate([███░░] 45%),
+/// None 이면 indeterminate(2칸 이동 블록 + "···")로 "살아있음"을 표시(NPU 컴파일은 표준 % 부재).
+fn compile_progress_bar(progress: Option<f32>, tick: u64, width: usize) -> Vec<Span<'static>> {
+    let width = width.max(4);
+    match progress {
+        Some(p) => {
+            let p = p.clamp(0.0, 1.0);
+            let filled = ((p * width as f32).round() as usize).min(width);
+            let bar: String = "█".repeat(filled) + &"░".repeat(width - filled);
+            let col = if p >= 1.0 { C_OK() } else { C_ACC() };
+            vec![
+                Span::styled(bar, Style::default().fg(col)),
+                Span::styled(format!(" {:>3.0}%", p * 100.0), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+            ]
+        }
+        None => {
+            let pos = (tick as usize) % width;
+            let mut cells = vec!['░'; width];
+            cells[pos] = '█';
+            cells[(pos + 1) % width] = '█';
+            let bar: String = cells.into_iter().collect();
+            vec![
+                Span::styled(bar, Style::default().fg(C_ACC())),
+                Span::styled("  ···".to_string(), Style::default().fg(C_DIM())),
+            ]
+        }
+    }
+}
+
 // ── Launch (모델 카탈로그 + 배치 솔버, 읽기전용) ────────
 // Deploy — 모델 라이프사이클: 컴파일 변형(어디 저장/어떤 옵션) → 배치 타깃 → 카탈로그(가능성).
 // 컴파일/배포 실행은 Phase 2(게이팅) 예정 — 지금은 관측·계획.
 fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(6), Constraint::Length(7), Constraint::Length(6)])
+        .constraints([Constraint::Min(6), Constraint::Length(6), Constraint::Length(6), Constraint::Length(6)])
         .split(area);
-    let focus = app.panel_focus; // 0 변형 · 1 타깃 · 2 카탈로그
+    let focus = app.panel_focus; // 0 변형 · 1 타깃 · 2 카탈로그 · 3 진행 중 컴파일
     let blk = |title: &str, active: bool| if active { block_active(title) } else { block(title) };
 
     // ── 1) 컴파일 변형: family → variant 트리(배포된 것 + 스토어에만 있는 것) ──
@@ -2196,6 +2281,79 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(cl).scroll((cscroll, 0)).block(blk(&format!("catalog · deployable ({}){}", app.catalog.len(), if focus == 2 { count_suffix(app.selected, app.catalog.len()) } else { String::new() }), focus == 2)),
         rows[2],
     );
+
+    // ── 4) 진행 중/최근 컴파일 Job(focus 3) — 상태·경과·진행바·힌트. Job 은 완료 10분 후 자동정리(ttl). ──
+    let mut jl: Vec<Line> = Vec::new();
+    if app.snap.compiles.is_empty() {
+        jl.push(Line::from(Span::styled(
+            "(no compile jobs) — Deploy 변형에서 [c] RBLN / [f] Furiosa 컴파일 시작 시 여기 표시",
+            Style::default().fg(C_DIM()),
+        )));
+    }
+    for (j, c) in app.snap.compiles.iter().enumerate() {
+        let (g, gc) = match c.status.as_str() {
+            "Complete" => ("✓", C_OK()),
+            "Running" => ("◑", C_WARN()),
+            "Failed" => ("✗", C_BAD()),
+            _ => ("○", C_DIM()),
+        };
+        let vbadge = match c.vendor.as_str() {
+            "RBLN" => tag("RBLN", Color::Magenta),
+            "RNGD" => tag("RNGD", C_WARN()),
+            _ => tag("?", C_DIM()),
+        };
+        // 시간: 진행 중=경과, 완료=소요.
+        let timing = match (c.status.as_str(), c.duration_secs) {
+            (_, Some(d)) => format!("{} elapsed", fmt_dur(d)),
+            ("Running", _) => format!("{}…", fmt_dur(c.age_secs)),
+            _ => fmt_dur(c.age_secs),
+        };
+        // 진행 힌트 열: 완료는 "스토어 저장 → discovery 후 Deploy 반영" 안내(초록), 그 외는 phase 그대로.
+        let (hint, hc) = if c.status == "Complete" {
+            ("→ 스토어 저장됨 · discovery 갱신 후 Deploy 목록 반영".to_string(), C_OK())
+        } else {
+            (truncw(&c.phase, 44), C_ACC())
+        };
+        let mut spans = vec![
+            Span::styled(format!("{} ", g), Style::default().fg(gc)),
+            vbadge,
+            Span::styled(format!(" {:<20} ", truncw(&c.model, 20)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:<16} ", truncw(&c.target, 16)), Style::default().fg(C_WARN())),
+            Span::styled(format!("{:<9} ", c.status), Style::default().fg(gc)),
+            Span::styled(format!("{:<11} ", timing), Style::default().fg(C_DIM())),
+        ];
+        // 진행 중이면 진행바(로그에서 %/스텝 파싱되면 실측, 아니면 살아있음 표시) + 짧은 로그 힌트.
+        if c.status == "Running" {
+            spans.extend(compile_progress_bar(c.progress, app.tick, 12));
+            spans.push(Span::styled(format!("  {}", truncw(&c.phase, 26)), Style::default().fg(C_ACC())));
+        } else {
+            spans.push(Span::styled(hint, Style::default().fg(hc)));
+        }
+        let mut line = Line::from(spans);
+        if focus == 3 && app.selected == j {
+            line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+        }
+        jl.push(line);
+    }
+    let jscroll = if focus == 3 && app.selected + 3 > (rows[3].height as usize).saturating_sub(2) { (app.selected + 3).saturating_sub((rows[3].height as usize).saturating_sub(2)) as u16 } else { 0 };
+    f.render_widget(
+        Paragraph::new(jl).scroll((jscroll, 0)).block(blk(
+            &format!("compile jobs · ✓done ◑running ✗failed · ⏎ logs/delete · auto-clean 10m{}", if focus == 3 { count_suffix(app.selected, app.snap.compiles.len()) } else { String::new() }),
+            focus == 3,
+        )),
+        rows[3],
+    );
+}
+
+/// 초 → 사람이 읽는 짧은 시간(예: 45s, 3m12s, 1h04m). 컴파일 경과/소요 표시용.
+fn fmt_dur(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    }
 }
 
 // ── Nodes (health / placement) — all-smi 식 트리: node → devices ──────

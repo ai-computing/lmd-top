@@ -144,6 +144,20 @@ pub struct StoredModel {
     pub path: String,         // 스토어 내 상대 경로
 }
 
+/// 컴파일 Job 진행 상태(Deploy 뷰 '진행 중 컴파일' 패널). `compile-*` Job 을 요약.
+#[derive(Clone, Default)]
+pub struct CompileJob {
+    pub name: String,               // Job 이름(compile-{모델}-{타깃})
+    pub model: String,              // 사람이 읽는 모델(이름에서 추출)
+    pub vendor: String,             // RBLN | RNGD | -
+    pub target: String,             // 옵션 요약(tp/pp/seq 등, 이름의 타깃 부분)
+    pub status: String,             // Running | Complete | Failed | Pending
+    pub age_secs: u64,              // 시작(없으면 생성) 후 경과 초
+    pub duration_secs: Option<u64>, // 완료된 경우 소요 초
+    pub phase: String,              // 진행 힌트(파드 로그 마지막 줄 또는 상태)
+    pub progress: Option<f32>,      // 로그에서 파싱한 진행률 0.0~1.0(없으면 indeterminate 바)
+}
+
 /// Store 뷰용 — 모델이 "어디에(경로/볼륨)" 저장되고 "어떤 옵션으로" 컴파일/서빙되는지.
 /// deploy 컨테이너 spec(command/args/env/volumeMounts)에서 추출(휴리스틱).
 #[derive(Clone, Default)]
@@ -192,6 +206,7 @@ pub struct Snapshot {
     pub models: Vec<ModelRow>,
     pub artifacts: Vec<ModelArtifact>, // Store 뷰: 모델 저장 위치 + 컴파일/서빙 옵션
     pub stored: Vec<StoredModel>,      // 공유 스토어 인벤토리(model-inventory ConfigMap) — 배포 무관
+    pub compiles: Vec<CompileJob>,     // 진행/최근 컴파일 Job(compile-*) — Deploy 뷰 모니터 패널
     pub pods: Vec<PodRow>,
     pub events: Vec<EventRow>,
     pub routes: Vec<Route>,
@@ -1400,6 +1415,7 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     }
 
     collect_stored(cfg, snap).await;
+    collect_compiles(cfg, snap).await;
 
     // artifact 저장/구동 노드 — 가속기 busy_model 우선, 없으면 파드 스케줄 노드(분리 차용으로 먼저 계산).
     let nodes: Vec<String> = snap
@@ -1500,6 +1516,176 @@ async fn collect_stored(cfg: &Config, snap: &mut Snapshot) {
                 }
             }
         }
+    }
+}
+
+/// k8s RFC3339 타임스탬프("2026-07-03T12:34:56Z")를 epoch 초로. 실패 시 None.
+/// chrono 의존 없이 고정 포맷만 파싱(k8s 는 항상 UTC 'Z').
+fn parse_k8s_ts(s: &str) -> Option<u64> {
+    let s = s.trim_end_matches('Z');
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.split('-');
+    let (y, mo, da): (i64, i64, i64) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    let mut t = time.split(':');
+    let (h, mi, se): (i64, i64, i64) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?, t.next()?.split('.').next()?.parse().ok()?);
+    // days-from-civil (Howard Hinnant) — 1970-01-01 기준 일수.
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + da - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let secs = days * 86400 + h * 3600 + mi * 60 + se;
+    if secs < 0 { None } else { Some(secs as u64) }
+}
+
+/// 진행/최근 컴파일 Job(`compile-*`) → snap.compiles. Job 없으면 조용히 빈 값.
+/// 상태·경과·(완료 시)소요 + 활성 Job 은 파드 로그 마지막 줄을 진행 힌트로.
+async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
+    let Ok(v) = kube::get_json(&["get", "jobs", "-n", &cfg.ns, "-o", "json"]).await else { return };
+    let Some(items) = v["items"].as_array() else { return };
+    let now = now_secs();
+    for j in items {
+        let name = j["metadata"]["name"].as_str().unwrap_or("");
+        if !name.starts_with("compile-") {
+            continue;
+        }
+        // 이름 = compile-{model}-{target}. target 은 "-rbln-" 또는 "-rngd-" 부터.
+        let rest = &name["compile-".len()..];
+        let (model, target, vendor) = if let Some(i) = rest.find("-rbln-") {
+            (rest[..i].to_string(), rest[i + 1..].to_string(), "RBLN".to_string())
+        } else if let Some(i) = rest.find("-rngd-") {
+            (rest[..i].to_string(), rest[i + 1..].to_string(), "RNGD".to_string())
+        } else {
+            (rest.to_string(), String::new(), "-".to_string())
+        };
+        let st = &j["status"];
+        let succeeded = st["succeeded"].as_i64().unwrap_or(0) >= 1;
+        let active = st["active"].as_i64().unwrap_or(0) >= 1;
+        let failed_cond = st["conditions"].as_array().map(|c| c.iter().any(|x| x["type"] == "Failed" && x["status"] == "True")).unwrap_or(false);
+        let status = if succeeded {
+            "Complete"
+        } else if failed_cond {
+            "Failed"
+        } else if active {
+            "Running"
+        } else {
+            "Pending"
+        }
+        .to_string();
+        let start = st["startTime"].as_str().and_then(parse_k8s_ts).or_else(|| j["metadata"]["creationTimestamp"].as_str().and_then(parse_k8s_ts));
+        let completion = st["completionTime"].as_str().and_then(parse_k8s_ts).or_else(|| {
+            st["conditions"].as_array().and_then(|c| c.iter().find(|x| x["type"] == "Failed").and_then(|x| x["lastTransitionTime"].as_str())).and_then(parse_k8s_ts)
+        });
+        let age_secs = start.map(|s| now.saturating_sub(s)).unwrap_or(0);
+        let duration_secs = match (start, completion) {
+            (Some(s), Some(c)) if c >= s => Some(c - s),
+            _ => None,
+        };
+        // 진행 힌트: 활성 Job 은 파드 로그 마지막 비어있지 않은 줄. 완료/실패는 상태로 대체.
+        let phase = if active {
+            let pod = snap.pods.iter().find(|p| p.name.starts_with(name)).map(|p| p.name.clone());
+            match pod {
+                Some(p) => kube::last_log_line(&cfg.ns, &p).await.unwrap_or_else(|| "starting…".to_string()),
+                None => "starting…".to_string(),
+            }
+        } else if status == "Complete" {
+            "COMPILE_DONE".to_string()
+        } else if status == "Failed" {
+            "failed — see logs".to_string()
+        } else {
+            "pending…".to_string()
+        };
+        // 진행률: 완료=1.0, 실행 중이면 로그 줄에서 %/스텝 파싱(있으면), 없으면 None(indeterminate).
+        let progress = if status == "Complete" {
+            Some(1.0)
+        } else if active {
+            parse_progress(&phase)
+        } else {
+            None
+        };
+        snap.compiles.push(CompileJob { name: name.to_string(), model, vendor, target, status, age_secs, duration_secs, phase, progress });
+    }
+    // 진행 중 → 최근 순: Running 먼저, 그다음 나이 어린 것.
+    snap.compiles.sort_by(|a, b| {
+        let rank = |s: &str| match s { "Running" => 0, "Pending" => 1, "Failed" => 2, _ => 3 };
+        rank(&a.status).cmp(&rank(&b.status)).then(a.age_secs.cmp(&b.age_secs))
+    });
+}
+
+/// 컴파일 로그 한 줄에서 진행률(0.0~1.0)을 best-effort 파싱. 정규식 없이 순수 스캔.
+/// 우선순위: (1) "NN%" / "NN.N%"  (2) "N/M" 스텝(양쪽 모두 숫자일 때만). 없으면 None(indeterminate).
+/// tqdm("45%|██| 45/100")·"[3/8]"·"step 3 of 8"(→ "3/8" 아님, %/슬래시만) 등을 커버.
+fn parse_progress(line: &str) -> Option<f32> {
+    let b = line.as_bytes();
+    // 1) '%' 앞의 숫자(공백 건너뜀).
+    for (i, &c) in b.iter().enumerate() {
+        if c == b'%' {
+            // i-1 부터 역방향으로 숫자/'.' 수집.
+            let mut j = i;
+            while j > 0 && (b[j - 1].is_ascii_digit() || b[j - 1] == b'.') {
+                j -= 1;
+            }
+            if j < i {
+                if let Ok(v) = line[j..i].parse::<f32>() {
+                    if (0.0..=100.0).contains(&v) {
+                        return Some((v / 100.0).clamp(0.0, 1.0));
+                    }
+                }
+            }
+        }
+    }
+    // 2) "N/M" — '/' 양쪽이 모두 연속 숫자일 때만(경로/날짜 오검출 방지).
+    for (i, &c) in b.iter().enumerate() {
+        if c == b'/' {
+            let mut l = i;
+            while l > 0 && b[l - 1].is_ascii_digit() {
+                l -= 1;
+            }
+            let mut r = i + 1;
+            while r < b.len() && b[r].is_ascii_digit() {
+                r += 1;
+            }
+            if l < i && r > i + 1 {
+                let n: f32 = line[l..i].parse().unwrap_or(0.0);
+                let m: f32 = line[i + 1..r].parse().unwrap_or(0.0);
+                if m > 0.0 && n <= m {
+                    return Some((n / m).clamp(0.0, 1.0));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod compile_progress_tests {
+    use super::parse_progress;
+
+    #[test]
+    fn parses_percent() {
+        assert_eq!(parse_progress("Compiling model... 45%"), Some(0.45));
+        assert_eq!(parse_progress("progress 7.5% done"), Some(0.075));
+        assert_eq!(parse_progress("100%|████████| complete"), Some(1.0));
+    }
+
+    #[test]
+    fn parses_step_ratio() {
+        assert_eq!(parse_progress("[3/8] lowering graph"), Some(0.375));
+        assert_eq!(parse_progress("layer 5/5"), Some(1.0));
+    }
+
+    #[test]
+    fn ignores_paths_and_plain_text() {
+        assert_eq!(parse_progress("writing to /hf-cache/model"), None);
+        assert_eq!(parse_progress("starting compilation…"), None);
+        assert_eq!(parse_progress("loading weights"), None);
+    }
+
+    #[test]
+    fn percent_wins_over_ratio() {
+        // tqdm 형태: 퍼센트를 우선.
+        assert_eq!(parse_progress("42%|███ | 42/100 [00:10<00:14]"), Some(0.42));
     }
 }
 

@@ -39,6 +39,13 @@ impl Mode {
     }
 }
 
+/// 정렬 가능한 컬럼 하나(라벨 + 기본 방향). 뷰별 sort_cols() 에서 사용.
+#[derive(Clone, Copy)]
+pub struct SortCol {
+    pub label: &'static str,
+    pub desc: bool, // 이 컬럼 선택 시 기본 방향(true=내림) — 수치 컬럼은 큰 값 먼저가 유용
+}
+
 /// 크로스레이어 드릴 브레드크럼 — pivot 시 현재 위치를 쌓고 esc 로 되짚음.
 #[derive(Clone)]
 pub struct NavState {
@@ -57,6 +64,7 @@ pub enum Pending {
     Apply { title: String, yaml: String }, // 미리보기 매니페스트를 실제 kubectl apply
     Cordon { node: String, on: bool }, // 노드 스케줄 차단/해제
     DeletePod { name: String },        // 파드 삭제
+    DeleteJob { name: String },        // 컴파일 Job 삭제(취소·정리)
     RouteRename { route: String, old: String, new: String }, // HTTPRoute 경로 변경
     RouteRetarget { route: String, path: String, backend: String, kind: String }, // 백엔드 변경
     RouteDelete { route: String, path: String }, // 라우트 규칙 삭제
@@ -71,6 +79,7 @@ impl Pending {
             Pending::Apply { title, .. } => format!("apply manifest to cluster — {}?", title),
             Pending::Cordon { node, on } => format!("{} node {}?", if *on { "cordon (block scheduling on)" } else { "uncordon (allow scheduling on)" }, node),
             Pending::DeletePod { name } => format!("delete pod {} (reschedules)?", name),
+            Pending::DeleteJob { name } => format!("delete compile job {} (cancel / clean up)?", name),
             Pending::RouteRename { old, new, .. } => format!("rename route {} → {}?", old, new),
             Pending::RouteRetarget { path, backend, kind, .. } => format!("retarget {} → {}:{}?", path, kind, backend),
             Pending::RouteDelete { path, route } => format!("delete route {} from {}?", path, route),
@@ -90,6 +99,39 @@ pub struct Alert {
 // 기능 타입(CompileForm/DeployForm/Action/Objective/Fit 등)은 crate::ops 로 분리, 재수출.
 pub use crate::ops::*;
 
+
+/// 컴파일 Job 이름 — `compile-{모델}-{타깃}`. 타깃(vendor·chip·tp·pp·seq)까지 넣어
+/// "같은 모델, 다른 옵션" 컴파일이 서로 다른 Job 으로 공존하게 한다(스토어 경로와 동일 정체성).
+/// DNS-1123 라벨 규칙(소문자 [a-z0-9-], ≤63자, 양끝 영숫자) 보장. 초과 시 모델부를 잘라
+/// 옵션 식별용 짧은 해시를 붙여 유일성 유지(타깃은 항상 보존).
+pub fn compile_job_name(repo_dir: &str, target: &str) -> String {
+    let sanitize = |s: &str| -> String {
+        s.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+    };
+    let model = sanitize(repo_dir);
+    let target = sanitize(target);
+    // 63(DNS-1123) - "-script"(RBLN ConfigMap 접미) = 56 로 여유. Job·CM 둘 다 안전.
+    const MAX: usize = 56;
+    // 고정부: "compile-" + "-" + target. 나머지 예산을 모델부에 배정.
+    let fixed = "compile-".len() + 1 + target.len();
+    let budget = MAX.saturating_sub(fixed);
+    let model = if model.len() > budget {
+        // 짧은 해시로 유일성 보존(prefix 만 자르면 다른 모델이 충돌할 수 있음).
+        let mut h: u64 = 1469598103934665603; // FNV-1a
+        for b in repo_dir.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+        let hash = format!("{:x}", h & 0xffffff); // 최대 6 hex
+        let keep = budget.saturating_sub(hash.len() + 1);
+        format!("{}-{}", &model[..keep.min(model.len())], hash)
+    } else {
+        model
+    };
+    // 양끝이 '-' 로 끝나지 않게 정리(DNS-1123).
+    let raw = format!("compile-{}-{}", model, target);
+    raw.trim_matches('-').to_string()
+}
 
 /// 알림 임계치(ui.rs 의 색 임계치와 개념 일치 — 여기선 "경보" 발생선).
 const ALERT_TEMP_BAD: f64 = 80.0;
@@ -183,7 +225,8 @@ pub struct App {
     pub hist: HashMap<String, VecDeque<u64>>, // accel util 히스토리
     pub toast: Option<String>,
     pub detail: bool,  // 선택 행 상세(drill-down) 표시 여부
-    pub sort: usize,   // 현재 뷰의 정렬 모드(뷰별로 의미 다름, 순환)
+    pub sort: usize,   // 현재 뷰의 정렬 컬럼 인덱스(sort_cols 기준, o 로 순환)
+    pub sort_desc: bool, // 정렬 방향(true=내림) — O 로 토글, 컬럼 전환 시 기본값으로
     pub tick: u64,     // 렌더 틱(마퀴/스피너 애니메이션용)
     pub filter: String,   // 행 필터(부분일치)
     pub filtering: bool,  // 필터 입력 모드
@@ -219,7 +262,9 @@ pub struct App {
     pub mode: Mode,                 // observe(기본)/debug/admin/danger — 기동 시 --mode
     pub confirm: Option<Pending>,   // 확인 대기 중인 변경 작업(팝업)
     pub confirm_yes: bool,          // 확인 팝업의 Yes/No 선택 상태(기본 No=안전)
+    pub inflight: Option<String>,   // 실행 중인 변경 작업 라벨(워커 스레드) — 스피너 표시. None=없음
     pub route_form: Option<RouteForm>, // 라우트 편집 폼(rename/retarget)
+    pub palette: Option<crate::palette::Palette>, // 커맨드 팔레트(`:` 로 열어 뷰/표시 액션 퍼지 검색)
     // ── 크로스레이어 드릴 ──
     pub nav_stack: Vec<NavState>,   // pivot 브레드크럼(esc 로 되짚음)
     // ── Perf 드릴 ──
@@ -266,6 +311,7 @@ impl App {
             toast: None,
             detail: false,
             sort: 0,
+            sort_desc: true,
             tick: 0,
             filter: String::new(),
             filtering: false,
@@ -299,7 +345,9 @@ impl App {
             mode: Mode::Observe,
             confirm: None,
             confirm_yes: true, // 기본 Yes — 팝업에서 Enter 만 눌러도 진행(←→ 로 No 선택 가능)
+            inflight: None,
             route_form: None,
+            palette: None,
             nav_stack: Vec::new(),
             perf_detail: None,
             epp_weights: HashMap::new(),
@@ -472,7 +520,7 @@ impl App {
                 self.view = v;
                 self.filter = filter;
                 self.selected = 0;
-                self.sort = 0;
+                self.reset_sort();
                 self.detail = false;
                 self.epp_weights.clear();
                 // 빈 화면 착지 방지: 매칭 0건이면 되짚고 안내(막다른 화면 회피).
@@ -508,7 +556,7 @@ impl App {
             self.selected = st.selected;
             self.filter = st.filter;
             self.detail = st.detail;
-            self.sort = 0;
+            self.reset_sort();
             self.epp_weights.clear();
             true
         } else {
@@ -585,6 +633,7 @@ impl App {
             View::Launch => match self.panel_focus {
                 1 => self.target_nodes().get(i).cloned().unwrap_or_default(),
                 2 => self.catalog.get(i).map(|m| format!("{} {}", m.id, m.role)).unwrap_or_default(),
+                3 => self.snap.compiles.get(i).map(|c| format!("{} {} {}", c.name, c.status, c.phase)).unwrap_or_default(),
                 _ => self.snap.artifacts.get(i).map(|a| format!("{} {} {}", a.model, a.family, a.source)).unwrap_or_default(),
             },
             View::Epp if self.panel_focus == 1 => self.snap.pools.get(i).map(|p| p.name.clone()).unwrap_or_default(),
@@ -623,37 +672,91 @@ impl App {
     }
 
     /// 현재 뷰의 정렬 모드 수(순환용).
-    pub fn sort_modes(&self) -> usize {
+    /// 정렬 가능한 컬럼 — 뷰가 실제로 보여주는 컬럼 기준. `o` 로 순환, `O` 로 방향 토글.
+    /// desc=true 면 그 컬럼 선택 시 기본이 내림차순(수치 컬럼은 큰 값 먼저가 유용).
+    pub fn sort_cols(&self) -> &'static [SortCol] {
+        use View::*;
         match self.view {
-            View::Accel => 4,  // util / temp / mem / name
-            View::Models => 3, // name / status / ready
-            View::Pods => 3,   // name / phase / restarts
-            View::Perf => 5,   // tok/s / E2E / TTFT / queue / name
-            _ => 1,
+            Accel => &[
+                SortCol { label: "util", desc: true },
+                SortCol { label: "temp", desc: true },
+                SortCol { label: "mem", desc: true },
+                SortCol { label: "power", desc: true },
+                SortCol { label: "name", desc: false },
+            ],
+            Models | Overview => &[
+                SortCol { label: "name", desc: false },
+                SortCol { label: "status", desc: false },
+                SortCol { label: "ready", desc: true },
+                SortCol { label: "tok/s", desc: true },
+                SortCol { label: "kv%", desc: true },
+                SortCol { label: "waiting", desc: true },
+                SortCol { label: "node", desc: false },
+            ],
+            Pods => &[
+                SortCol { label: "name", desc: false },
+                SortCol { label: "phase", desc: false },
+                SortCol { label: "restarts", desc: true },
+                SortCol { label: "node", desc: false },
+                SortCol { label: "ready", desc: false },
+            ],
+            Nodes => &[
+                SortCol { label: "name", desc: false },
+                SortCol { label: "cpu", desc: true },
+                SortCol { label: "mem", desc: true },
+                SortCol { label: "disk", desc: true },
+                SortCol { label: "load", desc: true },
+            ],
+            Events => &[
+                SortCol { label: "recent", desc: false },
+                SortCol { label: "type", desc: false },
+                SortCol { label: "reason", desc: false },
+                SortCol { label: "count", desc: true },
+            ],
+            // Perf 는 기존 다지표 정렬(perf_rows_order) 유지 — 전부 desc 기본이라 진입 시 자연순서, O 로 역순.
+            Perf => &[
+                SortCol { label: "tok/s", desc: true },
+                SortCol { label: "E2E", desc: true },
+                SortCol { label: "TTFT", desc: true },
+                SortCol { label: "queue", desc: true },
+                SortCol { label: "name", desc: true },
+            ],
+            _ => &[],
         }
     }
+    pub fn sort_modes(&self) -> usize {
+        self.sort_cols().len().max(1)
+    }
+    /// 뷰 진입/전환 시 정렬 초기화 — 첫 컬럼 + 그 컬럼의 기본 방향.
+    pub fn reset_sort(&mut self) {
+        self.sort = 0;
+        self.sort_desc = self.sort_cols().first().map(|c| c.desc).unwrap_or(true);
+    }
     pub fn cycle_sort(&mut self) {
-        let n = self.sort_modes();
-        self.sort = (self.sort + 1) % n.max(1);
+        let cols = self.sort_cols();
+        if cols.len() <= 1 {
+            return;
+        }
+        self.sort = (self.sort + 1) % cols.len();
+        self.sort_desc = self.sort_cols()[self.sort].desc; // 새 컬럼의 기본 방향
+    }
+    /// 정렬 방향 토글(`O`) — 정렬 가능한 뷰에서만.
+    pub fn toggle_sort_dir(&mut self) {
+        if !self.sort_cols().is_empty() {
+            self.sort_desc = !self.sort_desc;
+        }
     }
     pub fn sort_label(&self) -> &'static str {
-        match (self.view, self.sort) {
-            (View::Accel, 0) => "util",
-            (View::Accel, 1) => "temp",
-            (View::Accel, 2) => "mem",
-            (View::Accel, 3) => "name",
-            (View::Models, 0) => "name",
-            (View::Models, 1) => "status",
-            (View::Models, 2) => "ready",
-            (View::Pods, 0) => "name",
-            (View::Pods, 1) => "phase",
-            (View::Pods, 2) => "restarts",
-            (View::Perf, 0) => "tok/s",
-            (View::Perf, 1) => "E2E",
-            (View::Perf, 2) => "TTFT",
-            (View::Perf, 3) => "queue",
-            (View::Perf, 4) => "name",
-            _ => "—",
+        self.sort_cols().get(self.sort).map(|c| c.label).unwrap_or("—")
+    }
+    /// 정렬 방향 표시 글리프(내림 ▼ / 오름 ▲). 정렬 불가 뷰는 공백.
+    pub fn sort_arrow(&self) -> &'static str {
+        if self.sort_cols().is_empty() {
+            ""
+        } else if self.sort_desc {
+            "▼"
+        } else {
+            "▲"
         }
     }
 
@@ -814,12 +917,30 @@ impl App {
         if i < View::ALL.len() {
             self.view = View::ALL[i];
             self.selected = 0;
-            self.sort = 0;
+            self.reset_sort();
             self.detail = false;
             self.panel_focus = 0; // 뷰 바뀌면 첫 패널로
             self.nav_stack.clear(); // 수동 뷰 전환 → 브레드크럼 초기화
             self.epp_weights.clear(); // what-if 오버라이드는 EPP 떠나면 리셋
         }
+    }
+
+    /// 임의 뷰로 점프(허브 하위 뷰 Accel/Perf/Topo 포함) — set_view_idx 는 상단 8탭만 다뤄
+    /// 팔레트/pivot 처럼 하위 뷰도 직접 지정해야 할 때 쓴다. 선택/정렬/브레드크럼 초기화 동일.
+    pub fn goto_view(&mut self, v: View) {
+        self.view = v;
+        self.selected = 0;
+        self.reset_sort();
+        self.detail = false;
+        self.panel_focus = 0;
+        self.dev_sel = 0;
+        self.nav_stack.clear();
+        self.epp_weights.clear();
+    }
+
+    /// 커맨드 팔레트 열기(`:`). 다른 오버레이가 없을 때만.
+    pub fn open_palette(&mut self) {
+        self.palette = Some(crate::palette::Palette::global());
     }
 
     pub fn next_tab(&mut self) {
@@ -832,7 +953,7 @@ impl App {
     /// 현재 뷰의 포커스 가능한 패널 수(멀티패널 뷰만 >1).
     pub fn panel_count(&self) -> usize {
         match self.view {
-            View::Launch => 3,  // Deploy: 컴파일 변형 / 배치 타깃 / 카탈로그
+            View::Launch => 4,  // Deploy: 컴파일 변형 / 배치 타깃 / 카탈로그 / 진행 중 컴파일
             View::Epp => 2,     // scorers / InferencePool
             View::Routing => 2, // routes / InferencePool
             _ => 1,
@@ -949,61 +1070,119 @@ impl App {
         use crate::collect::{Accel, ModelRow, PodRow};
         use std::cmp::Ordering::Equal;
         let mut idx = match self.view {
+            // ── 컬럼 기반 정렬(o=컬럼 순환 · O=방향 토글). 비교는 오름차순으로 쓰고 desc 면 reverse. ──
             View::Accel => {
                 let v = &self.snap.accel;
+                let desc = self.sort_desc;
                 let mut idx: Vec<usize> = (0..v.len()).collect();
                 idx.sort_by(|&a, &b| {
                     let (x, y): (&Accel, &Accel) = (&v[a], &v[b]);
-                    match self.sort {
-                        0 => y.util.partial_cmp(&x.util).unwrap_or(Equal),
-                        1 => y.temp.partial_cmp(&x.temp).unwrap_or(Equal),
-                        2 => y.mem_used_gb.partial_cmp(&x.mem_used_gb).unwrap_or(Equal),
-                        _ => (x.kind as u8, &x.node, &x.id).cmp(&(y.kind as u8, &y.node, &y.id)),
-                    }
+                    let asc = match self.sort {
+                        0 => x.util.partial_cmp(&y.util).unwrap_or(Equal),
+                        1 => x.temp.partial_cmp(&y.temp).unwrap_or(Equal),
+                        2 => x.mem_used_gb.partial_cmp(&y.mem_used_gb).unwrap_or(Equal),
+                        3 => x.power.partial_cmp(&y.power).unwrap_or(Equal),
+                        _ => (x.kind as u8, x.node.as_str(), x.id.as_str()).cmp(&(y.kind as u8, y.node.as_str(), y.id.as_str())),
+                    };
+                    let asc = if desc { asc.reverse() } else { asc };
+                    asc.then_with(|| (x.node.as_str(), x.id.as_str()).cmp(&(y.node.as_str(), y.id.as_str())))
                 });
                 idx
             }
             View::Models | View::Overview => {
                 let v = &self.snap.models;
+                let desc = self.sort_desc;
+                let oc = |a: Option<f64>, b: Option<f64>| a.unwrap_or(f64::NEG_INFINITY).partial_cmp(&b.unwrap_or(f64::NEG_INFINITY)).unwrap_or(Equal);
                 let mut idx: Vec<usize> = (0..v.len()).collect();
                 idx.sort_by(|&a, &b| {
                     let (x, y): (&ModelRow, &ModelRow) = (&v[a], &v[b]);
-                    match self.sort {
-                        1 => y.status.cmp(&x.status).then(x.name.cmp(&y.name)),
-                        2 => y.ready.cmp(&x.ready).then(x.name.cmp(&y.name)),
+                    let asc = match self.sort {
+                        1 => x.status.cmp(&y.status),
+                        2 => x.ready.cmp(&y.ready),
+                        3 => oc(x.tps, y.tps),
+                        4 => oc(x.kv, y.kv),
+                        5 => oc(x.waiting, y.waiting),
+                        6 => x.accel.cmp(&y.accel),
                         _ => x.name.cmp(&y.name),
-                    }
+                    };
+                    let asc = if desc { asc.reverse() } else { asc };
+                    asc.then_with(|| x.name.cmp(&y.name)) // 동점은 이름 오름차순(안정)
                 });
                 idx
             }
             View::Pods => {
                 let v = &self.snap.pods;
+                let desc = self.sort_desc;
                 let mut idx: Vec<usize> = (0..v.len()).collect();
                 idx.sort_by(|&a, &b| {
                     let (x, y): (&PodRow, &PodRow) = (&v[a], &v[b]);
-                    match self.sort {
-                        1 => x.phase.cmp(&y.phase).then(x.name.cmp(&y.name)),
-                        2 => y.restarts.cmp(&x.restarts).then(x.name.cmp(&y.name)),
+                    let asc = match self.sort {
+                        1 => x.phase.cmp(&y.phase),
+                        2 => x.restarts.cmp(&y.restarts),
+                        3 => x.node.cmp(&y.node),
+                        4 => x.ready.cmp(&y.ready),
                         _ => x.name.cmp(&y.name),
-                    }
+                    };
+                    let asc = if desc { asc.reverse() } else { asc };
+                    asc.then_with(|| x.name.cmp(&y.name))
+                });
+                idx
+            }
+            View::Nodes => {
+                let v = &self.snap.nodes;
+                let desc = self.sort_desc;
+                let mut idx: Vec<usize> = (0..v.len()).collect();
+                idx.sort_by(|&a, &b| {
+                    let (x, y) = (&v[a], &v[b]);
+                    let asc = match self.sort {
+                        1 => x.cpu_pct.partial_cmp(&y.cpu_pct).unwrap_or(Equal),
+                        2 => x.mem_used_gb.partial_cmp(&y.mem_used_gb).unwrap_or(Equal),
+                        3 => x.disk_used_gb.partial_cmp(&y.disk_used_gb).unwrap_or(Equal),
+                        4 => x.load1.partial_cmp(&y.load1).unwrap_or(Equal),
+                        _ => x.name.cmp(&y.name),
+                    };
+                    let asc = if desc { asc.reverse() } else { asc };
+                    asc.then_with(|| x.name.cmp(&y.name))
+                });
+                idx
+            }
+            View::Events => {
+                let v = &self.snap.events;
+                let desc = self.sort_desc;
+                let mut idx: Vec<usize> = (0..v.len()).collect();
+                idx.sort_by(|&a, &b| {
+                    let (x, y) = (&v[a], &v[b]);
+                    let asc = match self.sort {
+                        1 => x.typ.cmp(&y.typ),
+                        2 => x.reason.cmp(&y.reason),
+                        3 => x.count.cmp(&y.count),
+                        _ => a.cmp(&b), // recent: 수집 순서(최신 먼저) = 인덱스 오름차순
+                    };
+                    if desc { asc.reverse() } else { asc }
                 });
                 idx
             }
             View::Launch => {
-                // Deploy: 활성 패널에 따라 선택 리스트가 다름(0 변형 / 1 타깃노드 / 2 카탈로그).
+                // Deploy: 활성 패널에 따라 선택 리스트가 다름(0 변형 / 1 타깃노드 / 2 카탈로그 / 3 진행 컴파일).
                 let n = match self.panel_focus {
                     1 => self.target_nodes().len(),
                     2 => self.catalog.len(),
+                    3 => self.snap.compiles.len(),
                     _ => self.snap.artifacts.len(),
                 };
                 (0..n).collect()
             }
             View::Epp if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
             View::Epp => (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect(),
-            View::Events => (0..self.snap.events.len()).collect(),
-            View::Nodes => (0..self.snap.nodes.len()).collect(),
             View::Perf if self.panel_focus == 1 => (0..self.snap.pod_queues.len()).collect(),
-            View::Perf => self.perf_rows_order(),
+            // Perf 는 다지표 전용 정렬(perf_rows_order, 기본 best-first=내림). O 로 역순.
+            View::Perf => {
+                let mut o = self.perf_rows_order();
+                if !self.sort_desc {
+                    o.reverse();
+                }
+                o
+            }
             View::Routing if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
             View::Routing => (0..self.snap.routes.len()).collect(),
             View::Topo => Vec::new(), // 맵 뷰 — 리스트 선택 없음
@@ -1135,7 +1314,7 @@ impl App {
             self.view = View::Nodes;
             self.filter.clear();
             self.panel_focus = 0;
-            self.sort = 0;
+            self.reset_sort();
             self.selected = pos;
             self.detail = true;
             self.dev_sel = 0;
@@ -1318,7 +1497,9 @@ impl App {
         let vendor = form.vendor;
         let target = form.target();
         let repo_dir = model_id.replace('/', "--");
-        let name = format!("compile-{}", repo_dir.to_lowercase().replace(['.', '_'], "-"));
+        // Job 이름 = 모델 + 타깃(vendor·chip·tp·pp·seq). 같은 모델을 다른 옵션으로 컴파일하면
+        // 서로 다른 Job 이 되어 공존 가능(스토어 산출물 경로와 동일한 정체성). DNS-1123(≤63자) 보장.
+        let name = compile_job_name(&repo_dir, &target);
         let tp = form.get("tp");
         // 디바이스 수·노드는 폼에서 선택한 값. 노드 라벨의 "(N)" 접미는 제거.
         let devices = {
@@ -1461,8 +1642,12 @@ impl App {
                     cm = cm_vol
                 );
                 let host_mounts = "            - { name: script, mountPath: /scripts, readOnly: true }\n            - { name: work, mountPath: /work }\n            - { name: hp-local, mountPath: /home/gspark/.local/lib/python3.10/site-packages }\n            - { name: hp-sys, mountPath: /host-sys }\n            - { name: hp-lib, mountPath: /host-lib }\n".to_string();
-                let host_env = "            - { name: PYTHONPATH, value: \"/home/gspark/.local/lib/python3.10/site-packages:/host-sys\" }\n            - { name: LD_LIBRARY_PATH, value: \"/host-lib:/host-lib/x86_64-linux-gnu\" }\n";
-                let cmd = "set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq --no-install-recommends python3.10 libnuma1 libgomp1 ca-certificates >/dev/null 2>&1; ln -sf /usr/bin/python3.10 /usr/local/bin/python3; python3 /scripts/compile.py";
+                // markupsafe 등 apt 설치 파이썬 패키지는 /usr/lib/python3/dist-packages(=/host-lib/python3/dist-packages)
+                // 에 있음 — jinja2(→transformers)가 markupsafe 를 못 찾던 실기 에러 해소. /usr/lib 는 이미 hp-lib 로 마운트됨.
+                let host_env = "            - { name: PYTHONPATH, value: \"/home/gspark/.local/lib/python3.10/site-packages:/host-sys:/host-lib/python3/dist-packages\" }\n            - { name: LD_LIBRARY_PATH, value: \"/host-lib:/host-lib/x86_64-linux-gnu\" }\n";
+                // tzdata: pandas→pytz 가 /usr/share/zoneinfo 를 요구(host site-packages 가 transformers→sklearn→pandas 를 끌어옴).
+                // 최소 ubuntu 이미지엔 없어 apt 로 설치(없으면 FileNotFoundError: tzdata.zi).
+                let cmd = "set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq --no-install-recommends python3.10 libnuma1 libgomp1 ca-certificates tzdata >/dev/null 2>&1; ln -sf /usr/bin/python3.10 /usr/local/bin/python3; python3 /scripts/compile.py";
                 (
                     host_vols,
                     format!("{}{}", host_env, env_lines),
@@ -1493,6 +1678,7 @@ impl App {
              metadata: {{ name: {name}, namespace: {ns} }}\n\
              spec:\n\
              \x20 backoffLimit: 0\n\
+             \x20 ttlSecondsAfterFinished: 600\n\
              \x20 template:\n\
              \x20   spec:\n\
              \x20     restartPolicy: Never\n\
@@ -1678,9 +1864,21 @@ impl App {
     /// 컴파일 사전 점검(preflight) — 긴 컴파일 전에 전제조건 충족 여부를 미리 검사.
     /// 실기에서 발견한 함정(레지스트리 미등록·aarch64 툴체인·노드 드라이버·컴파일러 이미지)을 사전 방어.
     /// 반환: (충족?, 메시지). 하나라도 false 면 컴파일 실패 가능 → 폼에서 경고 표시.
+    /// 이 폼의 컴파일 산출물이 이미 스토어에 있는지 — 있으면 그 상대경로. 재컴파일=덮어씀.
+    /// 매칭: 컴파일 출력경로 `compiled/{repo_dir}/{vendor}/{target}` 와 인벤토리 path 정확 일치.
+    pub fn compile_already_stored(&self, form: &CompileForm) -> Option<String> {
+        let repo_dir = form.model_id.replace('/', "--");
+        let expected = format!("compiled/{}/{}/{}", repo_dir, form.vendor, form.target());
+        self.snap.stored.iter().map(|s| s.path.trim_end_matches('/')).find(|p| *p == expected).map(|p| p.to_string())
+    }
+
     pub fn compile_preflight(&self, form: &CompileForm) -> Vec<(bool, String)> {
         let mut out: Vec<(bool, String)> = Vec::new();
         let mid = form.model_id.to_lowercase();
+        // 이미 같은 옵션으로 컴파일된 산출물이 스토어에 있으면 안내(블로커 아님 — 재컴파일 시 덮어씀).
+        if let Some(path) = self.compile_already_stored(form) {
+            out.push((true, format!("⚠ 이미 컴파일됨 — {} (재컴파일 시 덮어씀; 불필요하면 취소하고 Deploy)", path)));
+        }
         if form.vendor == "furiosa" {
             // fxb build 는 furiosa-ai 조직의 양자화 체크포인트만 컴파일(실기 확인).
             let quant = ["fp8", "nvfp4", "-w8", "-w4", "awq", "gptq", "int4", "int8"].iter().any(|q| mid.contains(q));
@@ -1763,6 +1961,13 @@ impl App {
                 let Some(m) = self.sel_orig().and_then(|i| self.catalog.get(i)) else { return };
                 items.push(ActionItem { key: 'i', label: "Info", desc: "why ready / needs artifact (feasibility)", action: Action::Info });
                 (format!("catalog · {}", m.id), m.id.clone())
+            }
+            View::Launch if self.panel_focus == 3 => {
+                // 진행 중 컴파일 패널 — 로그 확인 / Job 삭제(취소·정리).
+                let Some(c) = self.sel_orig().and_then(|i| self.snap.compiles.get(i)) else { return };
+                items.push(ActionItem { key: 'l', label: "Logs", desc: "tail compile pod logs", action: Action::Logs });
+                items.push(ActionItem { key: 'D', label: "Delete", desc: "delete job (cancel / clean up)", action: Action::DeleteJob });
+                (format!("compile · {}", c.name), c.name.clone())
             }
             View::Models | View::Overview => {
                 let Some(m) = self.selected_model() else { return };
@@ -2385,9 +2590,15 @@ impl App {
                 .selected_model()
                 .and_then(|m| self.snap.pods.iter().find(|p| p.name.starts_with(&m.name)).map(|p| p.name.clone())),
             View::Accel => self.selected_accel().filter(|a| !a.busy_model.is_empty()).map(|a| a.busy_model.clone()),
+            // Deploy '진행 중 컴파일' 패널 — 선택 Job 의 파드 로그.
+            View::Launch if self.panel_focus == 3 => self
+                .sel_orig()
+                .and_then(|i| self.snap.compiles.get(i))
+                .and_then(|c| self.snap.pods.iter().find(|p| p.name.starts_with(&c.name)).map(|p| p.name.clone())),
             _ => None,
         }
     }
+
 }
 
 /// 상태 없는 임계/헬스 조건 → 알림 목록(엣지 검출·재시작 델타 제외). UI 알림과 agent JSON 공유.
@@ -2505,15 +2716,16 @@ mod tests {
     #[test]
     fn panel_cycle_and_reverse_tab() {
         let mut a = App::new();
-        a.set_view_idx(View::Launch.idx()); // Deploy: 3 패널
-        assert_eq!(a.panel_count(), 3);
+        a.set_view_idx(View::Launch.idx()); // Deploy: 4 패널(변형/타깃/카탈로그/진행 컴파일)
+        assert_eq!(a.panel_count(), 4);
         a.selected = 2;
         a.cycle_panel();
         assert_eq!(a.panel_focus, 1);
         assert_eq!(a.selected, 0, "패널 전환 시 선택 리셋");
         a.cycle_panel();
         a.cycle_panel();
-        assert_eq!(a.panel_focus, 0, "3패널 순환");
+        a.cycle_panel();
+        assert_eq!(a.panel_focus, 0, "4패널 순환");
         // 단일 패널 뷰는 순환 무시.
         a.set_view_idx(View::Nodes.idx());
         assert_eq!(a.panel_count(), 1);
@@ -2594,6 +2806,122 @@ mod tests {
         for doc in dyaml.split("\n---\n") {
             serde_yaml::from_str::<serde_yaml::Value>(doc).expect("deploy manifest doc is valid YAML");
         }
+    }
+
+    // GPU(HF) 아티팩트를 NPU 로 컴파일(GPU→NPU 경로)해도 Job 이름이 모델+옵션(vendor·tp·seq)으로
+    // 유일해야 하고, 같은 모델의 RBLN·Furiosa Job 이 서로 충돌하지 않아야 한다. Job 은 끝나면
+    // 자동정리(ttlSecondsAfterFinished)되어야 한다. (사용자 보고: qwen 재컴파일 "field is immutable")
+    #[test]
+    fn compile_job_name_encodes_model_and_options() {
+        use crate::collect::ModelArtifact;
+        let mk = |engine: &str| {
+            let mut a = App::new();
+            a.mode = Mode::Admin;
+            a.snap = Snapshot {
+                artifacts: vec![ModelArtifact {
+                    model: "vllm-qwen05b-gb10".into(),
+                    family: "qwen/qwen2.5-0.5b".into(),
+                    engine: engine.into(),
+                    node: String::new(),
+                    image: String::new(),
+                    source: "Qwen/Qwen2.5-0.5B-Instruct".into(),
+                    mount: String::new(),
+                    opts: vec![("max-len".into(), "8192".into())],
+                }],
+                ..Default::default()
+            };
+            a.view = View::Launch;
+            a.panel_focus = 0;
+            a.selected = 0;
+            a
+        };
+        let name_for = |vendor: &'static str| -> String {
+            let mut a = mk("vLLM"); // GPU 엔진 → GPU→NPU 컴파일 경로
+            a.compile_form_for(vendor);
+            a.compile_form_submit();
+            let (_t, yaml) = submitted(&a);
+            for doc in yaml.split("\n---\n") {
+                serde_yaml::from_str::<serde_yaml::Value>(doc).expect("compile doc valid YAML");
+            }
+            assert!(yaml.contains("ttlSecondsAfterFinished"), "job auto-cleans after finish");
+            yaml.lines()
+                .find(|l| l.contains("kind: Job") || l.trim_start().starts_with("metadata: { name: compile-"))
+                .map(|_| ())
+                .unwrap_or(());
+            // Job metadata.name 추출(ConfigMap 의 -script 는 제외).
+            yaml.lines()
+                .filter_map(|l| l.trim().strip_prefix("metadata: { name: "))
+                .map(|s| s.split(',').next().unwrap_or("").trim().to_string())
+                .find(|n| n.starts_with("compile-") && !n.ends_with("-script"))
+                .expect("job name present")
+        };
+        let rbln = name_for("rbln");
+        let furiosa = name_for("furiosa");
+        assert_ne!(rbln, furiosa, "rbln·furiosa jobs must not collide");
+        assert!(rbln.contains("rbln") && rbln.contains("tp") && rbln.contains("s8192"), "rbln name: {}", rbln);
+        assert!(furiosa.contains("rngd") && furiosa.contains("tp"), "furiosa name: {}", furiosa);
+        assert!(rbln.len() <= 56 && furiosa.len() <= 56, "DNS-1123 + -script 여유");
+    }
+
+    // 스토어에 같은 모델·같은 target 산출물이 이미 있으면 preflight 에 재컴파일 경고(⚠, 블로커 아님).
+    #[test]
+    fn compile_preflight_flags_already_stored() {
+        use crate::collect::{ModelArtifact, StoredModel};
+        let mut a = App::new();
+        a.mode = Mode::Admin;
+        a.snap = Snapshot {
+            artifacts: vec![ModelArtifact {
+                model: "koni-rbln".into(),
+                family: "kisti-koni/koni-llama3.1-8b".into(),
+                engine: "vLLM-RBLN".into(),
+                node: "etri-001".into(),
+                source: "KISTI-KONI/KONI-Llama3.1-8B-Instruct".into(),
+                mount: "/mnt/store".into(),
+                opts: vec![],
+                ..Default::default()
+            }],
+            // 폼 기본값(tp4·s8192·RBLN-CA22)과 정확히 일치하는 산출물이 이미 스토어에 있음.
+            stored: vec![StoredModel {
+                repo: "KISTI-KONI/KONI-Llama3.1-8B-Instruct".into(),
+                family: "kisti-koni/koni-llama3.1-8b".into(),
+                format: "rbln".into(),
+                compiled_for: "rbln-ca22-tp4-s8192".into(),
+                revision: "-".into(),
+                size: "8G".into(),
+                path: "compiled/KISTI-KONI--KONI-Llama3.1-8B-Instruct/rbln/rbln-ca22-tp4-s8192/".into(),
+            }],
+            ..Default::default()
+        };
+        a.view = View::Launch;
+        a.panel_focus = 0;
+        a.selected = 0;
+        a.compile_preview();
+        let form = a.compile_form.clone().expect("rbln form");
+        assert!(a.compile_already_stored(&form).is_some(), "정확 일치 산출물 감지");
+        let pf = a.compile_preflight(&form);
+        assert!(pf.iter().any(|(_, m)| m.contains("이미 컴파일됨")), "preflight 에 재컴파일 경고");
+        // 경고는 블로커가 아니므로 ok=true(폼 진행 가능).
+        assert!(pf.iter().find(|(_, m)| m.contains("이미 컴파일됨")).map(|(ok, _)| *ok).unwrap());
+        // 옵션이 다르면(seq 변경) 다른 target → 중복 아님.
+        let mut form2 = form.clone();
+        if let Some(f) = form2.fields.iter_mut().find(|f| f.key == "max-len") {
+            f.value = "16384".into();
+        }
+        assert!(a.compile_already_stored(&form2).is_none(), "옵션 다르면 재컴파일 아님");
+    }
+
+    #[test]
+    fn compile_job_name_dns1123_bounds() {
+        // 아주 긴 모델 id 라도 63자 이하, 소문자/영숫자-하이픈, 양끝 영숫자, 타깃 식별자 보존.
+        let long = "some-org/an-extremely-long-model-name-that-easily-exceeds-the-limit-14b-instruct";
+        let repo = long.replace('/', "--");
+        let n = compile_job_name(&repo, "rbln-ca22-tp4-s8192");
+        assert!(n.len() <= 56, "len {}: {}", n.len(), n);
+        assert!(n.starts_with("compile-") && n.ends_with(|c: char| c.is_ascii_alphanumeric()));
+        assert!(n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+        // 다른 긴 모델은 (해시로) 다른 이름이어야 함.
+        let n2 = compile_job_name(&"some-org/another-extremely-long-model-name-that-also-exceeds-limit-14b".replace('/', "--"), "rbln-ca22-tp4-s8192");
+        assert_ne!(n, n2, "긴 이름도 해시로 구분");
     }
 
     #[test]
@@ -2884,6 +3212,200 @@ mod tests {
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
             t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
         }
+    }
+
+    #[test]
+    fn compile_progress_bar_renders() {
+        use crate::collect::CompileJob;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut a = App::new();
+        a.snap = Snapshot {
+            compiles: vec![
+                CompileJob {
+                    name: "compile-qwen-rbln-tp4".into(),
+                    model: "qwen05b".into(),
+                    vendor: "RBLN".into(),
+                    target: "rbln-tp4".into(),
+                    status: "Running".into(),
+                    age_secs: 42,
+                    duration_secs: None,
+                    phase: "compiling 45%".into(),
+                    progress: Some(0.45),
+                },
+                CompileJob {
+                    name: "compile-llama-rngd".into(),
+                    model: "llama".into(),
+                    vendor: "RNGD".into(),
+                    target: "rngd".into(),
+                    status: "Running".into(),
+                    age_secs: 10,
+                    duration_secs: None,
+                    phase: "loading weights".into(), // 진행률 없음 → indeterminate
+                    progress: None,
+                },
+            ],
+            ..Default::default()
+        };
+        a.view = View::Launch;
+        a.panel_focus = 3; // 진행 중 컴파일 패널
+        let mut fx = crate::ui::FxState::disabled();
+        let mut t = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if let Some(c) = buf.cell((x, y)) {
+                    text.push_str(c.symbol());
+                }
+            }
+        }
+        assert!(text.contains("45%"), "determinate bar should show parsed percent");
+        assert!(text.contains('█'), "progress bar should render filled cells");
+        assert!(text.contains('░'), "progress bar should render empty cells");
+    }
+
+    #[test]
+    fn inflight_spinner_renders_in_title() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut a = App::new();
+        a.inflight = Some("scale ds4 → 0".into());
+        let mut fx = crate::ui::FxState::disabled();
+        let mut t = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+        let buf = t.backend().buffer().clone();
+        // 타이틀 행(0)에 진행 라벨이 보여야.
+        let mut row0 = String::new();
+        for x in 0..buf.area.width {
+            if let Some(c) = buf.cell((x, 0)) {
+                row0.push_str(c.symbol());
+            }
+        }
+        assert!(row0.contains("scale ds4"), "in-flight label should render in title: {:?}", row0);
+    }
+
+    #[test]
+    fn column_sort_cycles_and_toggles_direction() {
+        let mut a = App::new();
+        let mk = |name: &str, tps: f64| {
+            let mut m = model(name);
+            m.tps = Some(tps);
+            m
+        };
+        a.snap = Snapshot {
+            models: vec![mk("aaa", 10.0), mk("bbb", 30.0), mk("ccc", 20.0)],
+            ..Default::default()
+        };
+        a.goto_view(View::Models);
+        // 기본: col0=name, 오름차순.
+        assert_eq!(a.sort_label(), "name");
+        assert!(!a.sort_desc, "name column defaults ascending");
+        let names = |a: &App| a.order().iter().map(|&i| a.snap.models[i].name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&a), vec!["aaa", "bbb", "ccc"]);
+        // o 를 tok/s 컬럼까지 순환(name→status→ready→tok/s = 3회).
+        a.cycle_sort();
+        a.cycle_sort();
+        a.cycle_sort();
+        assert_eq!(a.sort_label(), "tok/s");
+        assert!(a.sort_desc, "tok/s (numeric) defaults descending");
+        assert_eq!(names(&a), vec!["bbb", "ccc", "aaa"]); // 30,20,10 내림차순
+        // O 로 방향 토글 → 오름차순.
+        a.toggle_sort_dir();
+        assert!(!a.sort_desc);
+        assert_eq!(names(&a), vec!["aaa", "ccc", "bbb"]); // 10,20,30 오름차순
+    }
+
+    #[test]
+    fn nodes_and_events_are_now_sortable() {
+        use crate::collect::{EventRow, NodeInfo};
+        let mut a = App::new();
+        a.snap = Snapshot {
+            nodes: vec![
+                NodeInfo { name: "n1".into(), cpu_pct: 20.0, ..Default::default() },
+                NodeInfo { name: "n2".into(), cpu_pct: 80.0, ..Default::default() },
+            ],
+            events: vec![
+                EventRow { typ: "Normal".into(), reason: "Started".into(), object: "p1".into(), message: "".into(), count: 1 },
+                EventRow { typ: "Warning".into(), reason: "Failed".into(), object: "p2".into(), message: "".into(), count: 5 },
+            ],
+            ..Default::default()
+        };
+        // Nodes: 이전엔 정렬 불가(sort_modes==1) → 이제 컬럼 여러 개.
+        a.goto_view(View::Nodes);
+        assert!(a.sort_modes() > 1, "Nodes should now be sortable");
+        a.cycle_sort(); // name → cpu
+        assert_eq!(a.sort_label(), "cpu");
+        // cpu 내림차순 → n2(80) 먼저.
+        assert_eq!(a.order().first().copied(), Some(1));
+        // Events: 이전엔 정렬 불가 → count 컬럼 정렬.
+        a.goto_view(View::Events);
+        assert!(a.sort_modes() > 1, "Events should now be sortable");
+        while a.sort_label() != "count" {
+            a.cycle_sort();
+        }
+        assert_eq!(a.order().first().copied(), Some(1)); // count 5 먼저(내림)
+    }
+
+    #[test]
+    fn overlay_precedence_single_source() {
+        use crate::ui::Overlay;
+        // PRECEDENCE 는 11개 variant 를 중복 없이 모두 포함해야(하나라도 빠지면 안 그려짐/안 소비됨).
+        assert_eq!(Overlay::PRECEDENCE.len(), 11);
+        let mut seen = std::collections::HashSet::new();
+        for ov in Overlay::PRECEDENCE {
+            assert!(seen.insert(format!("{:?}", ov)), "duplicate in PRECEDENCE: {:?}", ov);
+        }
+        // 아무 오버레이도 없으면 top()==None → 단일키 디스패치.
+        let mut a = App::new();
+        assert_eq!(Overlay::top(&a), None);
+        // 단독으로 열면 그 오버레이가 top.
+        a.palette = Some(crate::palette::Palette::global());
+        assert_eq!(Overlay::top(&a), Some(Overlay::Palette));
+        a.palette = None;
+        a.logs_mode = true;
+        a.preview = Some(("t".into(), "y".into()));
+        // preview 가 logs 보다 위(PRECEDENCE 순서).
+        assert_eq!(Overlay::top(&a), Some(Overlay::Preview));
+        // confirm 은 preview/logs 보다 위.
+        a.confirm = Some(Pending::Stop { name: "m1".into() });
+        assert_eq!(Overlay::top(&a), Some(Overlay::Confirm));
+        // help 가 최상위.
+        a.help = true;
+        assert_eq!(Overlay::top(&a), Some(Overlay::Help));
+    }
+
+    #[test]
+    fn palette_opens_filters_and_renders() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut a = App::new();
+        a.open_palette();
+        assert!(a.palette.is_some());
+        // "epp" 로 필터 → 최상위 선택이 EPP 뷰.
+        for c in "epp".chars() {
+            a.palette.as_mut().unwrap().push(c);
+        }
+        assert_eq!(a.palette.as_ref().unwrap().selected(), Some(crate::palette::PaletteAction::Goto(View::Epp)));
+        // 오버레이가 실제로 그려지는지 — 버퍼에 프롬프트/라벨이 나타나야(패닉 없음 + 내용 검증).
+        let mut fx = crate::ui::FxState::disabled();
+        let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if let Some(c) = buf.cell((x, y)) {
+                    text.push_str(c.symbol());
+                }
+            }
+        }
+        assert!(text.contains("command palette"), "palette title should render");
+        assert!(text.contains("EPP"), "filtered EPP row should render");
+        // 작은 터미널에서도 패닉 없이.
+        let mut t2 = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        t2.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
     }
 }
 

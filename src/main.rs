@@ -4,6 +4,7 @@
 
 mod agent;
 mod app;
+mod audit;
 mod cast;
 mod catalog;
 mod collect;
@@ -13,6 +14,7 @@ mod doctor;
 mod kube;
 mod metrics;
 mod ops;
+mod palette;
 mod prom;
 mod ui;
 
@@ -44,6 +46,7 @@ OPTIONS:
     --mode <MODE>    permission mode: observe (default) | debug | admin | danger
     --json           print machine-readable agent state (JSON) and exit
     --doctor         survey Prometheus: exporters, metric coverage, gaps
+    --audit          print the audit log of applied mutations, then exit
     --snapshot, -s   collect once, print headless text summary
     --render         render each view to text via TestBackend (CI / no-tty)
     --cast [FILE]    write a demo asciicast (default: docs/demo.cast)
@@ -54,6 +57,7 @@ ENVIRONMENT:
     LMD_NS           namespace (default: llm-serving)
     LMD_GRAFANA      Grafana base URL (opened by the `g` key)
     LMD_THEME        startup theme: soft | default | high-contrast | colorblind
+    LMD_AUDIT        audit log path (default: ~/.config/lmd-top/audit.log)
     LMD_W / LMD_H    size for --render
 
 With no options, lmd-top launches the interactive TUI. See `?` in the TUI for keybindings.";
@@ -74,7 +78,7 @@ fn check_args(args: &[String]) -> ArgCheck {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         return ArgCheck::Help;
     }
-    const NOVALUE: &[&str] = &["--doctor", "--json", "--snapshot", "-s", "--render"];
+    const NOVALUE: &[&str] = &["--doctor", "--json", "--snapshot", "-s", "--render", "--audit"];
     let mut i = 1;
     while i < args.len() {
         let a = args[i].as_str();
@@ -139,6 +143,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // 감사 로그 열람 — lmd-top 이 적용한 변경 작업 이력(파일)을 출력.
+    if args.iter().any(|a| a == "--audit") {
+        audit::print_log();
+        return Ok(());
+    }
+
     // 기계가독 상태(agent) — --json (또는 --snapshot --json). 1회 수집 후 JSON 출력.
     if args.iter().any(|a| a == "--json") {
         let snap = collect(&cfg).await;
@@ -174,6 +184,150 @@ async fn main() -> Result<()> {
         .unwrap_or(Mode::Observe);
 
     run_tui(cfg, mode).await
+}
+
+/// 변경 작업 실행 결과 — 워커 스레드에서 kube 호출 후 메인 스레드로 전달돼 audit/UI 반영.
+/// kube 호출을 UI 스레드 밖으로 빼 렌더가 얼지 않게 한다(최대 8s 프리즈 제거).
+struct MutationOutcome {
+    mode: Mode,
+    audit_action: String,       // audit 로그 action 필드
+    audit_target: String,       // audit 로그 target 필드
+    fail_label: &'static str,   // 실패 시 창 제목(show_fail)
+    result: Result<OkInfo, String>, // Ok=성공 표시정보 / Err=실패 이유(1줄+)
+}
+/// 성공 시 표시 정보 — audit 상세, 토스트 문구, preview 닫기 여부(Apply 성공).
+struct OkInfo {
+    audit_detail: String,
+    notify: String,
+    clear_preview: bool,
+}
+
+/// 확정된 변경 작업을 실제 kubectl 로 수행하고 결과를 MutationOutcome 으로. (워커 스레드용)
+/// 모든 분기가 kube 를 호출하므로 실클러스터 없이는 단위검증 불가 — 결과 처리는 apply_outcome 에서(검증 가능).
+fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
+    let mk = |audit_action: String, audit_target: String, fail_label: &'static str, result: Result<OkInfo, String>| MutationOutcome {
+        mode,
+        audit_action,
+        audit_target,
+        fail_label,
+        result,
+    };
+    match pending {
+        Pending::Scale { name, target } => {
+            let r = kube::scale_deploy(ns, &name, target)
+                .map(|_| OkInfo { audit_detail: "scaled".into(), notify: format!("scaled {} → {}", name, target), clear_preview: false })
+                .map_err(|e| e.to_string());
+            mk(format!("scale→{}", target), name, "scale", r)
+        }
+        Pending::Restart { name } => {
+            let r = kube::rollout_restart(ns, &name)
+                .map(|_| OkInfo { audit_detail: "restarted".into(), notify: format!("rollout restart {}", name), clear_preview: false })
+                .map_err(|e| e.to_string());
+            mk("rollout-restart".into(), name, "restart", r)
+        }
+        Pending::Stop { name } => {
+            let r = kube::scale_deploy(ns, &name, 0)
+                .map(|_| OkInfo { audit_detail: "stopped".into(), notify: format!("stopped {} (scaled → 0)", name), clear_preview: false })
+                .map_err(|e| e.to_string());
+            mk("stop(scale→0)".into(), name, "stop", r)
+        }
+        Pending::Cordon { node, on } => {
+            let act = if on { "cordon" } else { "uncordon" };
+            let r = kube::cordon(&node, on)
+                .map(|_| OkInfo { audit_detail: "ok".into(), notify: format!("{} {}", if on { "cordoned" } else { "uncordoned" }, node), clear_preview: false })
+                .map_err(|e| e.to_string());
+            mk(act.into(), node, "cordon", r)
+        }
+        Pending::DeletePod { name } => {
+            let r = kube::delete_pod(ns, &name)
+                .map(|_| OkInfo { audit_detail: "deleted".into(), notify: format!("deleted pod {}", name), clear_preview: false })
+                .map_err(|e| e.to_string());
+            mk("delete-pod".into(), name, "delete", r)
+        }
+        Pending::DeleteJob { name } => {
+            let r = kube::delete_job(ns, &name)
+                .map(|_| OkInfo { audit_detail: "deleted".into(), notify: format!("deleted job {}", name), clear_preview: false })
+                .map_err(|e| e.to_string());
+            mk("delete-job".into(), name, "delete job", r)
+        }
+        Pending::RouteRename { route, old, new } => {
+            let r = kube::route_set_path(ns, &route, &old, &new)
+                .map(|_| OkInfo { audit_detail: "renamed".into(), notify: format!("renamed route {} → {}", old, new), clear_preview: false })
+                .map_err(|e| e.to_string());
+            mk(format!("route-rename→{}", new), format!("{}:{}", route, old), "route rename", r)
+        }
+        Pending::RouteRetarget { route, path, backend, kind } => {
+            let r = kube::route_retarget(ns, &route, &path, &backend, &kind)
+                .map(|_| OkInfo { audit_detail: "retargeted".into(), notify: format!("retargeted {} → {}", path, backend), clear_preview: false })
+                .map_err(|e| e.to_string());
+            mk(format!("route-retarget→{}:{}", kind, backend), format!("{}:{}", route, path), "route retarget", r)
+        }
+        Pending::RouteDelete { route, path } => {
+            let r = kube::route_delete_rule(ns, &route, &path)
+                .map(|_| OkInfo { audit_detail: "deleted".into(), notify: format!("deleted route {}", path), clear_preview: false })
+                .map_err(|e| e.to_string());
+            mk("route-delete".into(), format!("{}:{}", route, path), "route delete", r)
+        }
+        Pending::Apply { yaml, title } => {
+            let r = kube::apply_manifest(ns, &yaml, false)
+                .map(|o| {
+                    let line = o.lines().next().unwrap_or("ok").to_string();
+                    OkInfo { audit_detail: line.clone(), notify: format!("applied — {}", line), clear_preview: true }
+                })
+                .map_err(|e| e.to_string());
+            mk("apply".into(), title, "apply", r)
+        }
+    }
+}
+
+/// 변경 작업 결과를 audit 로그 + UI(토스트/실패 preview)에 반영. (메인 스레드, 단위검증 가능)
+fn apply_outcome(app: &mut App, o: MutationOutcome) {
+    match o.result {
+        Ok(ok) => {
+            audit::record(o.mode, &o.audit_action, &o.audit_target, Ok(&ok.audit_detail));
+            if ok.clear_preview {
+                app.preview = None;
+            }
+            app.notify(ok.notify);
+        }
+        Err(e) => {
+            audit::record(o.mode, &o.audit_action, &o.audit_target, Err(&e));
+            // 실패 이유는 사라지는 토스트가 아니라 스크롤 가능한 창으로.
+            app.notify(format!("{} 실패 — 자세한 이유는 창 참고", o.fail_label));
+            app.preview = Some((format!("⚠ {} 실패 — 이유 (q 닫기)", o.fail_label), e));
+            app.preview_scroll = 0;
+            app.preview_apply = false;
+        }
+    }
+}
+
+/// 커맨드 팔레트 선택 실행 — 네비게이션·표시 액션 전용(클러스터 무변경, 권한 불필요).
+fn dispatch_palette(
+    app: &mut App,
+    pa: palette::PaletteAction,
+    cfg: &Config,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
+    use palette::PaletteAction::*;
+    match pa {
+        Goto(v) => app.goto_view(v),
+        Help => app.toggle_help(),
+        Alerts => app.toggle_alerts(),
+        Theme => app.cycle_theme(),
+        Pause => app.paused = !app.paused,
+        Zoom => app.zoom = !app.zoom,
+        Grafana => {
+            let base = cfg.grafana.clone();
+            let _ = std::process::Command::new("xdg-open")
+                .arg(&base)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            app.notify(format!("Grafana: {}", base));
+            terminal.clear().ok();
+        }
+    }
 }
 
 /// 액션 메뉴에서 고른 동작 실행 — 권한 게이팅 포함. 폼/확인은 오버레이로, 로그는 즉시.
@@ -244,6 +398,13 @@ fn dispatch_action(app: &mut App, action: app::Action, subject: &str, ns: &str, 
                 app.notify(format!("delete needs --mode admin+ (current: {})", app.mode.name()));
             } else {
                 app.confirm = Some(Pending::DeletePod { name: subject.to_string() });
+            }
+        }
+        Action::DeleteJob => {
+            if !app.can(Mode::Admin) {
+                app.notify(format!("delete needs --mode admin+ (current: {})", app.mode.name()));
+            } else {
+                app.confirm = Some(Pending::DeleteJob { name: subject.to_string() });
             }
         }
         Action::Objective => app.open_objective_form(), // 목표 설정(관측 전용, 권한 불필요)
@@ -439,11 +600,18 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
     app.ns = ns.clone(); // 매니페스트/액션 네임스페이스 = cfg.ns(LMD_NS)
     app::set_theme(cfg.theme); // 시작 테마(LMD_THEME / yaml)
     let mut fx = ui::FxState::new();
+    // 변경 작업 결과 채널 — 워커 스레드가 kube 실행 후 결과를 보내고, 메인 루프가 drain 해 반영.
+    let (mut_tx, mut_rx) = std::sync::mpsc::channel::<MutationOutcome>();
     let result = (|| -> Result<()> {
         loop {
             if !app.paused {
                 let snap = shared.lock().map(|g| g.clone()).unwrap_or_default();
                 app.apply(snap);
+            }
+            // 완료된 변경 작업 반영(audit + 토스트/실패창). in-flight 해제.
+            while let Ok(outcome) = mut_rx.try_recv() {
+                app.inflight = None;
+                apply_outcome(&mut app, outcome);
             }
             app.tick = app.tick.wrapping_add(1);
             terminal.draw(|f| ui::draw(f, &app, &mut fx))?;
@@ -471,6 +639,38 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                             KeyCode::Backspace => app.filter_pop(),
                             KeyCode::Char(c) => app.filter_push(c),
                             _ => {}
+                        }
+                        continue;
+                    }
+                    // 커맨드 팔레트(`:`) — 텍스트 캡처 + 퍼지 선택. Enter 실행, Esc 닫기.
+                    if app.palette.is_some() {
+                        let action = match k.code {
+                            KeyCode::Esc => {
+                                app.palette = None;
+                                None
+                            }
+                            KeyCode::Backspace => {
+                                app.palette.as_mut().unwrap().pop();
+                                None
+                            }
+                            KeyCode::Up => {
+                                app.palette.as_mut().unwrap().move_cursor(-1);
+                                None
+                            }
+                            KeyCode::Down => {
+                                app.palette.as_mut().unwrap().move_cursor(1);
+                                None
+                            }
+                            KeyCode::Enter => app.palette.as_ref().unwrap().selected(),
+                            KeyCode::Char(c) => {
+                                app.palette.as_mut().unwrap().push(c);
+                                None
+                            }
+                            _ => None,
+                        };
+                        if let Some(pa) = action {
+                            app.palette = None;
+                            dispatch_palette(&mut app, pa, &cfg, &mut terminal);
                         }
                         continue;
                     }
@@ -518,54 +718,19 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                             app.notify("cancelled".to_string());
                             continue;
                         }
-                        // 실패 시 전체 이유를 preview(스크롤 가능)로 표시 — 토스트로 사라지지 않게.
-                        fn show_fail(app: &mut App, what: &str, detail: String) {
-                            app.notify(format!("{} 실패 — 자세한 이유는 창 참고", what));
-                            app.preview = Some((format!("⚠ {} 실패 — 이유 (q 닫기)", what), detail));
-                            app.preview_scroll = 0;
-                            app.preview_apply = false;
+                        // 변경 작업은 워커 스레드로 실행 — kube(최대 8s)가 UI 를 얼리지 않게.
+                        // 결과는 mut_rx 로 받아 메인 루프에서 apply_outcome(audit + 토스트/실패창).
+                        if app.inflight.is_some() {
+                            app.notify("변경 작업 진행 중 — 완료 후 다시 시도".to_string());
+                            continue;
                         }
-                        match pending {
-                            Pending::Scale { name, target } => match kube::scale_deploy(&ns, &name, target) {
-                                Ok(_) => app.notify(format!("scaled {} → {}", name, target)),
-                                Err(e) => show_fail(&mut app, "scale", e.to_string()),
-                            },
-                            Pending::Restart { name } => match kube::rollout_restart(&ns, &name) {
-                                Ok(_) => app.notify(format!("rollout restart {}", name)),
-                                Err(e) => show_fail(&mut app, "restart", e.to_string()),
-                            },
-                            Pending::Stop { name } => match kube::scale_deploy(&ns, &name, 0) {
-                                Ok(_) => app.notify(format!("stopped {} (scaled → 0)", name)),
-                                Err(e) => show_fail(&mut app, "stop", e.to_string()),
-                            },
-                            Pending::Cordon { node, on } => match kube::cordon(&node, on) {
-                                Ok(_) => app.notify(format!("{} {}", if on { "cordoned" } else { "uncordoned" }, node)),
-                                Err(e) => show_fail(&mut app, "cordon", e.to_string()),
-                            },
-                            Pending::DeletePod { name } => match kube::delete_pod(&ns, &name) {
-                                Ok(_) => app.notify(format!("deleted pod {}", name)),
-                                Err(e) => show_fail(&mut app, "delete", e.to_string()),
-                            },
-                            Pending::RouteRename { route, old, new } => match kube::route_set_path(&ns, &route, &old, &new) {
-                                Ok(_) => app.notify(format!("renamed route {} → {}", old, new)),
-                                Err(e) => show_fail(&mut app, "route rename", e.to_string()),
-                            },
-                            Pending::RouteRetarget { route, path, backend, kind } => match kube::route_retarget(&ns, &route, &path, &backend, &kind) {
-                                Ok(_) => app.notify(format!("retargeted {} → {}", path, backend)),
-                                Err(e) => show_fail(&mut app, "route retarget", e.to_string()),
-                            },
-                            Pending::RouteDelete { route, path } => match kube::route_delete_rule(&ns, &route, &path) {
-                                Ok(_) => app.notify(format!("deleted route {}", path)),
-                                Err(e) => show_fail(&mut app, "route delete", e.to_string()),
-                            },
-                            Pending::Apply { yaml, .. } => match kube::apply_manifest(&ns, &yaml, false) {
-                                Ok(o) => {
-                                    app.preview = None;
-                                    app.notify(format!("applied — {}", o.lines().next().unwrap_or("ok")));
-                                }
-                                Err(e) => show_fail(&mut app, "apply", e.to_string()),
-                            },
-                        }
+                        app.inflight = Some(pending.prompt());
+                        let tx = mut_tx.clone();
+                        let ns2 = ns.clone();
+                        let amode = app.mode;
+                        std::thread::spawn(move || {
+                            let _ = tx.send(run_mutation(pending, &ns2, amode));
+                        });
                         continue;
                     }
                     // 알림 히스토리 오버레이: esc/q/A 로 닫기(다른 키 무시)
@@ -790,6 +955,12 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                         }
                         continue;
                     }
+                    // 안전장치: 오버레이가 열려 있으면 배경(단일키)으로 키가 새지 않게.
+                    // 위 오버레이 블록들이 각각 continue 하므로 평시엔 도달 불가지만,
+                    // 새 오버레이가 입력 블록을 빠뜨려도 Overlay 단일 출처가 누수를 막는다.
+                    if ui::Overlay::top(&app).is_some() {
+                        continue;
+                    }
                     match k.code {
                         KeyCode::Char('q') => break, // 종료는 q 만
                         KeyCode::Esc => {
@@ -833,6 +1004,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                             terminal.clear().ok(); // 혹시 모를 잔상 제거 → 전체 재그리기
                         }
                         KeyCode::Char('/') => app.start_filter(),
+                        KeyCode::Char(':') => app.open_palette(), // 커맨드 팔레트(뷰/표시 액션 퍼지 검색)
                         KeyCode::Enter => {
                             if app.view == View::Perf {
                                 // 선택 모델 지연 분포 온디맨드 조회 → 히스토그램 드릴
@@ -854,6 +1026,7 @@ fn ui_loop(shared: Arc<Mutex<collect::Snapshot>>, cfg: Config, mode: Mode, rt: t
                             }
                         }
                         KeyCode::Char('o') => app.cycle_sort(),
+                        KeyCode::Char('O') => app.toggle_sort_dir(), // 정렬 방향 토글(오름/내림)
                         KeyCode::Tab => app.next_tab(),
                         KeyCode::BackTab => app.prev_tab(), // Shift+Tab → 이전 뷰
                         KeyCode::Char('w') => app.cycle_panel(), // 멀티패널 뷰에서 활성 패널 순환
@@ -1066,10 +1239,65 @@ fn print_snapshot(s: &collect::Snapshot, cfg: &Config) {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_args, ArgCheck};
+    use super::{apply_outcome, check_args, ArgCheck, MutationOutcome, OkInfo};
+    use super::{App, Mode};
 
     fn args(v: &[&str]) -> Vec<String> {
         std::iter::once("lmd-top").chain(v.iter().copied()).map(String::from).collect()
+    }
+
+    #[test]
+    fn apply_outcome_success_notifies_and_clears_preview() {
+        let _g = crate::audit::TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let path = std::env::temp_dir().join("lmd-audit-outcome-ok.log");
+        let _ = std::fs::remove_file(&path);
+        std::env::set_var("LMD_AUDIT", &path);
+        let mut app = App::new();
+        app.preview = Some(("stale".into(), "y".into())); // Apply 성공이면 닫혀야
+        apply_outcome(
+            &mut app,
+            MutationOutcome {
+                mode: Mode::Admin,
+                audit_action: "apply".into(),
+                audit_target: "manifest-x".into(),
+                fail_label: "apply",
+                result: Ok(OkInfo { audit_detail: "created".into(), notify: "applied — created".into(), clear_preview: true }),
+            },
+        );
+        std::env::remove_var("LMD_AUDIT");
+        assert!(app.preview.is_none(), "Apply 성공은 preview 를 닫아야");
+        assert_eq!(app.toast.as_deref(), Some("applied — created"));
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("\tapply\tmanifest-x\tok\tcreated"), "audit ok line: {}", body);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_outcome_failure_opens_preview_and_audits_fail() {
+        let _g = crate::audit::TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let path = std::env::temp_dir().join("lmd-audit-outcome-err.log");
+        let _ = std::fs::remove_file(&path);
+        std::env::set_var("LMD_AUDIT", &path);
+        let mut app = App::new();
+        apply_outcome(
+            &mut app,
+            MutationOutcome {
+                mode: Mode::Admin,
+                audit_action: "scale→2".into(),
+                audit_target: "ds4".into(),
+                fail_label: "scale",
+                result: Err("Error from server: forbidden\ntrace...".into()),
+            },
+        );
+        std::env::remove_var("LMD_AUDIT");
+        // 실패 이유는 스크롤 가능한 창으로(사라지는 토스트 아님).
+        let (title, detail) = app.preview.as_ref().expect("failure opens preview");
+        assert!(title.contains("scale"), "title: {}", title);
+        assert!(detail.contains("forbidden"));
+        assert!(!app.preview_apply);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("\tscale→2\tds4\tFAIL\t"), "audit fail line: {}", body);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

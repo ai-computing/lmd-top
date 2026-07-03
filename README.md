@@ -80,6 +80,7 @@ lmd-top                      # launch the TUI (permission mode: observe)
 lmd-top --mode admin         # allow scale / rollout actions
 lmd-top --json               # print machine-readable agent state (JSON)
 lmd-top --doctor             # survey Prometheus: exporters, metric coverage, gaps
+lmd-top --audit              # print the audit log of applied mutations
 lmd-top --snapshot | --render | --cast   # headless text / CI render / demo asciicast
 LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # point at another cluster
 ```
@@ -87,19 +88,23 @@ LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # point at another cluster
 **Permission modes** (`--mode`, shown as a header badge) gate mutating actions:
 `observe` (default, view only) → `debug` (adds logs, `l`) → `admin` (adds `scale`, with a
 y/n confirmation) → `danger` (reserved). Admin actions always ask before applying.
+Every applied mutation (scale, stop, restart, cordon, delete, route edit, apply) is appended
+to an **audit log** (`~/.config/lmd-top/audit.log`, or `$LMD_AUDIT`) with timestamp, mode,
+action, target, and result — view it with `lmd-top --audit`.
 
 **Keys.**
 
 | | |
 |---|---|
 | Navigate | `↑↓`/`kj` select · `⏎` action menu (or drill) · `w` Nodes-hub / panel focus · `←→` step · `p i r e m` cross-layer pivot |
-| Act | `/` filter · `o` sort · `y` live YAML · `l` logs · action menu → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (admin gated, y/n confirm) |
+| Act | `/` filter · `:` command palette (fuzzy-jump to any view/display action) · `o`/`O` column sort (cycle column / toggle ▲▼) · `y` live YAML · `l` logs · action menu → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (admin gated, y/n confirm) |
 | Display | `t` theme · `f` animations · `z` zoom · `Space` pause · `g` Grafana · `A` alerts · `?` help · `q` quit |
 
 **Environment.**
 
 - `LMD_PROM`, `LMD_NS` (default `llm-serving`), `LMD_GRAFANA` — point it at your cluster.
 - `LMD_THEME` — startup theme: `soft`, `default`, `high-contrast`, or `colorblind`.
+- `LMD_AUDIT` — audit log path (default: `~/.config/lmd-top/audit.log`).
 - `LMD_W` / `LMD_H` — the `--render` size.
 - `LMD_COMPILE_IMAGE_RBLN`, `LMD_COMPILE_IMAGE_FURIOSA`, `LMD_SERVING_IMAGE` — container images for the generated compile/deploy manifests. Until set, those fields are `TODO-…` placeholders and the in-app apply (`a`) is blocked; `w` still saves the manifest to edit by hand.
 - `LMD_SAVE_DIR` — where `w` writes saved manifests (default: current dir).

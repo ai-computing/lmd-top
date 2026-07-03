@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::app::App;
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 /// NPU 컴파일 옵션 편집 폼 오버레이 — ↑↓ 필드, ←→ 프리셋, e 커스텀 입력, Enter 매니페스트.
 /// 선택 인프라 대비 메모리 적합성(OOM/tight)과 조정 제안을 실시간 표시.
@@ -85,8 +85,17 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
         Style::default().fg(if pf_ok { C_OK() } else { C_BAD() }).add_modifier(Modifier::BOLD),
     )));
     for (ok, msg) in &pf {
-        let (g, c) = if *ok { ("✓", C_DIM()) } else { ("✗", C_BAD()) };
-        lines.push(Line::from(Span::styled(format!("   {} {}", g, msg), Style::default().fg(c))));
+        // ⚠ 로 시작하는 메시지는 블로커(✗)가 아닌 경고(주의)로 — 노란색 ⚠ 로 눈에 띄게.
+        let warn = msg.starts_with('⚠');
+        let (g, c) = if warn {
+            ("⚠", C_WARN())
+        } else if *ok {
+            ("✓", C_DIM())
+        } else {
+            ("✗", C_BAD())
+        };
+        let text = msg.trim_start_matches('⚠').trim_start();
+        lines.push(Line::from(Span::styled(format!("   {} {}", g, text), Style::default().fg(c))));
     }
     let title = if form.editing {
         format!("compile · {} · TYPING custom — Enter/Esc confirm · Backspace del", form.vendor)
@@ -254,6 +263,65 @@ pub(super) fn action_menu_overlay(f: &mut Frame, app: &App) {
     );
 }
 
+/// 커맨드 팔레트 오버레이(`:`) — 쿼리 줄 + 퍼지 매칭 결과(매칭 문자 강조·점수순).
+pub(super) fn palette_overlay(f: &mut Frame, app: &App) {
+    let Some(p) = &app.palette else { return };
+    let full = f.area();
+    let rows = p.rows();
+    let w = 56u16;
+    // 최대 12행 표시(넘치면 커서 주변만).
+    let visible = rows.len().min(12);
+    let h = (visible as u16) + 4;
+    let area = centered(full, w, h.min(full.height.saturating_sub(2)));
+    f.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    // 쿼리 프롬프트.
+    lines.push(Line::from(vec![
+        Span::styled(" : ", Style::default().fg(Color::Black).bg(C_ACC()).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {}", p.query), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled("▏", Style::default().fg(C_ACC())),
+    ]));
+    lines.push(Line::from(""));
+
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled("  (no match)", Style::default().fg(C_DIM()))));
+    } else {
+        // 커서가 보이도록 윈도우 시작 계산.
+        let cursor = rows.iter().position(|r| r.3).unwrap_or(0);
+        let start = cursor.saturating_sub(visible.saturating_sub(1));
+        for (label, hint, idx, active) in rows.iter().skip(start).take(visible) {
+            let marker = if *active { "▶ " } else { "  " };
+            let base = if *active {
+                Style::default().fg(C_HL()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let mut sp = vec![Span::styled(marker, base)];
+            // 라벨 — 매칭된 char 는 accent+bold 로 강조.
+            for (ci, ch) in label.chars().enumerate() {
+                let st = if idx.contains(&ci) {
+                    Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else {
+                    base
+                };
+                sp.push(Span::styled(ch.to_string(), st));
+            }
+            // 힌트(오른쪽 흐리게).
+            sp.push(Span::styled(format!("  · {}", hint), Style::default().fg(C_DIM())));
+            let mut line = Line::from(sp);
+            if *active {
+                line.style = Style::default().bg(C_HL());
+            }
+            lines.push(line);
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(block("command palette · type to filter · ↑↓ + Enter · Esc")),
+        area,
+    );
+}
+
 /// 모델명 → 안정적인 색(디바이스 점유 LED 를 모델별로 구분). 이름 해시로 팔레트 선택.
 pub(super) fn model_color(name: &str) -> Color {
     // 테마 무관하게 잘 보이는 6색 팔레트.
@@ -363,7 +431,8 @@ pub(super) fn preview_overlay(f: &mut Frame, app: &App) {
         })
         .collect();
     f.render_widget(
-        Paragraph::new(lines).scroll((app.preview_scroll, 0)).block(block(&format!(
+        // 실패 이유(kubectl 에러)는 한 줄이 매우 길어 가로로 잘리므로 줄바꿈(wrap)으로 전부 보이게.
+        Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((app.preview_scroll, 0)).block(block(&format!(
             "{} · ↑↓ scroll · w save{} · q close",
             title,
             if app.preview_apply { " · v validate · a apply(admin)" } else { "" }

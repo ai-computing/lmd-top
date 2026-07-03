@@ -163,6 +163,7 @@ pub enum Action {
     Uncordon, // 노드 스케줄 해제
     Yaml,      // live YAML 보기(읽기전용)
     Delete,    // 파드 삭제(재스케줄)
+    DeleteJob, // 컴파일 Job 삭제(취소·정리)
     Objective, // 서빙 목표(SLO) 설정
     RouteRename,   // 라우트 경로 변경(HTTPRoute path)
     RouteRetarget, // 라우트 백엔드 변경
