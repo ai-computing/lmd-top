@@ -12,7 +12,7 @@ pub enum Sev {
 }
 
 /// 권한 모드(운영 사고 방지) — 선언 순서 = 권한 레벨(Observe < … < Danger).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Mode {
     Observe, // 보기만
     Debug,   // + logs / dry-run
@@ -344,7 +344,7 @@ impl App {
             prev_restarts: HashMap::new(),
             mode: Mode::Observe,
             confirm: None,
-            confirm_yes: true, // 기본 Yes — 팝업에서 Enter 만 눌러도 진행(←→ 로 No 선택 가능)
+            confirm_yes: false, // 기본 No — Enter 로는 취소, 명시적으로 Yes 를 골라야 진행
             inflight: None,
             route_form: None,
             palette: None,
@@ -1715,7 +1715,7 @@ impl App {
         );
         // 자동화: YAML 덤프 대신 바로 apply 확인 팝업. (YAML 은 팝업에서 e=vi 편집·v=검증)
         self.confirm = Some(Pending::Apply { title: format!("compile {} → {}", form.model, target), yaml });
-        self.confirm_yes = true;
+        self.confirm_yes = false;
     }
 
     /// 모델 이름에서 파라미터 수(B) 추정 — "8B", "1.5b", "0.5B", "32b" 등 첫 매치.
@@ -1994,6 +1994,7 @@ impl App {
             View::Routing if self.panel_focus == 0 => {
                 // Flow 의 선택된 라우트 — 경로 관리.
                 let Some(r) = self.selected_route() else { return };
+                items.push(ActionItem { key: 'i', label: "Backend", desc: "jump to backend model detail", action: Action::Info });
                 items.push(ActionItem { key: 'r', label: "Rename", desc: "change gateway path (/accel/model)", action: Action::RouteRename });
                 items.push(ActionItem { key: 't', label: "Retarget", desc: "point path at another pool/service", action: Action::RouteRetarget });
                 items.push(ActionItem { key: 'D', label: "Delete", desc: "remove this route rule", action: Action::RouteDelete });
@@ -2465,7 +2466,7 @@ impl App {
         };
         // 자동화: YAML 을 덤프하지 않고 바로 apply 확인 팝업. (YAML 은 팝업에서 e=vi 편집·v=검증)
         self.confirm = Some(Pending::Apply { title: format!("deploy {} ×{}", form.model, replicas), yaml });
-        self.confirm_yes = true;
+        self.confirm_yes = false;
     }
 
     /// llm-d 게이트웨이 라우팅 리소스 문서들(서빙 Deployment 뒤에 붙임).
@@ -2688,6 +2689,17 @@ mod tests {
         a.snap = Snapshot { models, pods, ..Default::default() };
         a.view = View::Models;
         a
+    }
+
+    #[test]
+    fn confirm_defaults_to_no_and_destructive_actions_need_danger() {
+        let a = App::new();
+        assert!(!a.confirm_yes, "confirmation popups should default to No");
+        assert_eq!(Action::Scale.required_mode(), Mode::Admin);
+        assert_eq!(Action::RouteRetarget.required_mode(), Mode::Admin);
+        assert_eq!(Action::Delete.required_mode(), Mode::Danger);
+        assert_eq!(Action::DeleteJob.required_mode(), Mode::Danger);
+        assert_eq!(Action::RouteDelete.required_mode(), Mode::Danger);
     }
 
     #[test]

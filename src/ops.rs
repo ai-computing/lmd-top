@@ -1,6 +1,8 @@
 //! Deploy/Compile/Objective/Action 기능의 값 타입 — App 상태(app.rs)에서 분리.
 //! 메서드(compile_*/deploy_*/objective_*/fit 등)는 app.rs 의 impl App 에 있고 여기 타입만 소유.
 
+use crate::app::Mode;
+
 /// 컴파일 옵션 편집 폼의 필드 하나. NPU 컴파일 파라미터(TP/PP/seq/batch/dtype/quant/npu).
 #[derive(Clone)]
 pub struct CompileField {
@@ -168,6 +170,48 @@ pub enum Action {
     RouteRename,   // 라우트 경로 변경(HTTPRoute path)
     RouteRetarget, // 라우트 백엔드 변경
     RouteDelete,   // 라우트 규칙 삭제
+}
+
+impl Action {
+    /// Minimum permission required to execute the action.
+    /// This is the single source for menus, dispatch gating, and agent/action export.
+    pub fn required_mode(self) -> Mode {
+        match self {
+            Action::Info | Action::Yaml | Action::Objective => Mode::Observe,
+            Action::Logs => Mode::Debug,
+            Action::Compile(_)
+            | Action::Deploy
+            | Action::Stop
+            | Action::Scale
+            | Action::Restart
+            | Action::Cordon
+            | Action::Uncordon
+            | Action::RouteRename
+            | Action::RouteRetarget => Mode::Admin,
+            Action::Delete | Action::DeleteJob | Action::RouteDelete => Mode::Danger,
+        }
+    }
+
+    pub fn risk_label(self) -> &'static str {
+        self.required_mode().name()
+    }
+
+    pub fn verb(self) -> &'static str {
+        match self {
+            Action::Info => "info",
+            Action::Compile(_) => "compile",
+            Action::Deploy => "deploy",
+            Action::Stop => "stop",
+            Action::Logs => "logs",
+            Action::Scale => "scale",
+            Action::Restart => "restart",
+            Action::Cordon | Action::Uncordon => "cordon",
+            Action::Yaml => "yaml",
+            Action::Delete | Action::DeleteJob => "delete",
+            Action::Objective => "objective",
+            Action::RouteRename | Action::RouteRetarget | Action::RouteDelete => "route edit",
+        }
+    }
 }
 
 /// 라우트 편집 폼 — rename(경로 텍스트) 또는 retarget(백엔드 선택).

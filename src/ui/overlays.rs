@@ -233,7 +233,7 @@ pub(super) fn route_form_overlay(f: &mut Frame, app: &App) {
 pub(super) fn action_menu_overlay(f: &mut Frame, app: &App) {
     let Some(menu) = &app.action_menu else { return };
     let full = f.area();
-    let w = 58u16;
+    let w = 70u16.min(full.width.saturating_sub(2));
     let h = (menu.items.len() as u16) + 4;
     let area = centered(full, w, h.min(full.height.saturating_sub(2)));
     f.render_widget(Clear, area);
@@ -246,10 +246,18 @@ pub(super) fn action_menu_overlay(f: &mut Frame, app: &App) {
         } else {
             Style::default().fg(Color::Gray)
         };
+        let mode = it.action.required_mode();
+        let mcol = match mode {
+            crate::app::Mode::Observe => C_DIM(),
+            crate::app::Mode::Debug => C_ACC(),
+            crate::app::Mode::Admin => C_WARN(),
+            crate::app::Mode::Danger => C_BAD(),
+        };
         let mut line = Line::from(vec![
             Span::styled(marker, base),
             Span::styled(format!("[{}] ", it.key), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
             Span::styled(format!("{:<9}", it.label), base),
+            Span::styled(format!("{:<7}", it.action.risk_label()), Style::default().fg(mcol)),
             Span::styled(it.desc.to_string(), Style::default().fg(C_DIM())),
         ]);
         if active {

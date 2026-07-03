@@ -2,7 +2,7 @@
 //! 화면 파싱 없이 AI agent 가 상태·가능 액션을 이해하도록 큐레이트된 안정 스키마를 내보낸다.
 //! 내부 Snapshot 과 분리된 스키마 → 내부 리팩터가 계약을 깨지 않음. schema 버전으로 관리.
 
-use crate::app::{diagnose, snapshot_alerts, Sev};
+use crate::app::{diagnose, snapshot_alerts, Action, Sev};
 use crate::collect::Snapshot;
 use crate::config::Config;
 use serde::Serialize;
@@ -366,20 +366,81 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
         .map(|a| Alrt { severity: sev_str(a.sev), key: a.key, message: a.msg })
         .collect();
 
-    // 가능한 액션: 모델별 scale 토글(권한 admin, 확인 필요) — UI 의 `s` 와 동일.
-    let actions = s
-        .models
-        .iter()
-        .map(|m| {
+    let mut actions: Vec<Act> = Vec::new();
+    let mut push_action = |id: String, label: String, action: Action, confirm: bool| {
+        actions.push(Act { id, label, risk: action.risk_label(), requires_confirmation: confirm });
+    };
+    for m in &s.models {
+        push_action(
+            format!("yaml:model:{}", m.name),
+            format!("show live YAML for {}", m.name),
+            Action::Yaml,
+            false,
+        );
+        push_action(
+            format!("logs:model:{}", m.name),
+            format!("tail logs for {}", m.name),
+            Action::Logs,
+            false,
+        );
+        push_action(
+            format!("restart:{}", m.name),
+            format!("rollout restart {}", m.name),
+            Action::Restart,
+            true,
+        );
+        if m.desired > 0 {
+            push_action(
+                format!("stop:{}", m.name),
+                format!("stop {} (scale to 0)", m.name),
+                Action::Stop,
+                true,
+            );
+        }
+        {
             let target = if m.desired == 0 { 1 } else { 0 };
-            Act {
-                id: format!("scale:{}:{}", m.name, target),
-                label: format!("scale {} → {} replica(s)", m.name, target),
-                risk: "admin",
-                requires_confirmation: true,
-            }
-        })
-        .collect();
+            push_action(
+                format!("scale:{}:{}", m.name, target),
+                format!("scale {} → {} replica(s)", m.name, target),
+                Action::Scale,
+                true,
+            );
+        }
+    }
+    for r in &s.routes {
+        push_action(
+            format!("route-rename:{}:{}", r.route, r.path),
+            format!("rename route {} in {}", r.path, r.route),
+            Action::RouteRename,
+            true,
+        );
+        push_action(
+            format!("route-retarget:{}:{}", r.route, r.path),
+            format!("retarget route {} in {}", r.path, r.route),
+            Action::RouteRetarget,
+            true,
+        );
+        push_action(
+            format!("route-delete:{}:{}", r.route, r.path),
+            format!("delete route {} from {}", r.path, r.route),
+            Action::RouteDelete,
+            true,
+        );
+    }
+    for c in &s.compiles {
+        push_action(
+            format!("logs:compile:{}", c.name),
+            format!("tail logs for compile job {}", c.name),
+            Action::Logs,
+            false,
+        );
+        push_action(
+            format!("delete-job:{}", c.name),
+            format!("delete compile job {}", c.name),
+            Action::DeleteJob,
+            true,
+        );
+    }
 
     AgentState {
         schema: "lmd-top/agent-state/v2",
