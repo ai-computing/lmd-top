@@ -192,13 +192,13 @@ impl App {
         let Some(form) = self.deploy_form.as_ref() else {
             return;
         };
-        let (kind, drv) = match form.vendor {
-            "rbln" => (crate::collect::AccelKind::Rbln, "RBLN"),
-            "furiosa" => (crate::collect::AccelKind::Rngd, "RNGD"),
-            _ => (crate::collect::AccelKind::Gpu, ""),
+        let (kind, drv, res) = match form.vendor {
+            "rbln" => (crate::collect::AccelKind::Rbln, "RBLN", "rebellions.ai/ATOM"),
+            "furiosa" => (crate::collect::AccelKind::Rngd, "RNGD", "furiosa.ai/rngd"),
+            _ => (crate::collect::AccelKind::Gpu, "", "nvidia.com/gpu"),
         };
-        // 노드별 집계: (total, free, util_sum, mem_used, mem_total).
-        let mut agg: std::collections::BTreeMap<String, (i64, i64, f64, f64, f64)> =
+        // 노드별 집계: (total, util_sum, mem_used, mem_total). free 는 아래에서 총−할당으로.
+        let mut agg: std::collections::BTreeMap<String, (i64, f64, f64, f64)> =
             std::collections::BTreeMap::new();
         for a in self
             .snap
@@ -208,12 +208,9 @@ impl App {
         {
             let e = agg.entry(a.node.clone()).or_default();
             e.0 += 1;
-            if a.alive && a.busy_model.is_empty() {
-                e.1 += 1;
-            }
-            e.2 += a.util;
-            e.3 += a.mem_used_gb;
-            e.4 += a.mem_total_gb;
+            e.1 += a.util;
+            e.2 += a.mem_used_gb;
+            e.3 += a.mem_total_gb;
         }
         let pseudo = |value: &str, note: &str| PlaceRow {
             value: value.into(),
@@ -230,15 +227,26 @@ impl App {
             pseudo("any", "제약 없음 — 스케줄러가 유휴 리소스로 배치"),
             pseudo("spread", "replica 를 여러 노드에 고르게 분산"),
         ];
-        for (node, (total, free, util_sum, mu, mt)) in agg {
+        for (node, (total, util_sum, mu, mt)) in agg {
             let nd = self.snap.nodes.iter().find(|n| n.name == node);
             let ready = nd.map(|n| n.ready && !n.cordoned).unwrap_or(true);
             let has_drv =
                 drv.is_empty() || nd.map(|n| n.npu.to_uppercase().contains(drv)).unwrap_or(false);
+            // 할당(파드 requests) 기반 유휴 = 총 − 할당. 이미 배포된 파드가 잡은 디바이스는 free 에서 제외.
+            let alloc = self
+                .snap
+                .node_alloc
+                .get(&node)
+                .and_then(|m| m.get(res))
+                .copied()
+                .unwrap_or(0);
+            let free = (total - alloc).max(0);
             let note = if !ready {
                 "NotReady/cordon".into()
             } else if !has_drv {
                 format!("{} 드라이버 없음", drv)
+            } else if free == 0 {
+                format!("{} allocated", alloc)
             } else {
                 String::new()
             };

@@ -67,6 +67,7 @@ impl Accel {
             self.model.as_str()
         }
     }
+
 }
 
 /// 통합 메모리(Grace 계열 superchip: GB10/GH200/GB200/GB300) 여부 — 별도 VRAM 없이 호스트와 공유.
@@ -230,6 +231,7 @@ pub struct Snapshot {
     pub gw_addr: String,
     pub gw_ok: bool,
     pub inventory: Vec<(String, i64, i64)>, // (가속기 resource, allocatable total, 사용중 requests)
+    pub node_alloc: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>>, // node → resource → 할당(파드 requests)
     pub warnings: Vec<String>,
     pub prom_ok: bool, // Prometheus 도달 가능 여부(false 면 "가속기 없음"이 아니라 연결 문제)
 }
@@ -1345,7 +1347,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     }
 
     // ---------- 가속기 재고(런처 솔버용) ----------
-    collect_inventory(&mut snap.inventory, &mut warn).await;
+    collect_inventory(&mut snap.inventory, &mut snap.node_alloc, &mut warn).await;
 
     snap.warnings = warn;
     snap
@@ -1354,7 +1356,11 @@ pub async fn collect(cfg: &Config) -> Snapshot {
 const ACCEL_RESOURCES: [&str; 3] = ["nvidia.com/gpu", "rebellions.ai/ATOM", "furiosa.ai/rngd"];
 
 /// 노드 allocatable 합계 − 파드 requests 합계 = 여유. (가속기 resource별)
-async fn collect_inventory(inv: &mut Vec<(String, i64, i64)>, warn: &mut Vec<String>) {
+async fn collect_inventory(
+    inv: &mut Vec<(String, i64, i64)>,
+    node_alloc: &mut BTreeMap<String, BTreeMap<String, i64>>,
+    warn: &mut Vec<String>,
+) {
     let mut total: BTreeMap<String, i64> = BTreeMap::new();
     let mut used: BTreeMap<String, i64> = BTreeMap::new();
     for r in ACCEL_RESOURCES {
@@ -1390,6 +1396,7 @@ async fn collect_inventory(inv: &mut Vec<(String, i64, i64)>, warn: &mut Vec<Str
                 if phase == "Succeeded" || phase == "Failed" {
                     continue;
                 }
+                let node = p["spec"]["nodeName"].as_str().unwrap_or("").to_string();
                 if let Some(cs) = p["spec"]["containers"].as_array() {
                     for c in cs {
                         if let Some(req) = c["resources"]["requests"].as_object() {
@@ -1400,6 +1407,13 @@ async fn collect_inventory(inv: &mut Vec<(String, i64, i64)>, warn: &mut Vec<Str
                                     .and_then(|s| s.parse::<i64>().ok())
                                 {
                                     *used.get_mut(r).unwrap() += q;
+                                    if !node.is_empty() {
+                                        *node_alloc
+                                            .entry(node.clone())
+                                            .or_default()
+                                            .entry(r.to_string())
+                                            .or_insert(0) += q;
+                                    }
                                 }
                             }
                         }

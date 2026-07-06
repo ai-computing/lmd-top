@@ -2064,7 +2064,7 @@ mod tests {
             id: "d".into(),
             node: node.into(),
             util: 50.0,
-            mem_used_gb: 10.0,
+            mem_used_gb: 0.0, // 기본은 유휴(모델 미로드) — busy 파라미터로만 점유 표현
             mem_total_gb: 48.0,
             temp: 40.0,
             power: 100.0,
@@ -2313,12 +2313,19 @@ mod tests {
         };
         node.ready = true;
         node.npu = "RBLN drv3.0".into();
+        // 노드에 2개 디바이스, 그중 1개가 파드에 할당(requests)됨 → 유휴는 1.
+        let mut alloc = std::collections::BTreeMap::new();
+        alloc.insert(
+            "n-drv".to_string(),
+            std::iter::once(("rebellions.ai/ATOM".to_string(), 1)).collect(),
+        );
         a.snap = Snapshot {
             accel: vec![
-                accel(Rbln, "n-drv", true, ""),  // 유휴
-                accel(Rbln, "n-drv", true, "m"), // 점유
+                accel(Rbln, "n-drv", true, ""),
+                accel(Rbln, "n-drv", true, ""),
             ],
             nodes: vec![node],
+            node_alloc: alloc,
             ..Default::default()
         };
         a.deploy_form = Some(deploy_form("rbln", "1", "1", "any"));
@@ -2327,7 +2334,7 @@ mod tests {
         assert_eq!(p.rows[0].value, "any");
         assert_eq!(p.rows[1].value, "spread");
         let n = p.rows.iter().find(|r| r.value == "n-drv").expect("node row");
-        assert_eq!((n.total, n.free), (2, 1), "총 2 · 유휴 1");
+        assert_eq!((n.total, n.free), (2, 1), "총 2 · 할당 1 → 유휴 1");
         assert!(n.schedulable, "ready + 드라이버 → 스케줄 가능");
         // 노드 선택 → 배치 확정 + 매니페스트 생성(제출)까지. 피커·폼 닫힘, 확인 팝업에 nodeSelector 반영.
         a.place_picker.as_mut().unwrap().cursor = 2;
