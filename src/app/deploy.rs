@@ -4,18 +4,12 @@
 
 use super::*;
 
+/// Serving spec derived from the current selection:
+/// (model, model_id, engine, vendor, mount, devices_default, serve_tp_default).
+type DeploySpec = (String, String, String, &'static str, String, String, Option<String>);
+
 impl App {
-    pub(super) fn selected_deploy_spec(
-        &self,
-    ) -> Option<(
-        String,
-        String,
-        String,
-        &'static str,
-        String,
-        String,
-        Option<String>,
-    )> {
+    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
         if let Some(a) = self.selected_artifact() {
             let model_id = Self::artifact_model_id(a);
             let repo_dir = model_id.replace('/', "--");

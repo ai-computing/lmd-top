@@ -3,8 +3,6 @@
 
 use serde::Deserialize;
 
-// 일부 필드는 Deploy 뷰 v1 에선 미표시(컴파일/배포 자동화 Phase 2 에서 사용) — 파싱은 유지.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct CatModel {
     pub id: String,
@@ -16,7 +14,6 @@ pub struct CatModel {
     pub placements: Vec<CatPlacement>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct CatPlacement {
     pub engine: String,
@@ -59,17 +56,6 @@ pub enum Ready {
     Ready,         // 즉시 배포 가능(용량 충분 + 가중치/아티팩트 준비)
     NeedsArtifact, // 사전 컴파일/다운로드 산출물 필요
     NoCapacity,    // 가속기 여유 부족
-}
-
-impl Ready {
-    #[allow(dead_code)]
-    pub fn glyph(&self) -> &'static str {
-        match self {
-            Ready::Ready => "✓ ready",
-            Ready::NeedsArtifact => "⚙ needs-artifact",
-            Ready::NoCapacity => "✗ no-capacity",
-        }
-    }
 }
 
 /// 배치 후보 × 라이브 재고 → 준비상태 + 여유 수량.

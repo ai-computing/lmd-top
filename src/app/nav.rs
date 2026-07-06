@@ -250,17 +250,6 @@ impl App {
         self.nav_stack.clear();
         self.epp_weights.clear();
     }
-    /// The sub-tab reached by stepping `delta` from the current view (for prev/next preview). None if single-member.
-    #[allow(dead_code)]
-    pub fn subtab_peek(&self, delta: i64) -> Option<View> {
-        let members = self.view.section().members();
-        let n = members.len() as i64;
-        if n <= 1 {
-            return None;
-        }
-        let cur = members.iter().position(|v| *v == self.view).unwrap_or(0);
-        Some(members[((cur as i64 + delta).rem_euclid(n)) as usize])
-    }
     /// Ctrl-w — arm vi/tmux panel-focus mode (hjkl/arrows then move focus). No-op unless multi-panel.
     pub fn arm_panel_move(&mut self) {
         if self.panel_count() > 1 {
