@@ -3751,6 +3751,13 @@ fn activity_panel(f: &mut Frame, area: Rect, app: &App, active: bool) {
             )];
             if r.running_compile {
                 status_spans.extend(compile_progress_bar(r.progress, app.tick, 10));
+                // 실시간 힌트(파드 로그 마지막 줄) — 예: "downloading … 17G on disk".
+                if !r.phase.is_empty() {
+                    status_spans.push(Span::styled(
+                        format!("  {}", truncw(&r.phase, 30)),
+                        Style::default().fg(C_DIM()),
+                    ));
+                }
             }
             Row::new(vec![
                 Cell::from(kind),
@@ -3762,9 +3769,9 @@ fn activity_panel(f: &mut Frame, area: Rect, app: &App, active: bool) {
         .collect();
     let widths = [
         Constraint::Length(8),  // KIND
-        Constraint::Min(20),    // TARGET
+        Constraint::Min(18),    // TARGET
         Constraint::Length(8),  // STARTED
-        Constraint::Length(32), // STATUS (%+bar)
+        Constraint::Length(46), // STATUS (%+bar+live hint)
     ];
     let title = format!(
         "Activity · compile + deploy · l logs · D delete{}",
