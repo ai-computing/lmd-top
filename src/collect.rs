@@ -196,6 +196,7 @@ pub struct PodRow {
     pub ready: String,
     pub node: String,
     pub restarts: i64,
+    pub age_secs: u64, // 생성 후 경과(초) — 배포 시작 시각 표시용. 0=미상.
 }
 
 #[derive(Clone)]
@@ -1592,12 +1593,18 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                         }
                     }
                     let _ = rc;
+                    let age_secs = p["metadata"]["creationTimestamp"]
+                        .as_str()
+                        .and_then(parse_k8s_ts)
+                        .map(|s| now_secs().saturating_sub(s))
+                        .unwrap_or(0);
                     snap.pods.push(PodRow {
                         name,
                         phase,
                         ready: format!("{}/{}", readyc, total),
                         node,
                         restarts,
+                        age_secs,
                     });
                 }
             }

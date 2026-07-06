@@ -835,6 +835,7 @@ mod tests {
             ready: "1/1".into(),
             node: "n1".into(),
             restarts: 0,
+            age_secs: 0,
         }
     }
     fn app_with(models: Vec<ModelRow>, pods: Vec<PodRow>) -> App {
@@ -2206,6 +2207,7 @@ mod tests {
             ready: "1/1".into(),
             node: "n1".into(),
             restarts,
+            age_secs: 0,
         };
         a.apply(Snapshot {
             ts: 2,
@@ -2233,6 +2235,7 @@ mod tests {
             ready: "1/1".into(),
             node: "n1".into(),
             restarts,
+            age_secs: 0,
         };
         a.snap = Snapshot {
             pods: vec![p("healthy-abc", 0), p("crash-xyz", 5)],
@@ -2376,5 +2379,42 @@ mod tests {
         assert!(s.contains("NODE"), "picker 헤더\n{s}");
         assert!(s.contains("etri-001"), "후보 노드 행");
         assert!(s.contains("placement"), "picker 타이틀");
+    }
+
+    #[test]
+    fn activity_auto_cleans_old_done_jobs() {
+        use crate::collect::CompileJob;
+        let mk = |name: &str, status: &str, age: u64, dur: Option<u64>| CompileJob {
+            name: name.into(),
+            model: "x".into(),
+            vendor: "RBLN".into(),
+            target: "tp4".into(),
+            status: status.into(),
+            age_secs: age,
+            duration_secs: dur,
+            phase: String::new(),
+            progress: None,
+        };
+        let mut a = App::new();
+        a.snap = Snapshot {
+            compiles: vec![
+                mk("running", "Running", 100, None),      // 진행 중 → 유지
+                mk("fresh", "Complete", 200, Some(100)),  // 끝난 지 100s → 유지
+                mk("old", "Complete", 5000, Some(100)),   // 끝난 지 4900s(>30m) → 자동 감춤
+            ],
+            ..Default::default()
+        };
+        let jobs: Vec<String> = a
+            .activity_rows()
+            .iter()
+            .filter(|r| r.kind == "compile")
+            .filter_map(|r| r.job.clone())
+            .collect();
+        assert!(jobs.iter().any(|j| j == "running"), "진행 중 유지");
+        assert!(jobs.iter().any(|j| j == "fresh"), "방금 끝난 것 유지");
+        assert!(
+            !jobs.iter().any(|j| j == "old"),
+            "오래 전 끝난 것은 자동 감춤"
+        );
     }
 }
