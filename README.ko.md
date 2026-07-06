@@ -24,23 +24,23 @@
 - **네 계층을 한 화면에.** Gateway, EPP/InferencePool, 모델 서버, 하드웨어를 서로 엮어 보여주므로, 도구를 옮겨 다니지 않고도 *어떤 모델이 어디서 돌고, 요청이 어떻게 라우팅되며, 부하가 어떻게 분산되는지* 알 수 있습니다.
 - **이종 가속기를 통합해서.** NVIDIA GPU, Rebellions RBLN, Furiosa RNGD 를 나란히 표시합니다. GPU 모델과 VRAM 은 자동으로 감지하고, 통합 메모리(GB10, GH200) 는 `∪` 로 표시하며, 노드별 디스크 사용량도 함께 봅니다.
 - **EPP 를 이해합니다.** EPP `ConfigMap`(활성 scorer, 가중치, picker) 을 읽어 라우팅 결정과 파드별 큐를 시각화하고, HTTPRoute 가 실제로 InferencePool 을 거치는지 아니면 우회하는지를 진단합니다.
-- **배포 라이프사이클.** Deploy 뷰는 모델별 컴파일 변형(텐서/파이프라인 병렬, 양자화, RBLN/Furiosa NPU 옵션) 을 묶어 보여 주고, 어느 노드·디스크에 저장돼 있는지, 그리고 어디에 여유 용량이 있어 배치할 수 있는지를 알려줍니다.
+- **배포 라이프사이클.** Deploy 섹션은 하나의 `family › version › target` 트리를 두 렌즈로 나눕니다: **Serving**(지금 서빙 중 — 컴파일 타깃·replica·노드·처리량)과 **Library**(배포 가능 — 카탈로그 가능성·배치 용량·RBLN/Furiosa 컴파일 Job). 같은 트리, `Tab` 하나 차이.
 - **풍부한 터미널 UI.** LED 디바이스 그리드, 스택형 VRAM 바, braille 타임라인, 능동 알림, 로그 조회, `scale` 액션을 제공하고, 네 가지 테마와 은은한 애니메이션을 갖췄습니다. 이 모든 것이 C 의존성 없는 단일 정적 Rust 바이너리 하나에 들어 있습니다.
 
 ## 뷰
 
-숫자키 `0`–`7` 로 전환하거나 `Tab` / `Shift+Tab` 으로 순환합니다.
+네비게이션은 요청 경로(Gateway → EPP → Model → Infra)를 따르는 두 축입니다. 숫자키 `0`–`5`
+(또는 `Tab` / `Shift+Tab`)로 **섹션**을 고르고, `←` / `→`(또는 `[` / `]`)로 그 안의 **서브탭**을 순환합니다.
+멀티패널 뷰에서는 `Ctrl+w`로 패널 포커스 모드 진입(이후 `h`/`j`/`k`/`l` 또는 화살표로 이동, `Esc`로 종료) — vi/tmux 창 이동 방식.
 
-| # | 뷰 | 내용 |
-|---|---|---|
-| 0 | **Overview** | 클러스터 요약, LED 그리드, VRAM 바, 종류/노드별 가속기, EPP 경로, 모델, 한 줄 진단 |
-| 1 | **Nodes** 허브 | 노드 헬스(CPU/메모리/디스크/load + 디바이스). `w` 로 허브 순환: **노드 → 디바이스**(util/VRAM/온도/전력) **→ 서빙**(모델별 p95 QUEUE→PREFILL→DECODE→TPOT→E2E, tok/s, + SLO advisor) **→ 맵**(Canvas 토폴로지: Gateway→EPP→Pool 흐름 + 디바이스 pressure 히트맵) |
-| 2 | **Models** | 모델별 가속기/노드, ready, running/waiting, KV%, tok/s, 경로, 상태. `⏎` 액션 메뉴(Info/Compile/Deploy/Stop/Scale/Restart/Logs/YAML/Objective) |
-| 3 | **EPP** | scorer 와 가중치, picker, InferencePool 엔드포인트, 요청 분배 |
-| 4 | **Flow** | Gateway → HTTPRoute → backend → 파드, InferencePool/EPP/SLO 와 EPP 우회 진단. `⏎` 로 backend 모델 이동 |
-| 5 | **Pods** | `llm-serving` 파드(ready / phase / node / restarts). `⏎` 액션(Info/Logs/YAML/Delete) |
-| 6 | **Deploy** | 모델 라이프사이클 — 컴파일 변형(계열→build·옵션·`@노드 /경로`), 노드별 디바이스 점유, 카탈로그 배치 가능성. `⏎` 로 선택 대상에 액션(Compile→RBLN/Furiosa·Deploy·노드 Cordon 등) |
-| 7 | **Events** | Kubernetes + llm-d 이벤트(최신순). `⏎` 로 전체 메시지 |
+| # | 섹션 | 서브탭 | 내용 |
+|---|---|---|---|
+| 0 | **Overview** | — | 클러스터 요약, LED 그리드, VRAM 바, 종류/노드별 가속기, EPP 경로, 모델, 한 줄 진단 |
+| 1 | **Traffic** | Flow · EPP | **Flow**: Gateway → HTTPRoute → backend → 파드, InferencePool/EPP/SLO 와 EPP 우회 진단(`⏎` backend 모델). **EPP**: scorer/가중치, picker, InferencePool 엔드포인트, 요청 분배 |
+| 2 | **Models** | Models · Perf · Pods | **Models**: 모델별 가속기/노드·ready·running/waiting·KV%·tok/s·경로·상태. **Perf**: p95 QUEUE→PREFILL→DECODE→TPOT→E2E·tok/s·SLO advisor. **Pods**: `llm-serving` 파드. `⏎` 액션 메뉴 |
+| 3 | **Infra** | Nodes · Devices · Topology | **Nodes**: 노드 헬스(CPU/메모리/디스크/load). **Devices**: 디바이스별 util/VRAM/온도/전력. **Topology**: Canvas Gateway→EPP→Pool 흐름 + pressure 히트맵 |
+| 4 | **Deploy** | Serving · Library | 하나의 `family › version › target` 트리를 두 렌즈로. **Serving**: 지금 서빙 중 — 상태·컴파일 타깃·replica·`@노드`·tok/s (`⏎` → Stop/Scale/Restart/YAML/Logs). **Library**: 배포 가능 — 카탈로그 가능성(`✓ ready`/`⚙ needs-compile`/`✗ no-capacity`) + 배치 타깃, 진행 중 컴파일 Job (`⏎` → Deploy/Compile). 자식이 하나인 version 티어는 자동 접힘 |
+| 5 | **Events** | — | Kubernetes + llm-d 이벤트(최신순). `⏎` 로 전체 메시지 |
 
 리스트 헤더에 보이는 행(전체 또는 필터된 것)의 `Σ` 통합 메트릭이 표시됩니다. `y` 로 선택 리소스의 live YAML(읽기전용)을 봅니다.
 
@@ -95,9 +95,9 @@ LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # 다른 클러스터 지정
 
 | | |
 |---|---|
-| 이동 | `↑↓`/`kj` 선택 · `⏎` 액션 메뉴(또는 상세) · `w` Nodes 허브/패널 포커스 · `←→` 항목 · `p i r e m` 크로스레이어 pivot |
-| 액션 | `/` 필터 · `:` 커맨드 팔레트(뷰/표시 액션 퍼지 점프) · `o`/`O` 컬럼 정렬(컬럼 순환 / ▲▼ 방향 토글) · `y` live YAML · `l` 로그 · 액션 메뉴 → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (권한 모드별 게이팅·기본 No 확인) |
-| 표시 | `t` 테마 · `f` 애니메이션 · `z` zoom · `Space` 일시정지 · `g` Grafana · `A` 알림 · `?` 도움말 · `q` 종료 |
+| 이동 | `0-5`/`Tab` 섹션 · `←`/`→` (`[ ]`) 서브탭 · `Ctrl+w` 후 `hjkl`/화살표 패널 포커스 · `↑↓`/`kj` 선택 · `g`/`G` 처음/끝 · `Ctrl+u`/`Ctrl+d` 반 페이지 · `Esc` 뒤로 |
+| 액션 | `⏎`/`a` 액션 메뉴(없으면 상세) · `p i r e m` 크로스레이어 pivot(메뉴에 **Go: …** 로도) · `/` 필터 · `:` 커맨드 팔레트(뷰 점프 / 표시 액션 실행) · `o`/`O` 정렬 컬럼/방향 · `y` live YAML · `l` 로그 · 메뉴 → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (모드 게이팅 `⊘`·기본 No 확인) |
+| 표시 | `t` 테마 · `f` 애니메이션 · `z` zoom · `Space` 일시정지 · `A` 알림 · `?` 도움말 · `q` 종료 · `:graf` Grafana · `R` 세션 에너지 리셋 |
 
 **환경 변수.**
 
@@ -130,9 +130,9 @@ Kubernetes 는 `kubectl` 로 조회합니다.
 
 ## 현황 & 로드맵
 
-**지금 바로 되는 것 (트래픽 불필요).** 10개 뷰 전부, 자동 감지·통합 메모리를 포함한 GPU/RBLN/RNGD
+**지금 바로 되는 것 (트래픽 불필요).** 11개 뷰 전부, 자동 감지·통합 메모리를 포함한 GPU/RBLN/RNGD
 및 노드/디스크 모니터링, Flow 토폴로지와 EPP 우회 진단, EPP ConfigMap 조회, 능동 알림,
-`scale`·`logs` 액션, Deploy 뷰(컴파일 변형·저장 노드·배치 타깃), 헤드리스 `--json`·`--doctor`·
+`scale`·`logs` 액션, Deploy 섹션의 Serving/Library 렌즈(서빙 중 배포·카탈로그 가능성·컴파일 Job), 헤드리스 `--json`·`--doctor`·
 `--snapshot`·`--cast`, 그리고 테마·애니메이션·zoom·권한 모드.
 
 **실제 트래픽이 EPP 를 거치고 vLLM 이 지표를 내보내면 채워지는 것.** 모델별 p95 지연 분해, tok/s,

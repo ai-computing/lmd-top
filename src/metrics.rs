@@ -1,6 +1,6 @@
-//! 메트릭 이름 단일 출처(single source of truth).
-//! collect(수집)와 doctor(전수조사)가 같은 상수를 참조 → 이름이 절대 어긋나지 않음.
-//! 메트릭 추가/변경은 여기 한 곳만 고치면 됨.
+//! Single source of truth for metric names.
+//! collect (gathering) and doctor (full survey) reference the same constants → names can never drift.
+//! To add/change a metric, edit only this one place.
 
 // ── NVIDIA DCGM ──────────────────────────────────────
 pub const DCGM_GPU_UTIL: &str = "DCGM_FI_DEV_GPU_UTIL";
@@ -60,30 +60,65 @@ pub const POOL_SAT: &str = "inference_extension_flow_control_pool_saturation";
 pub const SCHED_ATTEMPTS: &str = "inference_extension_scheduler_attempts_total";
 pub const PREFIX_IDX: &str = "inference_extension_prefix_indexer_size";
 
-
-/// doctor 커버리지 대상: (family, metric, 부재 시 영향). collect 가 읽는 메트릭과 동일 상수.
+/// doctor coverage targets: (family, metric, impact when absent). Same constants as the metrics collect reads.
 pub const DEPS: &[(&str, &str, &str)] = &[
     ("NVIDIA GPU (DCGM)", DCGM_GPU_UTIL, "GPU util unavailable"),
     ("NVIDIA GPU (DCGM)", DCGM_GPU_TEMP, "GPU temp unavailable"),
     ("NVIDIA GPU (DCGM)", DCGM_POWER, "GPU power unavailable"),
-    ("NVIDIA GPU (DCGM)", DCGM_FB_USED, "GPU mem used unavailable (unified-mem falls back to host)"),
-    ("NVIDIA GPU (DCGM)", DCGM_FB_TOTAL, "GPU mem total unavailable (unified-mem falls back to host)"),
+    (
+        "NVIDIA GPU (DCGM)",
+        DCGM_FB_USED,
+        "GPU mem used unavailable (unified-mem falls back to host)",
+    ),
+    (
+        "NVIDIA GPU (DCGM)",
+        DCGM_FB_TOTAL,
+        "GPU mem total unavailable (unified-mem falls back to host)",
+    ),
     ("Rebellions RBLN", RBLN_UTIL, "RBLN util unavailable"),
     ("Rebellions RBLN", RBLN_TEMP, "RBLN temp unavailable"),
     ("Rebellions RBLN", RBLN_POWER, "RBLN power unavailable"),
-    ("Rebellions RBLN", RBLN_DRAM_USED, "RBLN mem used unavailable"),
-    ("Rebellions RBLN", RBLN_DRAM_TOTAL, "RBLN mem total unavailable"),
+    (
+        "Rebellions RBLN",
+        RBLN_DRAM_USED,
+        "RBLN mem used unavailable",
+    ),
+    (
+        "Rebellions RBLN",
+        RBLN_DRAM_TOTAL,
+        "RBLN mem total unavailable",
+    ),
     ("Rebellions RBLN", RBLN_HEALTH, "RBLN health unavailable"),
     ("Furiosa RNGD", FURIOSA_UTIL, "RNGD util unavailable"),
     ("Furiosa RNGD", FURIOSA_TEMP, "RNGD temp unavailable"),
     ("Furiosa RNGD", FURIOSA_POWER, "RNGD power unavailable"),
-    ("Furiosa RNGD", FURIOSA_DRAM_USED, "RNGD mem used unavailable"),
-    ("Furiosa RNGD", FURIOSA_DRAM_TOTAL, "RNGD mem total unavailable"),
+    (
+        "Furiosa RNGD",
+        FURIOSA_DRAM_USED,
+        "RNGD mem used unavailable",
+    ),
+    (
+        "Furiosa RNGD",
+        FURIOSA_DRAM_TOTAL,
+        "RNGD mem total unavailable",
+    ),
     ("Furiosa RNGD", FURIOSA_ALIVE, "RNGD liveness unavailable"),
-    ("Furiosa RNGD", FURIOSA_THROTTLE, "RNGD throttle detection unavailable"),
+    (
+        "Furiosa RNGD",
+        FURIOSA_THROTTLE,
+        "RNGD throttle detection unavailable",
+    ),
     ("Host (node)", NODE_LOAD1, "node load unavailable"),
-    ("Host (node)", NODE_MEM_TOTAL, "node/unified mem total unavailable"),
-    ("Host (node)", NODE_MEM_AVAIL, "node/unified mem used unavailable"),
+    (
+        "Host (node)",
+        NODE_MEM_TOTAL,
+        "node/unified mem total unavailable",
+    ),
+    (
+        "Host (node)",
+        NODE_MEM_AVAIL,
+        "node/unified mem used unavailable",
+    ),
     ("Host (node)", NODE_CPU_SECONDS, "host CPU% unavailable"),
     ("Host (node)", NODE_FS_SIZE, "node disk usage unavailable"),
     ("vLLM (model server)", VLLM_RUNNING, "Models run/wait empty"),
@@ -94,17 +129,41 @@ pub const DEPS: &[(&str, &str, &str)] = &[
     ("vLLM (model server)", VLLM_TTFT_BUCKET, "TTFT empty"),
     ("vLLM (model server)", VLLM_E2E_BUCKET, "E2E latency empty"),
     ("vLLM (model server)", VLLM_QUEUE_BUCKET, "QUEUE p95 empty"),
-    ("vLLM (model server)", VLLM_PREFILL_BUCKET, "PREFILL(P) p95 empty"),
-    ("vLLM (model server)", VLLM_DECODE_BUCKET, "DECODE(D) p95 empty"),
+    (
+        "vLLM (model server)",
+        VLLM_PREFILL_BUCKET,
+        "PREFILL(P) p95 empty",
+    ),
+    (
+        "vLLM (model server)",
+        VLLM_DECODE_BUCKET,
+        "DECODE(D) p95 empty",
+    ),
     ("vLLM (model server)", VLLM_PREEMPT, "preemption rate empty"),
-    ("EPP / InferencePool", POOL_READY, "EPP pools empty (EPP not in path or not scraped)"),
+    (
+        "EPP / InferencePool",
+        POOL_READY,
+        "EPP pools empty (EPP not in path or not scraped)",
+    ),
     ("EPP / InferencePool", POOL_QUEUE, "pool queue empty"),
     ("EPP / InferencePool", POOL_KV, "pool KV empty"),
-    ("EPP / InferencePool", POOL_PER_POD_QUEUE, "per-pod queue distribution empty"),
+    (
+        "EPP / InferencePool",
+        POOL_PER_POD_QUEUE,
+        "per-pod queue distribution empty",
+    ),
     ("EPP / InferencePool", POOL_SAT, "pool saturation empty"),
-    ("EPP / InferencePool", SCHED_ATTEMPTS, "routing distribution empty"),
-    ("EPP / InferencePool", PREFIX_IDX, "prefix-cache index size empty"),
+    (
+        "EPP / InferencePool",
+        SCHED_ATTEMPTS,
+        "routing distribution empty",
+    ),
+    (
+        "EPP / InferencePool",
+        PREFIX_IDX,
+        "prefix-cache index size empty",
+    ),
 ];
 
-/// "미사용 가속기 메트릭(=새 신호 후보)" 탐지용 family 접두.
+/// Family prefixes for detecting "unused accelerator metrics (= new signal candidates)".
 pub const ACCEL_PREFIXES: &[&str] = &["DCGM_FI_DEV_", "furiosa_npu_", "RBLN_DEVICE_STATUS:"];
