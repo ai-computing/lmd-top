@@ -94,7 +94,7 @@ impl App {
                 mkf("max-len", "max-seq-len", "8192", &["2048", "4096", "8192", "16384", "32768"], true, "Compile-time maximum context length (rbln_max_seq_len). Larger values use more memory and compile time."),
                 mkf("batch", "batch-size", "1", &["1", "2", "4", "8", "16"], true, "Static batch size (rbln_batch_size). RBLN fixes this at compile time."),
                 mkf("attn", "attn-impl", "flash_attn", &["flash_attn", "eager"], false, "Attention implementation: flash_attn for SRAM optimized path, eager for PagedAttention."),
-                mkf("kvpart", "kvcache-partition", "16384", &["4096", "8192", "16384", "32768"], true, "KV tokens per SRAM partition for flash_attn only; must be a power of two."),
+                mkf("kvpart", "kvcache-partition", "8192", &["4096", "8192", "16384", "32768"], true, "flash_attn only: KV tokens per SRAM partition. Must be a power of two AND divide max-seq-len (e.g. max-len 8192 → 4096/8192)."),
                 mkf("quant", "quantization", "none", &["none", "w8a8", "w4a16"], false, "Weight/activation quantization format (RBLNQuantizationConfig); model support varies."),
                 mkf("npu", "npu-chip", "RBLN-CA22", &["RBLN-CA22"], false, "Target RBLN chip (rbln_npu), detected from the cluster."),
             ]
@@ -194,6 +194,49 @@ impl App {
         }
     }
 
+    /// RBLN(optimum-rbln) 파라미터 조합의 컴파일 실행가능성 사전 검증.
+    /// 알려진 제약을 인코딩해 "될지 예측"한다. 위반 시 (설명+권장 수정값) 메시지, 아니면 None.
+    ///  - flash_attn: max_seq_len 은 kvcache_partition_len 의 배수여야 하고 kvpart 는 2의 거듭제곱.
+    ///    (실기 ValueError: "max_seq_len must be a multiple of kvcache_partition_len when using flash_attn")
+    ///  - tensor-parallel 은 RBLN-CA22 에서 1/2/4.
+    pub(super) fn rbln_param_issue(form: &CompileForm) -> Option<String> {
+        let getn = |k: &str| form.get(k).parse::<i64>().ok();
+        let tp = getn("tp").unwrap_or(1);
+        if !matches!(tp, 1 | 2 | 4) {
+            return Some(format!(
+                "tensor-parallel {} — RBLN-CA22 supports 1/2/4",
+                tp
+            ));
+        }
+        if form.get("attn") == "flash_attn" {
+            let max_len = getn("max-len").unwrap_or(0);
+            let kvpart = getn("kvpart").unwrap_or(0);
+            if kvpart <= 0 || (kvpart & (kvpart - 1)) != 0 {
+                return Some(format!(
+                    "kvcache-partition {} must be a power of two for flash_attn",
+                    kvpart
+                ));
+            }
+            if max_len < kvpart || max_len % kvpart != 0 {
+                // 표준 후보 중 max_len 을 나누는 가장 큰 값을 권장.
+                let fix = [32768i64, 16384, 8192, 4096]
+                    .into_iter()
+                    .find(|&k| k <= max_len && max_len % k == 0);
+                return Some(match fix {
+                    Some(k) => format!(
+                        "flash_attn needs max-seq-len ({}) to be a multiple of kvcache-partition ({}) → set kvcache-partition to {}",
+                        max_len, kvpart, k
+                    ),
+                    None => format!(
+                        "flash_attn needs max-seq-len (≥4096) divisible by kvcache-partition; {} is too small → switch attn-impl to eager",
+                        max_len
+                    ),
+                });
+            }
+        }
+        None
+    }
+
     /// 컴파일 폼 → 매니페스트 미리보기(dry-run) 생성. Enter 시 호출. 폼 값을 env·OUTPUT 에 반영.
     pub fn compile_form_submit(&mut self) {
         let Some(form) = self.compile_form.take() else {
@@ -223,6 +266,16 @@ impl App {
             self.preview_scroll = 0;
             self.preview_apply = false;
             return;
+        }
+        // 사전 차단(예측): RBLN(optimum-rbln) 파라미터 조합이 컴파일 시 죽는 걸 미리 잡는다.
+        // 실기 원인: flash_attn 인데 max-seq-len(8192)이 kvcache-partition(16384)의 배수가 아님 →
+        // ValueError 로 15분 후 실패. 폼을 열어둔 채 정확한 수정값을 안내하고 중단.
+        if vendor == "rbln" {
+            if let Some(issue) = Self::rbln_param_issue(&form) {
+                self.notify(format!("compile blocked — {}", issue));
+                self.compile_form = Some(form); // 폼 유지: 값만 고쳐 다시 Enter
+                return;
+            }
         }
         let repo_dir = model_id.replace('/', "--");
         // Job 이름 = 모델 + 타깃(vendor·chip·tp·pp·seq). 같은 모델을 다른 옵션으로 컴파일하면
@@ -1000,5 +1053,53 @@ mod compile_tests {
         let (_, yaml) = r.expect("valid HF id should produce a manifest");
         assert!(yaml.contains("meta-llama/Llama-3.1-8B-Instruct"));
         assert!(yaml.contains("/mnt/store/hub"), "HF cache on shared store");
+    }
+
+    fn ov(kvs: &[(&str, &str)]) -> Vec<(String, String)> {
+        kvs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    // 실기 에러 재현·차단: flash_attn 인데 max-seq-len(8192)이 kvcache-partition(16384)의 배수가 아님.
+    #[test]
+    fn rbln_blocks_flash_attn_kvpart_mismatch() {
+        let mut a = App::new();
+        let r = a.plan_compile_for_model(
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "rbln",
+            &ov(&[("max-len", "8192"), ("kvpart", "16384"), ("attn", "flash_attn")]),
+        );
+        assert!(r.is_err(), "8192 not a multiple of 16384 must be blocked before the Job");
+    }
+
+    #[test]
+    fn rbln_allows_valid_flash_attn_combo() {
+        let mut a = App::new();
+        let r = a.plan_compile_for_model(
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "rbln",
+            &ov(&[("max-len", "16384"), ("kvpart", "8192"), ("attn", "flash_attn")]),
+        );
+        assert!(r.is_ok(), "16384 % 8192 == 0 should compile");
+    }
+
+    #[test]
+    fn rbln_eager_skips_kvpart_divisibility() {
+        let mut a = App::new();
+        let r = a.plan_compile_for_model(
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "rbln",
+            &ov(&[("max-len", "2048"), ("attn", "eager")]),
+        );
+        assert!(r.is_ok(), "eager path doesn't require kvpart divisibility");
+    }
+
+    #[test]
+    fn default_rbln_form_is_valid() {
+        // 기본값(attn=flash_attn, max-len 8192, kvpart 8192)은 곧바로 유효해야 한다.
+        assert!(App::rbln_param_issue(&App::new().build_compile_form(
+            &App::synthetic_artifact_for("meta-llama/Llama-3.1-8B-Instruct", "rbln", String::new(), &[]),
+            "rbln",
+        ))
+        .is_none());
     }
 }
