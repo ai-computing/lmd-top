@@ -13,6 +13,9 @@ impl App {
         } else if let Some(cat) = self.selected_catalog_artifact() {
             owned = cat;
             &owned
+        } else if let Some(z) = self.selected_zoo_artifact() {
+            owned = z;
+            &owned
         } else {
             return;
         };
@@ -52,6 +55,9 @@ impl App {
             a
         } else if let Some(cat) = self.selected_catalog_artifact() {
             owned = cat;
+            &owned
+        } else if let Some(z) = self.selected_zoo_artifact() {
+            owned = z;
             &owned
         } else {
             return;

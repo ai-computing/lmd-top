@@ -57,6 +57,7 @@ impl Palette {
             v(View::Pods),
             v(View::Serving),
             v(View::Library),
+            v(View::Zoo),
             v(View::Events),
             v(View::Setup),
         ];

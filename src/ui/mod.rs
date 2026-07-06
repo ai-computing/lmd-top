@@ -160,6 +160,7 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
             View::Events => view_events(f, body, app),
             View::Nodes => view_nodes(f, body, app),
             View::Topo => view_topo(f, body, app),
+            View::Zoo => view_zoo(f, body, app),
             View::Setup => view_setup(f, body, app),
         }
     }
@@ -4404,6 +4405,75 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
             }
         });
     f.render_widget(canvas, area);
+}
+
+// ── Deploy▸Zoo — 벤더(Furiosa/Rebellions) 모델 zoo: prefetch/compile ──────────
+fn view_zoo(f: &mut Frame, area: Rect, app: &App) {
+    let order = app.order();
+    let rows: Vec<Row> = order
+        .iter()
+        .map(|&i| {
+            let z = &app.zoo[i];
+            let vendors = App::zoo_vendors(&z.source);
+            let vlabel = if vendors.is_empty() {
+                "GPU only".to_string()
+            } else {
+                vendors
+                    .iter()
+                    .map(|v| match *v {
+                        "furiosa" => "Furiosa",
+                        "rbln" => "RBLN",
+                        _ => *v,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("+")
+            };
+            let vcolor = if vendors.is_empty() { C_DIM() } else { C_WARN() };
+            let (store_s, store_c) = if app.zoo_in_store(&z.source) {
+                ("● built", C_OK())
+            } else {
+                ("○ –", C_DIM())
+            };
+            Row::new(vec![
+                Cell::from(truncw(&z.display, 30)).style(
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Cell::from(truncw(&z.source, 34)).style(Style::default().fg(Color::Gray)),
+                Cell::from(vlabel).style(Style::default().fg(vcolor)),
+                Cell::from(truncw(&z.role, 10)).style(Style::default().fg(C_DIM())),
+                Cell::from(store_s).style(Style::default().fg(store_c)),
+                Cell::from(truncw(&z.note, 24)).style(Style::default().fg(C_DIM())),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(30), // MODEL
+        Constraint::Min(20),    // SOURCE (HF)
+        Constraint::Length(14), // COMPILE
+        Constraint::Length(10), // ROLE
+        Constraint::Length(8),  // STORE
+        Constraint::Length(24), // NOTE
+    ];
+    let header = ["MODEL", "SOURCE (HF)", "COMPILE", "ROLE", "STORE", "NOTE"];
+    let title = format!(
+        "Deploy▸Zoo · vendor model zoo · ⏎ Prefetch / Compile→vendor · then deploy from Library{}",
+        count_suffix(app.selected, order.len())
+    );
+    let mut st = TableState::default();
+    st.select(Some(app.selected));
+    f.render_stateful_widget(
+        Table::new(rows, widths)
+            .header(hrow(&header))
+            .column_spacing(1)
+            .row_highlight_style(hl_style())
+            .highlight_symbol("▎")
+            .block(block_active(&title)),
+        area,
+        &mut st,
+    );
+    list_scrollbar(f, area, order.len(), app.selected, 1);
 }
 
 // ── Setup(Doctor) — 새 환경 부트스트랩 전제조건 점검 + 가이드된 조치 ──────────

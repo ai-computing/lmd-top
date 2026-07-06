@@ -191,6 +191,7 @@ impl DeployForm {
 pub enum Action {
     Info,                  // 상세 보기(drill)
     Compile(&'static str), // NPU 컴파일 옵션 폼(대상 벤더 rbln/furiosa)
+    Prefetch,              // 모델 zoo: HF 가중치를 공유 스토어로 사전 다운로드(Job)
     Deploy,                // 배포 옵션 폼
     Stop,                  // 서빙 중지(replicas 0)
     Logs,                  // 로그 tail
@@ -216,6 +217,7 @@ impl Action {
             Action::Info | Action::Yaml | Action::Objective | Action::Pivot(_) => Mode::Observe,
             Action::Logs => Mode::Debug,
             Action::Compile(_)
+            | Action::Prefetch
             | Action::Deploy
             | Action::Stop
             | Action::Scale
@@ -236,6 +238,7 @@ impl Action {
         match self {
             Action::Info => "info",
             Action::Compile(_) => "compile",
+            Action::Prefetch => "prefetch",
             Action::Deploy => "deploy",
             Action::Stop => "stop",
             Action::Logs => "logs",

@@ -607,6 +607,11 @@ fn dispatch_action(
                 app.open_deploy_form();
             }
         }
+        Action::Prefetch => {
+            if require_action(app, action) {
+                app.prefetch_selected_zoo();
+            }
+        }
         Action::Stop => {
             if require_action(app, action) {
                 app.confirm = Some(Pending::Stop {
@@ -1352,6 +1357,8 @@ fn ui_loop(
                                 open_actions_or_detail(&mut app, false);
                             } else if app.view == View::Setup {
                                 app.setup_enter(); // 부트스트랩 점검 행의 조치(apply/show cmd)
+                            } else if app.view == View::Zoo {
+                                app.open_action_menu(); // Prefetch / Compile→벤더
                             } else if matches!(
                                 app.view,
                                 View::Serving | View::Library | View::Overview | View::Pods

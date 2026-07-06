@@ -185,6 +185,48 @@ impl App {
                 }
                 (format!("catalog · {}", m.id), m.id.clone())
             }
+            View::Zoo => {
+                // 벤더 모델 zoo — prefetch(가중치 다운로드) + 컴파일 가능한 각 벤더.
+                let Some(z) = self.selected_zoo() else {
+                    return;
+                };
+                let (source, in_store) = (z.source.clone(), self.zoo_in_store(&z.source));
+                items.push(ActionItem {
+                    key: 'i',
+                    label: "Info",
+                    desc: "model source / notes",
+                    action: Action::Info,
+                });
+                items.push(ActionItem {
+                    key: 'p',
+                    label: "Prefetch",
+                    desc: "download HF weights into the shared store cache",
+                    action: Action::Prefetch,
+                });
+                for v in Self::zoo_vendors(&source) {
+                    if v == "furiosa" {
+                        items.push(ActionItem {
+                            key: 'f',
+                            label: "Compile→Furiosa",
+                            desc: "furiosa-llm build → artifact in store",
+                            action: Action::Compile("furiosa"),
+                        });
+                    } else if v == "rbln" {
+                        items.push(ActionItem {
+                            key: 'c',
+                            label: "Compile→RBLN",
+                            desc: "optimum-rbln compile → .rbln in store",
+                            action: Action::Compile("rbln"),
+                        });
+                    }
+                }
+                let note = if in_store {
+                    "compiled build present — deploy from Deploy▸Library"
+                } else {
+                    "prefetch/compile, then deploy from Deploy▸Library"
+                };
+                (format!("zoo · {} ({})", source, note), source)
+            }
             View::Library if self.panel_focus == 1 => {
                 // Deploy 하단 Activity 패널 — compile Job / deploy rollout. 로그 · (Job 이면) 삭제.
                 let Some(row) = self.selected_activity() else {
