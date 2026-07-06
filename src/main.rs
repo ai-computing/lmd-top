@@ -37,6 +37,38 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Key handling for the three symmetric option forms (objective / compile / deploy).
+/// They share one shape and differ only by the form field and the submit method:
+///   editing mode — Enter/Esc commit, Backspace, free text;
+///   nav mode     — Esc/q close, ↑↓ move, ←→ cycle choices, e=edit, digit=type, Enter=submit.
+macro_rules! handle_edit_form {
+    ($app:expr, $form:ident, $submit:ident, $code:expr) => {{
+        if $app.$form.as_ref().unwrap().editing {
+            match $code {
+                KeyCode::Enter | KeyCode::Esc => $app.$form.as_mut().unwrap().editing = false,
+                KeyCode::Backspace => $app.$form.as_mut().unwrap().backspace(),
+                KeyCode::Char(c) => $app.$form.as_mut().unwrap().type_char(c),
+                _ => {}
+            }
+        } else {
+            match $code {
+                KeyCode::Esc | KeyCode::Char('q') => $app.$form = None,
+                KeyCode::Up => $app.$form.as_mut().unwrap().move_cursor(-1),
+                KeyCode::Down => $app.$form.as_mut().unwrap().move_cursor(1),
+                KeyCode::Left => $app.$form.as_mut().unwrap().cycle(-1),
+                KeyCode::Right => $app.$form.as_mut().unwrap().cycle(1),
+                KeyCode::Char('e') => $app.$form.as_mut().unwrap().editing = true,
+                KeyCode::Backspace => $app.$form.as_mut().unwrap().backspace(),
+                KeyCode::Char(c) if c.is_ascii_digit() => {
+                    $app.$form.as_mut().unwrap().type_digit(c)
+                }
+                KeyCode::Enter => $app.$submit(),
+                _ => {}
+            }
+        }
+    }};
+}
+
 const HELP: &str = "\
 lmd-top — terminal observability & operations for llm-d clusters
 
@@ -1055,42 +1087,7 @@ fn ui_loop(
                     }
                     // Serving objective edit form overlay.
                     if app.objective_form.is_some() {
-                        let editing = app.objective_form.as_ref().unwrap().editing;
-                        if editing {
-                            match k.code {
-                                KeyCode::Enter | KeyCode::Esc => {
-                                    app.objective_form.as_mut().unwrap().editing = false
-                                }
-                                KeyCode::Backspace => {
-                                    app.objective_form.as_mut().unwrap().backspace()
-                                }
-                                KeyCode::Char(c) => {
-                                    app.objective_form.as_mut().unwrap().type_char(c)
-                                }
-                                _ => {}
-                            }
-                        } else {
-                            match k.code {
-                                KeyCode::Esc | KeyCode::Char('q') => app.objective_form = None,
-                                KeyCode::Up => app.objective_form.as_mut().unwrap().move_cursor(-1),
-                                KeyCode::Down => {
-                                    app.objective_form.as_mut().unwrap().move_cursor(1)
-                                }
-                                KeyCode::Left => app.objective_form.as_mut().unwrap().cycle(-1),
-                                KeyCode::Right => app.objective_form.as_mut().unwrap().cycle(1),
-                                KeyCode::Char('e') => {
-                                    app.objective_form.as_mut().unwrap().editing = true
-                                }
-                                KeyCode::Backspace => {
-                                    app.objective_form.as_mut().unwrap().backspace()
-                                }
-                                KeyCode::Char(c) if c.is_ascii_digit() => {
-                                    app.objective_form.as_mut().unwrap().type_digit(c)
-                                }
-                                KeyCode::Enter => app.objective_form_submit(),
-                                _ => {}
-                            }
-                        }
+                        handle_edit_form!(app, objective_form, objective_form_submit, k.code);
                         continue;
                     }
                     // Route edit form (rename text / retarget selection).
@@ -1147,71 +1144,12 @@ fn ui_loop(
                     }
                     // NPU compile options form overlay.
                     if app.compile_form.is_some() {
-                        let editing = app.compile_form.as_ref().unwrap().editing;
-                        if editing {
-                            // 자유 입력(커스텀 값) 모드: Enter/Esc 확정, 문자 입력.
-                            match k.code {
-                                KeyCode::Enter | KeyCode::Esc => {
-                                    app.compile_form.as_mut().unwrap().editing = false
-                                }
-                                KeyCode::Backspace => {
-                                    app.compile_form.as_mut().unwrap().backspace()
-                                }
-                                KeyCode::Char(c) => app.compile_form.as_mut().unwrap().type_char(c),
-                                _ => {}
-                            }
-                        } else {
-                            match k.code {
-                                KeyCode::Esc | KeyCode::Char('q') => app.compile_form = None,
-                                KeyCode::Up => app.compile_form.as_mut().unwrap().move_cursor(-1),
-                                KeyCode::Down => app.compile_form.as_mut().unwrap().move_cursor(1),
-                                KeyCode::Left => app.compile_form.as_mut().unwrap().cycle(-1),
-                                KeyCode::Right => app.compile_form.as_mut().unwrap().cycle(1),
-                                KeyCode::Char('e') => {
-                                    app.compile_form.as_mut().unwrap().editing = true
-                                }
-                                KeyCode::Backspace => {
-                                    app.compile_form.as_mut().unwrap().backspace()
-                                }
-                                KeyCode::Char(c) if c.is_ascii_digit() => {
-                                    app.compile_form.as_mut().unwrap().type_digit(c)
-                                }
-                                KeyCode::Enter => app.compile_form_submit(),
-                                _ => {}
-                            }
-                        }
+                        handle_edit_form!(app, compile_form, compile_form_submit, k.code);
                         continue;
                     }
                     // Deploy/serving options form overlay.
                     if app.deploy_form.is_some() {
-                        let editing = app.deploy_form.as_ref().unwrap().editing;
-                        if editing {
-                            match k.code {
-                                KeyCode::Enter | KeyCode::Esc => {
-                                    app.deploy_form.as_mut().unwrap().editing = false
-                                }
-                                KeyCode::Backspace => app.deploy_form.as_mut().unwrap().backspace(),
-                                KeyCode::Char(c) => app.deploy_form.as_mut().unwrap().type_char(c),
-                                _ => {}
-                            }
-                        } else {
-                            match k.code {
-                                KeyCode::Esc | KeyCode::Char('q') => app.deploy_form = None,
-                                KeyCode::Up => app.deploy_form.as_mut().unwrap().move_cursor(-1),
-                                KeyCode::Down => app.deploy_form.as_mut().unwrap().move_cursor(1),
-                                KeyCode::Left => app.deploy_form.as_mut().unwrap().cycle(-1),
-                                KeyCode::Right => app.deploy_form.as_mut().unwrap().cycle(1),
-                                KeyCode::Char('e') => {
-                                    app.deploy_form.as_mut().unwrap().editing = true
-                                }
-                                KeyCode::Backspace => app.deploy_form.as_mut().unwrap().backspace(),
-                                KeyCode::Char(c) if c.is_ascii_digit() => {
-                                    app.deploy_form.as_mut().unwrap().type_digit(c)
-                                }
-                                KeyCode::Enter => app.deploy_form_submit(),
-                                _ => {}
-                            }
-                        }
+                        handle_edit_form!(app, deploy_form, deploy_form_submit, k.code);
                         continue;
                     }
                     // Preview overlay — generated manifests support validate/apply/save, read-only YAML supports save.
