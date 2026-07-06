@@ -567,7 +567,7 @@ mod tests {
             cordoned: false,
             pressure: false,
             version: "v1.30".into(),
-            npu: "RNGD drv2026.3.0".into(),
+            npu: "Furiosa RNGD drv2026.3.0".into(),
         });
         let cfg = Config::default();
         let s = to_json(&snap, &cfg).expect("serialize");
@@ -578,6 +578,6 @@ mod tests {
             assert!(v.get(k).is_some(), "top-level key '{}' present", k);
         }
         assert_eq!(v["nodes"][0]["name"], "node-a");
-        assert_eq!(v["nodes"][0]["npu"], "RNGD drv2026.3.0");
+        assert_eq!(v["nodes"][0]["npu"], "Furiosa RNGD drv2026.3.0");
     }
 }

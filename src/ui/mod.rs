@@ -2357,7 +2357,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
                     if n.npu.is_empty() {
                         String::new()
                     } else {
-                        format!("   NPU {}", n.npu)
+                        format!("   accel {}", n.npu)
                     },
                     Style::default().fg(C_ACC()),
                 ),
