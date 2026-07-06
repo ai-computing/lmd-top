@@ -2036,4 +2036,175 @@ mod tests {
         assert!(f.contains(&("pipeline-parallel", "1".to_string())));
         assert!(f.contains(&("max-seq-len", "8192".to_string())));
     }
+
+    fn accel(
+        kind: crate::collect::AccelKind,
+        node: &str,
+        alive: bool,
+        busy: &str,
+    ) -> crate::collect::Accel {
+        crate::collect::Accel {
+            kind,
+            model: String::new(),
+            id: "d".into(),
+            node: node.into(),
+            util: 50.0,
+            mem_used_gb: 10.0,
+            mem_total_gb: 48.0,
+            temp: 40.0,
+            power: 100.0,
+            busy_model: busy.into(),
+            alive,
+            throttle: 0.0,
+            unified_mem: false,
+            mem_bw: f64::NAN,
+            clock_mhz: f64::NAN,
+            mem_temp: f64::NAN,
+            energy_mj: f64::NAN,
+        }
+    }
+
+    fn deploy_form(vendor: &'static str, replicas: &str, devices: &str, place: &str) -> DeployForm {
+        let f = |k: &str, v: &str| CompileField {
+            key: k.into(),
+            label: k.into(),
+            value: v.into(),
+            choices: vec![],
+            numeric: true,
+            help: String::new(),
+        };
+        DeployForm {
+            model: "m".into(),
+            model_id: "m".into(),
+            engine: "vLLM".into(),
+            vendor,
+            mount: "/mnt/store/x".into(),
+            fields: vec![f("replicas", replicas), f("devices", devices), f("place", place)],
+            cursor: 0,
+            editing: false,
+        }
+    }
+
+    #[test]
+    fn deploy_fit_capacity_verdicts() {
+        use crate::collect::AccelKind::Gpu;
+        let mk = |accel: Vec<crate::collect::Accel>, inv_free: i64| App {
+            snap: Snapshot {
+                accel,
+                inventory: vec![("nvidia.com/gpu".to_string(), inv_free, 0)],
+                ..Default::default()
+            },
+            ..App::new()
+        };
+
+        // Fits: 4 유휴, 수요 1×2=2, 각 노드 2개라 패킹 OK.
+        let a = mk(
+            vec![
+                accel(Gpu, "n1", true, ""),
+                accel(Gpu, "n1", true, ""),
+                accel(Gpu, "n2", true, ""),
+                accel(Gpu, "n2", true, ""),
+            ],
+            4,
+        );
+        let fit = a.deploy_fit(&deploy_form("gpu", "1", "2", "any"));
+        assert_eq!(fit.demand, 2);
+        assert_eq!(fit.verdict, FitVerdict::Fits);
+
+        // Oom(리소스 예약): metric 은 2 유휴지만 인벤토리 예약으로 resource_free=0.
+        let b = App {
+            snap: Snapshot {
+                accel: vec![accel(Gpu, "n1", true, ""), accel(Gpu, "n1", true, "")],
+                inventory: vec![("nvidia.com/gpu".to_string(), 2, 2)], // free = 0
+                ..Default::default()
+            },
+            ..App::new()
+        };
+        let bfit = b.deploy_fit(&deploy_form("gpu", "1", "1", "any"));
+        assert_eq!(bfit.verdict, FitVerdict::Oom);
+        assert!(bfit.tips.iter().any(|t| t.contains("예약")), "리소스 예약 부족 안내");
+        assert!(
+            bfit.tips.iter().any(|t| t.contains("metric 유휴")),
+            "metric 유휴 ≠ 리소스 유휴 불일치 안내"
+        );
+
+        // Tight: 총량은 되지만 노드 패킹으로 일부만(n1=3, n2=1, per=2 → placeable=1 < 2).
+        let c = mk(
+            vec![
+                accel(Gpu, "n1", true, ""),
+                accel(Gpu, "n1", true, ""),
+                accel(Gpu, "n1", true, ""),
+                accel(Gpu, "n2", true, ""),
+            ],
+            4,
+        );
+        let cfit = c.deploy_fit(&deploy_form("gpu", "2", "2", "any"));
+        assert_eq!(cfit.verdict, FitVerdict::Tight);
+    }
+
+    #[test]
+    fn agg_summary_reports_scope_and_counts() {
+        use crate::collect::AccelKind::Gpu;
+        let mut a = App {
+            snap: Snapshot {
+                accel: vec![
+                    accel(Gpu, "n1", true, "m1"), // busy
+                    accel(Gpu, "n1", true, ""),   // idle
+                ],
+                ..Default::default()
+            },
+            ..App::new()
+        };
+        a.view = View::Accel;
+        let s = a.agg_summary().expect("Accel view has a summary");
+        assert!(s.starts_with("Σall"), "필터 없으면 scope=all: {s}");
+        assert!(s.contains("2dev"), "총 디바이스 수: {s}");
+        assert!(s.contains("1busy"), "busy 카운트: {s}");
+
+        // 필터가 있으면 보이는 행만 집계하고 scope=filt.
+        a.filter = "m1".into();
+        let sf = a.agg_summary().expect("filtered summary");
+        assert!(sf.starts_with("Σfilt"), "필터 있으면 scope=filt: {sf}");
+        assert!(sf.contains("1dev"), "필터로 1개만 집계: {sf}");
+    }
+
+    #[test]
+    fn apply_detects_alerts_and_toasts() {
+        use crate::collect::AccelKind::Rbln;
+        let mut a = App::new();
+        // 죽은 가속기 → Bad 알림 + 토스트(엣지 검출).
+        a.apply(Snapshot {
+            ts: 1,
+            accel: vec![accel(Rbln, "n1", false, "")],
+            ..Default::default()
+        });
+        assert!(!a.alerts.is_empty(), "죽은 디바이스는 알림을 만든다");
+        assert!(a.toast.is_some(), "신규 알림은 토스트를 띄운다");
+        assert!(a.toast_bad, "Bad 심각도는 빨강 토스트");
+
+        // pod 재시작 증가(델타) → 신규 알림.
+        let before = a.alerts.len();
+        let p = |restarts: i64| crate::collect::PodRow {
+            name: "p1".into(),
+            phase: "Running".into(),
+            ready: "1/1".into(),
+            node: "n1".into(),
+            restarts,
+        };
+        a.apply(Snapshot {
+            ts: 2,
+            pods: vec![p(0)],
+            ..Default::default()
+        });
+        a.apply(Snapshot {
+            ts: 3,
+            pods: vec![p(3)],
+            ..Default::default()
+        });
+        assert!(
+            a.alerts.iter().any(|al| al.msg.contains("restarted")),
+            "재시작 델타는 알림을 만든다"
+        );
+        assert!(a.alerts.len() > before);
+    }
 }
