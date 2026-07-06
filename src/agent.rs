@@ -214,7 +214,7 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
         pw += a.power;
     }
     let n = s.accel.len().max(1);
-    let serving = s.models.iter().filter(|m| m.ready > 0).count();
+    let serving = s.serving_count();
     let (disk_u, disk_t): (f64, f64) = s.nodes.iter().fold((0.0, 0.0), |(u, t), nd| {
         (u + nd.disk_used_gb, t + nd.disk_total_gb)
     });

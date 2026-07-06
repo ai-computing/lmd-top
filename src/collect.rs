@@ -234,6 +234,13 @@ pub struct Snapshot {
     pub prom_ok: bool, // Prometheus 도달 가능 여부(false 면 "가속기 없음"이 아니라 연결 문제)
 }
 
+impl Snapshot {
+    /// 서빙 중(ready>0)인 모델 수 — 진단·요약·헤더가 공유하는 파생 지표.
+    pub fn serving_count(&self) -> usize {
+        self.models.iter().filter(|m| m.ready > 0).count()
+    }
+}
+
 /// EPP 정책 수립용 성능 지표(구간별 지연 percentile·토큰분포·처리량). 값 없으면 NaN.
 /// 클러스터 전역 성능 요약(throughput 라인 + timeline 용). 상세는 per-model(perf_rows)/drill-down.
 #[derive(Clone)]
