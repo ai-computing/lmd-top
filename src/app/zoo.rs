@@ -70,7 +70,7 @@ impl App {
         };
         let source = z.source.clone();
         let repo_dir = source.replace('/', "--");
-        let name = compile_job_name(&format!("prefetch-{}", repo_dir), "hf");
+        let name = job_name("prefetch", &repo_dir, "");
         let ns = &self.ns;
         let yaml = format!(
             "# Prefetch Job — download HF weights for {source} into the shared store cache.\n\

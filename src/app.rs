@@ -207,7 +207,8 @@ pub fn decode_compiled_for(s: &str) -> Vec<(&'static str, String)> {
 
 /// Guarantees DNS-1123 label rules (lowercase [a-z0-9-], ≤63 chars, alphanumeric at both ends). When exceeded, the model part is truncated
 /// and a short option-identifying hash is appended to keep uniqueness (target is always preserved).
-pub fn compile_job_name(repo_dir: &str, target: &str) -> String {
+/// `prefix` is the Job-family prefix (e.g. "compile" / "prefetch"); `target` may be empty.
+pub fn job_name(prefix: &str, repo_dir: &str, target: &str) -> String {
     let sanitize = |s: &str| -> String {
         s.to_lowercase()
             .chars()
@@ -218,8 +219,8 @@ pub fn compile_job_name(repo_dir: &str, target: &str) -> String {
     let target = sanitize(target);
     // 63 (DNS-1123) - "-script" (RBLN ConfigMap suffix) = 56, with margin. Safe for both Job and CM.
     const MAX: usize = 56;
-    // Fixed part: "compile-" + "-" + target. Allot the remaining budget to the model part.
-    let fixed = "compile-".len() + 1 + target.len();
+    // Fixed part: prefix + "-" + "-" + target. Allot the remaining budget to the model part.
+    let fixed = prefix.len() + 2 + target.len();
     let budget = MAX.saturating_sub(fixed);
     let model = if model.len() > budget {
         // Preserve uniqueness with a short hash (truncating only the prefix could let different models collide).
@@ -234,9 +235,14 @@ pub fn compile_job_name(repo_dir: &str, target: &str) -> String {
     } else {
         model
     };
-    // Trim so it doesn't end with '-' at either end (DNS-1123).
-    let raw = format!("compile-{}-{}", model, target);
+    // Trim so it doesn't end with '-' at either end (DNS-1123); collapse the empty-target trailing dash.
+    let raw = format!("{}-{}-{}", prefix, model, target);
     raw.trim_matches('-').to_string()
+}
+
+/// Compile Job name — `compile-{model}-{target}` (see [`job_name`]).
+pub fn compile_job_name(repo_dir: &str, target: &str) -> String {
+    job_name("compile", repo_dir, target)
 }
 
 /// Alert threshold (conceptually matches ui.rs color thresholds — here it's the "alarm" trigger line).

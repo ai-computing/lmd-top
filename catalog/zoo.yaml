@@ -161,53 +161,223 @@ models:
     role: chat
     vendor: furiosa
     note: Furiosa 사전 양자화
-  - display: EXAONE-3.5-7.8B-Instruct (RBLN)
-    source: LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct
+  - display: salamandra-7b-instruct (RBLN)
+    source: BSC-LT/salamandra-7b-instruct
     role: chat
     vendor: rbln
-    note: RBLN 지원 패밀리(exaone)
-  - display: gemma-2-9b-it (RBLN)
-    source: google/gemma-2-9b-it
+    note: RBLN model zoo
+  - display: DeepSeek-R1-Distill-Llama-70B (RBLN)
+    source: deepseek-ai/DeepSeek-R1-Distill-Llama-70B
     role: chat
     vendor: rbln
-    note: RBLN 지원 패밀리(gemma2)
-  - display: gpt-oss-20b (RBLN)
-    source: openai/gpt-oss-20b
+    note: RBLN model zoo
+  - display: DeepSeek-R1-Distill-Llama-8B (RBLN)
+    source: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
     role: chat
     vendor: rbln
-    note: RBLN 지원 패밀리(gpt-oss)
-  - display: KONI-Llama3.1-8B-R-Preview-20241024 (RBLN)
-    source: KISTI-KONI/KONI-Llama3.1-8B-R-Preview-20241024
+    note: RBLN model zoo
+  - display: DeepSeek-R1-Distill-Qwen-14B (RBLN)
+    source: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
     role: chat
     vendor: rbln
-    note: RBLN 지원 패밀리(koni)
-  - display: Llama-3.1-8B-Instruct (RBLN)
-    source: meta-llama/Llama-3.1-8B-Instruct
+    note: RBLN model zoo
+  - display: DeepSeek-R1-Distill-Qwen-1.5B (RBLN)
+    source: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
     role: chat
     vendor: rbln
-    note: RBLN 지원 패밀리(llama)
-  - display: Mistral-7B-Instruct-v0.3 (RBLN)
-    source: mistralai/Mistral-7B-Instruct-v0.3
+    note: RBLN model zoo
+  - display: DeepSeek-R1-Distill-Qwen-32B (RBLN)
+    source: deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
     role: chat
     vendor: rbln
-    note: RBLN 지원 패밀리(mistral)
+    note: RBLN model zoo
+  - display: DeepSeek-R1-Distill-Qwen-7B (RBLN)
+    source: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: opt-2.7b (RBLN)
+    source: facebook/opt-2.7b
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
   - display: opt-6.7b (RBLN)
     source: facebook/opt-6.7b
     role: chat
     vendor: rbln
-    note: RBLN 지원 패밀리(opt)
-  - display: Phi-3.5-mini-instruct (RBLN)
-    source: microsoft/Phi-3.5-mini-instruct
+    note: RBLN model zoo
+  - display: kobart-summarization (RBLN)
+    source: gogamza/kobart-summarization
     role: chat
     vendor: rbln
-    note: RBLN 지원 패밀리(phi)
+    note: RBLN model zoo
+  - display: gemma-2-9b-it (RBLN)
+    source: google/gemma-2-9b-it
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: gemma-2b-it (RBLN)
+    source: google/gemma-2b-it
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: gemma-7b-it (RBLN)
+    source: google/gemma-7b-it
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: KONI-Llama3.1-8B-Instruct-20241024 (RBLN)
+    source: KISTI-KONI/KONI-Llama3.1-8B-Instruct-20241024
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: EXAONE-3.0-7.8B-Instruct (RBLN)
+    source: LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: EXAONE-3.5-2.4B-Instruct (RBLN)
+    source: LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: EXAONE-3.5-32B-Instruct (RBLN)
+    source: LGAI-EXAONE/EXAONE-3.5-32B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: EXAONE-3.5-7.8B-Instruct (RBLN)
+    source: LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Llama-2-13b-chat-hf (RBLN)
+    source: meta-llama/Llama-2-13b-chat-hf
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Llama-2-7b-chat-hf (RBLN)
+    source: meta-llama/Llama-2-7b-chat-hf
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Llama-3.1-70B-Instruct (RBLN)
+    source: meta-llama/Llama-3.1-70B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Llama-3.1-8B-Instruct (RBLN)
+    source: meta-llama/Llama-3.1-8B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Llama-3.2-3B-Instruct (RBLN)
+    source: meta-llama/Llama-3.2-3B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Llama-3.3-70B-Instruct (RBLN)
+    source: meta-llama/Llama-3.3-70B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Meta-Llama-3-8B (RBLN)
+    source: meta-llama/Meta-Llama-3-8B
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Meta-Llama-3-8B-Instruct (RBLN)
+    source: meta-llama/Meta-Llama-3-8B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: phi-2 (RBLN)
+    source: microsoft/phi-2
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Mistral-7B-Instruct-v0.3 (RBLN)
+    source: mistralai/Mistral-7B-Instruct-v0.3
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: gpt-oss-20b (RBLN)
+    source: openai/gpt-oss-20b
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Qwen2.5-0.5B-Instruct (RBLN)
+    source: Qwen/Qwen2.5-0.5B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Qwen2.5-14B-Instruct (RBLN)
+    source: Qwen/Qwen2.5-14B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Qwen2.5-1.5B-Instruct (RBLN)
+    source: Qwen/Qwen2.5-1.5B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Qwen2.5-32B-Instruct (RBLN)
+    source: Qwen/Qwen2.5-32B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Qwen2.5-3B-Instruct (RBLN)
+    source: Qwen/Qwen2.5-3B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Qwen2.5-72B-Instruct (RBLN)
+    source: Qwen/Qwen2.5-72B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
   - display: Qwen2.5-7B-Instruct (RBLN)
     source: Qwen/Qwen2.5-7B-Instruct
     role: chat
     vendor: rbln
-    note: RBLN 지원 패밀리(qwen)
+    note: RBLN model zoo
+  - display: Qwen2-7B-Instruct (RBLN)
+    source: Qwen/Qwen2-7B-Instruct
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Qwen3-0.6B (RBLN)
+    source: Qwen/Qwen3-0.6B
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Qwen3-1.7B (RBLN)
+    source: Qwen/Qwen3-1.7B
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Qwen3-32B (RBLN)
+    source: Qwen/Qwen3-32B
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Qwen3-4B (RBLN)
+    source: Qwen/Qwen3-4B
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
+  - display: Qwen3-8B (RBLN)
+    source: Qwen/Qwen3-8B
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
   - display: SOLAR-10.7B-Instruct-v1.0 (RBLN)
     source: upstage/SOLAR-10.7B-Instruct-v1.0
     role: chat
     vendor: rbln
-    note: RBLN 지원 패밀리(solar)
+    note: RBLN model zoo
+  - display: EEVE-Korean-Instruct-10.8B-v1.0 (RBLN)
+    source: yanolja/EEVE-Korean-Instruct-10.8B-v1.0
+    role: chat
+    vendor: rbln
+    note: RBLN model zoo
