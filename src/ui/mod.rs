@@ -140,6 +140,7 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
                 | View::Nodes
                 | View::Events
                 | View::Serving
+                | View::Library
         )
     {
         detail_panel(f, body, app);
@@ -2140,6 +2141,11 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
 
 // ── Detail (drill-down) ────────────────────────────────
 fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
+    // Deploy▸Library 통합 트리 선택 항목 상세 — 카탈로그 모델(배치 후보/가능성) 또는 스토어 빌드.
+    if app.view == View::Library && app.panel_focus == 0 {
+        library_detail(f, area, app);
+        return;
+    }
     let (cur, tot) = app.detail_pos();
     let (prev, next) = app.neighbor_names();
     let nav = format!(
@@ -2841,6 +2847,107 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             .scroll((app.detail_scroll, 0))
             .wrap(Wrap { trim: false })
             .block(block(&format!("{}{}", title, nav))),
+        area,
+    );
+}
+
+/// Deploy▸Library 선택 항목 상세 — 카탈로그 모델(배치 후보·가능성·수요) 또는 스토어 빌드(포맷·타깃·경로).
+fn library_detail(f: &mut Frame, area: Rect, app: &App) {
+    use crate::app::LibItem;
+    let mut lines: Vec<Line> = Vec::new();
+    let title = match app.selected_lib_item() {
+        Some(LibItem::Catalog(k)) => {
+            let m = &app.catalog[k];
+            lines.push(kv("id", &m.id, Color::White));
+            if !m.display.is_empty() {
+                lines.push(kv("display", &m.display, C_ACC()));
+            }
+            lines.push(kv("role", if m.role.is_empty() { "-" } else { &m.role }, C_DIM()));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("placement candidates ({}) — 배치 후보 × 라이브 재고", m.placements.len()),
+                Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+            )));
+            for p in &m.placements {
+                let (state, free, need) = crate::catalog::solve(p, &app.snap.inventory);
+                let (g, gc) = match state {
+                    crate::catalog::Ready::Ready => ("✓ ready", C_OK()),
+                    crate::catalog::Ready::NeedsArtifact => ("⚙ needs-compile/artifact", C_WARN()),
+                    crate::catalog::Ready::NoCapacity => ("✗ no-capacity", C_BAD()),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  • ", Style::default().fg(C_TRACK())),
+                    Span::styled(
+                        format!("{} ", p.engine),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("on {} ", p.accel),
+                        Style::default().fg(C_ACC()),
+                    ),
+                    Span::styled(g, Style::default().fg(gc)),
+                ]));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "      {} · {}×{} = {} device(s) · free {} / need {} · artifact:{}",
+                        p.resource,
+                        p.count.max(1),
+                        p.replicas.max(1),
+                        p.count.max(1) * p.replicas.max(1),
+                        free,
+                        need,
+                        if p.requires_artifact { "required" } else { "not needed" },
+                    ),
+                    Style::default().fg(C_DIM()),
+                )));
+                if !p.uri.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!("      source: {}", p.uri),
+                        Style::default().fg(C_TRACK()),
+                    )));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "d deploy · c RBLN / f Furiosa compile (지원 모델) · esc back",
+                Style::default().fg(C_DIM()),
+            )));
+            format!("catalog · {}", m.id)
+        }
+        Some(LibItem::Stored(k)) => {
+            let s = &app.snap.stored[k];
+            lines.push(kv("repo", &s.repo, Color::White));
+            lines.push(kv("family", &s.family, C_ACC()));
+            lines.push(kv("format", &s.format, C_ACC()));
+            lines.push(kv(
+                "compiled-for",
+                if s.compiled_for.is_empty() { "-" } else { &s.compiled_for },
+                if s.format == "hf" { C_DIM() } else { C_WARN() },
+            ));
+            lines.push(kv(
+                "revision",
+                if s.revision.is_empty() { "-" } else { &s.revision },
+                C_DIM(),
+            ));
+            lines.push(kv("size", &s.size, C_DIM()));
+            lines.push(kv("path", &s.path, C_TRACK()));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "d deploy this build → Deployment · esc back",
+                Style::default().fg(C_DIM()),
+            )));
+            format!("store build · {}", s.repo)
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                "(no selection)",
+                Style::default().fg(C_DIM()),
+            )));
+            "detail".to_string()
+        }
+    };
+    f.render_widget(
+        Paragraph::new(lines).block(block(&format!("{} · esc back", title))),
         area,
     );
 }
@@ -3655,18 +3762,16 @@ fn view_serving(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-// ── Deploy▸Library — 배포 가능한 모델 라이브러리. ──
-// 배포 렌즈 3패널: 0 스토어 컴파일본(family›repo›target, 선택·배포) · 1 카탈로그(조직 제공) · 2 진행 중 컴파일.
+// ── Deploy▸Library — 배포 가능한 모델 라이브러리(통합 트리). ──
+// 배포 렌즈 2패널: 0 배포 가능 전부(카탈로그 조직정의 + 스토어 컴파일본, family 로 묶음) · 1 진행 중 컴파일.
+// 한 패널에서 배포 가능한 모든 것을 고른다 — 카탈로그/스토어를 오가는 패널 전환 불필요.
 fn view_library(f: &mut Frame, area: Rect, app: &App) {
+    use crate::app::LibItem;
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(6),
-            Constraint::Length(7),
-            Constraint::Length(6),
-        ])
+        .constraints([Constraint::Min(6), Constraint::Length(7)])
         .split(area);
-    let focus = app.panel_focus; // 0 스토어 빌드 · 1 카탈로그 · 2 진행 중 컴파일
+    let focus = app.panel_focus; // 0 통합 배포 트리 · 1 진행 중 컴파일
     let blk = |title: &str, active: bool| {
         if active {
             block_active(title)
@@ -3675,158 +3780,38 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
         }
     };
 
-    // ── 1) 스토어 컴파일본: family › repo › target(포맷/compiled_for). 물리적으로 존재하는 배포 가능 빌드. ──
-    let sorder = app.stored_order();
-    let mut sl: Vec<Line> = Vec::new();
-    sl.push(Line::from(vec![
-        Span::styled("type: ", Style::default().fg(C_DIM())),
+    // ── 1) 통합 배포 트리: family › (카탈로그 모델 · 스토어 컴파일본). 재고 가능성 ✓⚙✗ / ◇ 스토어 빌드. ──
+    let items = app.library_items();
+    let fam_of = |it: LibItem| match it {
+        LibItem::Catalog(k) => crate::app::App::catalog_family(&app.catalog[k]).to_lowercase(),
+        LibItem::Stored(k) => app.snap.stored[k].family.to_lowercase(),
+    };
+    let mut ll: Vec<Line> = Vec::new();
+    ll.push(Line::from(vec![
+        Span::styled("catalog: ", Style::default().fg(C_DIM())),
+        Span::styled("✓ ready ", Style::default().fg(C_OK())),
+        Span::styled("⚙ needs-compile ", Style::default().fg(C_WARN())),
+        Span::styled("✗ no-cap   ", Style::default().fg(C_BAD())),
+        Span::styled("store: ", Style::default().fg(C_DIM())),
+        Span::styled("◇ ", Style::default().fg(C_ACC())),
         tag("HF", C_ACC()),
-        Span::styled("source ", Style::default().fg(C_DIM())),
         tag("RBLN", Color::Magenta),
         tag("RNGD", C_WARN()),
-        Span::styled("compiled · ◇ deployable", Style::default().fg(C_DIM())),
     ]));
-    if sorder.is_empty() {
-        sl.push(Line::from(Span::styled(
-            "(스토어에 빌드 없음 — 카탈로그에서 컴파일하면 discovery 후 여기 나타남)",
+    if items.is_empty() {
+        ll.push(Line::from(Span::styled(
+            "(배포 가능한 모델 없음 — catalog/models.yaml 또는 스토어 인벤토리)",
             Style::default().fg(C_DIM()),
         )));
     }
-    let mut ssel_line = 0usize;
+    let mut lsel_line = 0usize;
     let mut last_fam = String::new();
-    let mut last_repo = String::new();
-    for (pos, &i) in sorder.iter().enumerate() {
-        let s = &app.snap.stored[i];
-        let fam = s.family.clone();
-        let repo_cnt = sorder
-            .iter()
-            .filter(|&&k| app.snap.stored[k].family == fam)
-            .map(|&k| app.snap.stored[k].repo.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
+    for (pos, &it) in items.iter().enumerate() {
+        let fam = fam_of(it);
+        let fam_cnt = items.iter().filter(|&&x| fam_of(x) == fam).count();
         if fam != last_fam {
-            let cnt = sorder
-                .iter()
-                .filter(|&&k| app.snap.stored[k].family == fam)
-                .count();
-            sl.push(Line::from(vec![
-                Span::styled("▪ ", Style::default().fg(C_ACC())),
-                Span::styled(
-                    fam.clone(),
-                    Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  ({} build{})", cnt, if cnt == 1 { "" } else { "s" }),
-                    Style::default().fg(C_DIM()),
-                ),
-            ]));
-            last_fam = fam.clone();
-            last_repo.clear();
-        }
-        if s.repo != last_repo {
-            if repo_cnt > 1 {
-                sl.push(Line::from(vec![
-                    Span::styled("  › ", Style::default().fg(C_TRACK())),
-                    Span::styled(truncw(&s.repo, 48), Style::default().fg(Color::Gray)),
-                ]));
-            }
-            last_repo = s.repo.clone();
-        }
-        let indent = if repo_cnt > 1 { "     └ " } else { "  └ " };
-        let (tbadge, is_src) = match s.format.as_str() {
-            "rbln" => (tag("RBLN", Color::Magenta), false),
-            "furiosa" => (tag("RNGD", C_WARN()), false),
-            _ => (tag("HF", C_ACC()), true),
-        };
-        let label = if is_src {
-            if s.revision.is_empty() || s.revision == "-" {
-                "source weights".to_string()
-            } else {
-                format!("source @{}", truncw(&s.revision, 8))
-            }
-        } else {
-            format!("compiled · {}", s.compiled_for)
-        };
-        let selected = focus == 0 && pos == app.selected;
-        if selected {
-            ssel_line = sl.len();
-        }
-        let mut sp = vec![
-            Span::styled(indent.to_string(), Style::default().fg(C_TRACK())),
-            Span::styled("◇ ", Style::default().fg(C_ACC())),
-            tbadge,
-        ];
-        // 버전(repo) 티어가 접혔으면 repo 이름을 leaf 에 병기(식별용).
-        if repo_cnt <= 1 {
-            sp.push(Span::styled(
-                format!(
-                    " {:<20} ",
-                    truncw(s.repo.rsplit('/').next().unwrap_or(&s.repo), 20)
-                ),
-                Style::default().fg(Color::White),
-            ));
-        }
-        sp.push(Span::styled(
-            format!(" {:<24} ", truncw(&label, 24)),
-            Style::default().fg(if is_src { C_DIM() } else { C_WARN() }),
-        ));
-        sp.push(Span::styled(
-            format!("{:<7} ", s.size),
-            Style::default().fg(C_DIM()),
-        ));
-        sp.push(Span::styled(
-            truncw(&s.path, 26),
-            Style::default().fg(C_TRACK()),
-        ));
-        let mut line = Line::from(sp);
-        if selected {
-            line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
-        }
-        sl.push(line);
-    }
-    let svis = (rows[0].height as usize).saturating_sub(2);
-    let sscroll = if ssel_line + 2 > svis {
-        (ssel_line + 3).saturating_sub(svis) as u16
-    } else {
-        0
-    };
-    f.render_widget(
-        Paragraph::new(sl).scroll((sscroll, 0)).block(blk(
-            &format!(
-                "Library · 스토어 빌드 (family › repo › target) · d deploy · ⏎ actions{}",
-                if focus == 0 {
-                    count_suffix(app.selected, sorder.len())
-                } else {
-                    String::new()
-                }
-            ),
-            focus == 0,
-        )),
-        rows[0],
-    );
-
-    // ── 2) 카탈로그 트리(focus 1): family › model, 재고 가능성 배지 + 타깃(placement) 벤더 요약 ──
-    let corder = app.library_order();
-    let mut cl: Vec<Line> = Vec::new();
-    if corder.is_empty() {
-        cl.push(Line::from(Span::styled(
-            "(카탈로그 비어있음 — catalog/models.yaml 또는 LMD_CATALOG)",
-            Style::default().fg(C_DIM()),
-        )));
-    }
-    let fam_of = crate::app::App::catalog_family;
-    let mut csel_line = 0usize;
-    let mut clast_fam = String::new();
-    for (pos, &i) in corder.iter().enumerate() {
-        let m = &app.catalog[i];
-        let fam = fam_of(m);
-        let fam_cnt = corder
-            .iter()
-            .filter(|&&k| fam_of(&app.catalog[k]) == fam)
-            .count();
-        if fam != clast_fam {
             if fam_cnt > 1 {
-                cl.push(Line::from(vec![
+                ll.push(Line::from(vec![
                     Span::styled("▪ ", Style::default().fg(C_ACC())),
                     Span::styled(
                         fam.clone(),
@@ -3834,94 +3819,138 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
                     ),
                 ]));
             }
-            clast_fam = fam.clone();
+            last_fam = fam.clone();
         }
-        let any_ready = m.placements.iter().any(|p| {
-            matches!(
-                crate::catalog::solve(p, &app.snap.inventory).0,
-                crate::catalog::Ready::Ready
-            )
-        });
-        let needs = m.placements.iter().any(|p| {
-            matches!(
-                crate::catalog::solve(p, &app.snap.inventory).0,
-                crate::catalog::Ready::NeedsArtifact
-            )
-        });
-        let (g, c) = if any_ready {
-            ("✓", C_OK())
-        } else if needs {
-            ("⚙", C_WARN())
-        } else {
-            ("✗", C_BAD())
-        };
         let indent = if fam_cnt > 1 { "  └ " } else { "" };
-        let selected = focus == 1 && pos == app.selected;
+        let selected = focus == 0 && pos == app.selected;
         if selected {
-            csel_line = cl.len();
+            lsel_line = ll.len();
         }
-        let mut sp = vec![
-            Span::styled(indent.to_string(), Style::default().fg(C_TRACK())),
-            Span::styled(format!("{} ", g), Style::default().fg(c)),
-            Span::styled(
-                format!("{:<22} ", truncw(&m.id, 22)),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled(
-                format!("{:<10} ", truncw(&m.role, 10)),
-                Style::default().fg(C_DIM()),
-            ),
-        ];
-        let mut seen = std::collections::BTreeSet::new();
-        for p in &m.placements {
-            let sig = format!("{} {} {} {}", p.engine, p.accel, p.resource, p.uri).to_lowercase();
-            let (lbl, col) = if sig.contains("rbln")
-                || sig.contains("rebellions")
-                || sig.contains("atom")
-            {
-                ("RBLN", Color::Magenta)
-            } else if sig.contains("furiosa") || sig.contains("rngd") {
-                ("RNGD", C_WARN())
-            } else {
-                ("GPU", C_ACC())
-            };
-            if seen.insert(lbl) {
-                sp.push(tag(lbl, col));
+        let mut sp: Vec<Span> = vec![Span::styled(indent.to_string(), Style::default().fg(C_TRACK()))];
+        match it {
+            LibItem::Catalog(k) => {
+                let m = &app.catalog[k];
+                let any_ready = m.placements.iter().any(|p| {
+                    matches!(
+                        crate::catalog::solve(p, &app.snap.inventory).0,
+                        crate::catalog::Ready::Ready
+                    )
+                });
+                let needs = m.placements.iter().any(|p| {
+                    matches!(
+                        crate::catalog::solve(p, &app.snap.inventory).0,
+                        crate::catalog::Ready::NeedsArtifact
+                    )
+                });
+                let (g, c) = if any_ready {
+                    ("✓", C_OK())
+                } else if needs {
+                    ("⚙", C_WARN())
+                } else {
+                    ("✗", C_BAD())
+                };
+                sp.push(Span::styled(format!("{} ", g), Style::default().fg(c)));
+                sp.push(Span::styled(
+                    format!("{:<22} ", truncw(&m.id, 22)),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                sp.push(Span::styled(
+                    format!("{:<8} ", truncw(&m.role, 8)),
+                    Style::default().fg(C_DIM()),
+                ));
+                let mut seen = std::collections::BTreeSet::new();
+                for p in &m.placements {
+                    let sig =
+                        format!("{} {} {} {}", p.engine, p.accel, p.resource, p.uri).to_lowercase();
+                    let (lbl, col) = if sig.contains("rbln")
+                        || sig.contains("rebellions")
+                        || sig.contains("atom")
+                    {
+                        ("RBLN", Color::Magenta)
+                    } else if sig.contains("furiosa") || sig.contains("rngd") {
+                        ("RNGD", C_WARN())
+                    } else {
+                        ("GPU", C_ACC())
+                    };
+                    if seen.insert(lbl) {
+                        // 벤더 배지 + 디바이스 수요(count×replicas) — "어떤 가속기 몇 개로".
+                        sp.push(tag(lbl, col));
+                        sp.push(Span::styled(
+                            format!("×{} ", p.count.max(1) * p.replicas.max(1)),
+                            Style::default().fg(col),
+                        ));
+                    }
+                }
+                // 소스(HF id / PVC 경로) — 어디서 오는지.
+                if let Some(p) = m.placements.first() {
+                    sp.push(Span::styled(
+                        truncw(&p.uri, 34),
+                        Style::default().fg(C_TRACK()),
+                    ));
+                }
+            }
+            LibItem::Stored(k) => {
+                let s = &app.snap.stored[k];
+                let (tbadge, is_src) = match s.format.as_str() {
+                    "rbln" => (tag("RBLN", Color::Magenta), false),
+                    "furiosa" => (tag("RNGD", C_WARN()), false),
+                    _ => (tag("HF", C_ACC()), true),
+                };
+                let label = if is_src {
+                    if s.revision.is_empty() || s.revision == "-" {
+                        "source weights".to_string()
+                    } else {
+                        format!("source @{}", truncw(&s.revision, 8))
+                    }
+                } else {
+                    format!("compiled · {}", s.compiled_for)
+                };
+                sp.push(Span::styled("◇ ", Style::default().fg(C_ACC())));
+                sp.push(tbadge);
+                sp.push(Span::styled(
+                    format!(" {:<22} ", truncw(s.repo.rsplit('/').next().unwrap_or(&s.repo), 22)),
+                    Style::default().fg(Color::White),
+                ));
+                sp.push(Span::styled(
+                    format!("{:<22} ", truncw(&label, 22)),
+                    Style::default().fg(if is_src { C_DIM() } else { C_WARN() }),
+                ));
+                sp.push(Span::styled(
+                    format!("{} ", s.size),
+                    Style::default().fg(C_DIM()),
+                ));
             }
         }
         let mut line = Line::from(sp);
         if selected {
             line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
         }
-        cl.push(line);
+        ll.push(line);
     }
-    cl.push(Line::from(Span::styled(
-        "a/⏎ actions · d deploy · c RBLN / f Furiosa compile (지원 모델)",
+    ll.push(Line::from(Span::styled(
+        "⏎/a actions · d deploy · c RBLN / f Furiosa compile (지원 모델) · ◇=스토어 실재 빌드",
         Style::default().fg(C_DIM()),
     )));
-    let cvis = (rows[1].height as usize).saturating_sub(2);
-    let cscroll = if csel_line + 2 > cvis {
-        (csel_line + 3).saturating_sub(cvis) as u16
+    let lvis = (rows[0].height as usize).saturating_sub(2);
+    let lscroll = if lsel_line + 2 > lvis {
+        (lsel_line + 3).saturating_sub(lvis) as u16
     } else {
         0
     };
     f.render_widget(
-        Paragraph::new(cl).scroll((cscroll, 0)).block(blk(
+        Paragraph::new(ll).scroll((lscroll, 0)).block(blk(
             &format!(
-                "catalog · 조직 제공 모델 (family › model › target) · {}{}",
-                app.catalog.len(),
-                if focus == 1 {
-                    count_suffix(app.selected, corder.len())
-                } else {
-                    String::new()
-                }
+                "Library · 배포 가능 (family › model/build › target){}",
+                count_suffix(app.selected, items.len())
             ),
-            focus == 1,
+            focus == 0,
         )),
-        rows[1],
+        rows[0],
     );
 
-    // ── 3) 진행 중/최근 컴파일 Job(focus 2) — 상태·경과·진행바·힌트. 완료 1시간 후 자동정리. ──
+    // ── 2) 진행 중/최근 컴파일 Job(focus 1) — 상태·경과·진행바·힌트. 완료 1시간 후 자동정리. ──
     let mut jl: Vec<Line> = Vec::new();
     if app.snap.compiles.is_empty() {
         jl.push(Line::from(Span::styled(
@@ -3980,13 +4009,13 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::styled(hint, Style::default().fg(hc)));
         }
         let mut line = Line::from(spans);
-        if focus == 2 && app.selected == j {
+        if focus == 1 && app.selected == j {
             line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
         }
         jl.push(line);
     }
-    let jscroll = if focus == 2 && app.selected + 3 > (rows[2].height as usize).saturating_sub(2) {
-        (app.selected + 3).saturating_sub((rows[2].height as usize).saturating_sub(2)) as u16
+    let jscroll = if focus == 1 && app.selected + 3 > (rows[1].height as usize).saturating_sub(2) {
+        (app.selected + 3).saturating_sub((rows[1].height as usize).saturating_sub(2)) as u16
     } else {
         0
     };
@@ -3994,15 +4023,15 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(jl).scroll((jscroll, 0)).block(blk(
             &format!(
                 "compile jobs · ✓done ◑running ✗failed · ⏎ logs/delete · auto-clean 1h{}",
-                if focus == 2 {
+                if focus == 1 {
                     count_suffix(app.selected, app.snap.compiles.len())
                 } else {
                     String::new()
                 }
             ),
-            focus == 2,
+            focus == 1,
         )),
-        rows[2],
+        rows[1],
     );
 }
 
