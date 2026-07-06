@@ -2094,7 +2094,8 @@ mod tests {
             engine: "vLLM".into(),
             vendor,
             mount: "/mnt/store/x".into(),
-            fields: vec![f("replicas", replicas), f("devices", devices), f("place", place)],
+            fields: vec![f("replicas", replicas), f("devices", devices)],
+            place: place.into(), // placement 는 이제 폼 필드가 아니라 구조체 값(피커에서 선택)
             cursor: 0,
             editing: false,
         }
@@ -2328,11 +2329,16 @@ mod tests {
         let n = p.rows.iter().find(|r| r.value == "n-drv").expect("node row");
         assert_eq!((n.total, n.free), (2, 1), "총 2 · 유휴 1");
         assert!(n.schedulable, "ready + 드라이버 → 스케줄 가능");
-        // 노드 선택 → place 필드에 반영, 피커 닫힘.
+        // 노드 선택 → 배치 확정 + 매니페스트 생성(제출)까지. 피커·폼 닫힘, 확인 팝업에 nodeSelector 반영.
         a.place_picker.as_mut().unwrap().cursor = 2;
         a.place_pick_apply();
-        assert!(a.place_picker.is_none());
-        assert_eq!(a.deploy_form.as_ref().unwrap().get("place"), "n-drv");
+        assert!(a.place_picker.is_none(), "선택 후 피커 닫힘");
+        assert!(a.deploy_form.is_none(), "placement 확정 → 폼 제출(소비)");
+        let (_, yaml) = submitted(&a);
+        assert!(
+            yaml.contains("kubernetes.io/hostname: n-drv"),
+            "선택 노드가 nodeSelector 로 반영\n{yaml}"
+        );
     }
 
     #[test]

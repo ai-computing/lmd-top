@@ -161,6 +161,7 @@ pub struct DeployForm {
     pub vendor: &'static str, // "rbln" | "furiosa" | "gpu"
     pub mount: String,        // 서빙할 스토어 아티팩트 경로
     pub fields: Vec<CompileField>,
+    pub place: String, // 노드 배치("any"/"spread"/hostname) — 제출 직전 placement 화면에서 선택
     pub cursor: usize,
     pub editing: bool,
 }

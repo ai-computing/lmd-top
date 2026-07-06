@@ -283,9 +283,9 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
     let title = if form.editing {
         "deploy · editing custom value — Enter/Esc confirm · Backspace delete".to_string()
     } else if pf_ok {
-        "deploy · ↑↓ field · ←→ value · e edit · Enter→confirm apply · q cancel".to_string()
+        "deploy · ↑↓ field · ←→ value · e edit · Enter→placement · q cancel".to_string()
     } else {
-        "deploy · preflight has failures · Enter→confirm anyway · q cancel".to_string()
+        "deploy · preflight has failures · Enter→placement anyway · q cancel".to_string()
     };
     f.render_widget(Paragraph::new(lines).block(block(&title)), area);
 }

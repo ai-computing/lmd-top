@@ -1170,13 +1170,9 @@ fn ui_loop(
                     }
                     // Deploy/serving options form overlay.
                     if app.deploy_form.is_some() {
-                        // place 필드에서 Enter → 노드 상태 목록에서 배치 선택(다음 화면).
-                        let on_place = {
-                            let f = app.deploy_form.as_ref().unwrap();
-                            !f.editing
-                                && f.fields.get(f.cursor).map(|x| x.key == "place").unwrap_or(false)
-                        };
-                        if on_place && matches!(k.code, KeyCode::Enter) {
+                        // 옵션을 다 고른 뒤 Enter → placement 선택 화면(다음 단계) → 거기서 매니페스트.
+                        let editing = app.deploy_form.as_ref().unwrap().editing;
+                        if !editing && matches!(k.code, KeyCode::Enter) {
                             app.open_place_picker();
                             continue;
                         }
