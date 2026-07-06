@@ -48,23 +48,39 @@ List headers show a `Σ` aggregate of the shown rows (all rows, or just the filt
 
 ## Install
 
-**Prebuilt binary** (Linux x86_64):
+It's a single static binary (glibc only) that drives your `kubectl` — so installing is just "put the binary on PATH." Pick whichever fits; **all features (incl. compile/deploy) are identical** across them.
+
+**kubectl plugin** (recommended for cluster operators) — run the full TUI as `kubectl lmd-top`:
+
+```bash
+# self-hosted manifest (until it lands in the central krew-index):
+kubectl krew install --manifest-url https://raw.githubusercontent.com/gspark-etri/lmd-top/main/plugins/lmd-top.yaml
+kubectl lmd-top                      # or: kubectl lmd-top --mode admin
+```
+
+Running under `kubectl` guarantees `kubectl` is present, so scale/stop/restart and RBLN/Furiosa compile & deploy (which `kubectl apply` generated manifests) work out of the box with your kubeconfig's permissions.
+
+**One-line installer** (prebuilt binary → `~/.local/bin`, no Rust toolchain):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gspark-etri/lmd-top/main/install.sh | sh
+#   ... | sh -s -- --version v0.34.0            # pin a version
+#   ... | sh -s -- --bin-dir /usr/local/bin     # system-wide (needs write perms)
+```
+
+Auto-detects OS/arch (Linux/macOS · x86_64/aarch64), downloads the release tarball, verifies its `.sha256`, and installs it. Manual equivalent:
 
 ```bash
 VER=v0.34.0   # latest: https://github.com/gspark-etri/lmd-top/releases/latest
 curl -fsSL "https://github.com/gspark-etri/lmd-top/releases/download/$VER/lmd-top-$VER-x86_64-linux.tar.gz" | tar xz
-sudo install -m 0755 lmd-top /usr/local/bin/
+sudo install -m 0755 "lmd-top-$VER-x86_64-linux/lmd-top" /usr/local/bin/
 ```
 
-A `.sha256` checksum is published alongside each release asset.
-
-**From source** (needs a Rust toolchain and a C linker, `cc`/`gcc` — nothing else):
+**From source** (developers; needs a Rust toolchain and a C linker):
 
 ```bash
 git clone https://github.com/gspark-etri/lmd-top.git && cd lmd-top
-./install.sh                 # installs any missing prereqs, then runs `cargo install`
-#   ./install.sh --check     # report what's present/missing, install nothing
-#   ./install.sh --with-demo # also install agg and regenerate the demo GIF
+./install.sh --from-source        # cargo install (+ prereqs); --with-demo also regens the GIF
 # by hand: cargo install --path .
 ```
 
