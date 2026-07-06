@@ -114,6 +114,11 @@ impl App {
                 .map(|r| r.model.clone())
                 .unwrap_or_default(),
             View::Topo => String::new(), // 맵 뷰 — 리스트 선택 없음
+            View::Setup => self
+                .setup_checks()
+                .get(i)
+                .map(|c| format!("{} {} {}", c.category, c.name, c.detail))
+                .unwrap_or_default(),
         }
     }
 }

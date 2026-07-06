@@ -58,6 +58,7 @@ impl Palette {
             v(View::Serving),
             v(View::Library),
             v(View::Events),
+            v(View::Setup),
         ];
         items.extend([
             PaletteItem {

@@ -488,6 +488,19 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                 .map_err(|e| e.to_string());
             mk("apply".into(), title, "apply", r)
         }
+        Pending::ApplyUrl { url, title } => {
+            let r = kube::apply_url(&url)
+                .map(|o| {
+                    let n = o.lines().count();
+                    OkInfo {
+                        audit_detail: format!("{} ({} objects)", url, n),
+                        notify: format!("applied {} — {} object(s)", title, n),
+                        clear_preview: true,
+                    }
+                })
+                .map_err(|e| e.to_string());
+            mk("apply-url".into(), title, "apply", r)
+        }
     }
 }
 
@@ -1337,6 +1350,8 @@ fn ui_loop(
                                 }
                             } else if app.view == View::Routing {
                                 open_actions_or_detail(&mut app, false);
+                            } else if app.view == View::Setup {
+                                app.setup_enter(); // 부트스트랩 점검 행의 조치(apply/show cmd)
                             } else if matches!(
                                 app.view,
                                 View::Serving | View::Library | View::Overview | View::Pods
@@ -1364,7 +1379,7 @@ fn ui_loop(
                         KeyCode::Char('d') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.move_sel(10)
                         }
-                        KeyCode::Char(c @ '0'..='5') => app.goto_section(c as usize - '0' as usize),
+                        KeyCode::Char(c @ '0'..='6') => app.goto_section(c as usize - '0' as usize),
                         KeyCode::Up | KeyCode::Char('k') => {
                             if app.detail && app.view == View::Nodes {
                                 app.dev_cursor(-1) // Node 상세: device 커서(0=요약)

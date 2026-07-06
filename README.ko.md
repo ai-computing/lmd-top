@@ -41,6 +41,7 @@
 | 3 | **Infra** | Nodes · Devices · Topology | **Nodes**: 노드 헬스(CPU/메모리/디스크/load). **Devices**: 디바이스별 util/VRAM/온도/전력. **Topology**: Canvas Gateway→EPP→Pool 흐름 + pressure 히트맵 |
 | 4 | **Deploy** | Model List / Activity (세로 2패널) | 런타임이 아니라 프로비저닝 — 위/아래 2패널(`Ctrl+w` 로 포커스 전환). **Model List**(위): 배포 가능한 모든 것 — 카탈로그 가능성(`✓ ready`/`⚙ needs-compile`/`✗ no-capacity`) + 배치 타깃·스토어 빌드, family 로 묶음; `⏎` → Deploy/Compile. deploy 폼은 옵션을 먼저 고르고 `⏎` 누르면 **placement** 선택 화면(후보 노드의 유휴/전체 디바이스·util·mem·스케줄 가능)이 뜨며, 노드를 고르면 매니페스트가 생성됨. **Activity**(아래): compile Job(진행률 % 바)과 서빙 중·시도 중·실패 deploy rollout 을 STARTED(5m/3h/2d)·서빙 노드·결과와 함께 한 피드로; 끝난 compile 은 30분 뒤 자동 정리; `⏎` → Logs/Delete |
 | 5 | **Events** | — | Kubernetes + llm-d 이벤트(최신순). `⏎` 로 전체 메시지 |
+| 6 | **Setup** | — | 새 클러스터 부트스트랩 **Doctor** — llm-d 플랫폼 전제조건(Gateway API·Inference-Extension CRD, `llm-d-gateway`, 공유 EPP Role, `model-store` PVC, `hf-token` secret, 가속기 device plugin, Prometheus)을 `✓`/`!`/`✗` 로 점검. 행에서 `⏎` 는 위험도에 따라: lmd-top 이 정확히 생성하는 오브젝트(namespace, 감지된 `gatewayClassName` 의 Gateway)는 미리보기→apply, CRD 는 `kubectl apply -f <상류 릴리스 URL>`(admin·확인), 사이트 특화·Helm 관리 항목(PVC·EPP Role·secret·device plugin)은 직접 실행할 명령만 안내. 확인 전까지 read-only |
 
 리스트 헤더에 보이는 행(전체 또는 필터된 것)의 `Σ` 통합 메트릭이 표시됩니다. `y` 로 선택 리소스의 live YAML(읽기전용)을 봅니다.
 

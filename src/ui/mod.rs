@@ -160,6 +160,7 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
             View::Events => view_events(f, body, app),
             View::Nodes => view_nodes(f, body, app),
             View::Topo => view_topo(f, body, app),
+            View::Setup => view_setup(f, body, app),
         }
     }
     fxs.body(f, body, dt); // 본문 트랜지션(오버레이 전에)
@@ -374,8 +375,8 @@ fn help_overlay(f: &mut Frame) {
     let lines = vec![
         sec("navigate"),
         g(
-            "0-5 / Tab",
-            "switch section (Overview·Traffic·Models·Infra·Deploy·Events); Shift+Tab back",
+            "0-6 / Tab",
+            "switch section (Overview·Traffic·Serving·Infra·Deploy·Events·Setup); Shift+Tab back",
         ),
         g(
             "← / →  ([ ])",
@@ -683,14 +684,14 @@ fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
 fn tabs(f: &mut Frame, area: Rect, app: &App) {
     use crate::app::Section;
     let cur_sec = app.view.section();
-    // Section tabs (0-5). Compact to number-only for inactive tabs when the strip won't fit.
+    // Section tabs (0-6). Compact to number-only for inactive tabs when the strip won't fit.
     let full_w: usize = Section::ALL
         .iter()
         .enumerate()
         .map(|(i, s)| format!(" {}:{} ", i, s.title()).len() + 1)
         .sum();
     let compact = full_w + 24 > area.width as usize;
-    // 앞머리 마커 — Tab/0-5 로 섹션 전환됨을 명시.
+    // 앞머리 마커 — Tab/0-6 로 섹션 전환됨을 명시.
     let mut spans: Vec<Span> = vec![Span::styled(
         "⇥ ",
         Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
@@ -926,7 +927,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         parts.push("y yaml".into());
     }
     // 전역
-    parts.push("⇥/0-5 section".into());
+    parts.push("⇥/0-6 section".into());
     parts.push("A alerts".into());
     parts.push("t theme".into());
     parts.push("? help".into());
@@ -4403,6 +4404,84 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
             }
         });
     f.render_widget(canvas, area);
+}
+
+// ── Setup(Doctor) — 새 환경 부트스트랩 전제조건 점검 + 가이드된 조치 ──────────
+fn view_setup(f: &mut Frame, area: Rect, app: &App) {
+    use crate::app::CheckState;
+    let checks = app.setup_checks();
+    let (mut ok, mut missing) = (0usize, 0usize);
+    let mut prev_cat = "";
+    let rows: Vec<Row> = checks
+        .iter()
+        .map(|c| {
+            match c.state {
+                CheckState::Ok => ok += 1,
+                CheckState::Missing => missing += 1,
+                _ => {}
+            }
+            let sc = match c.state.sev() {
+                0 => C_OK(),
+                2 => C_BAD(),
+                _ => C_WARN(),
+            };
+            // 카테고리는 그룹 첫 행에만 표기(줄 리듬 — 반복 라벨 제거).
+            let cat = if c.category == prev_cat {
+                String::new()
+            } else {
+                prev_cat = c.category;
+                c.category.to_string()
+            };
+            let act = c.fix.label();
+            let ac = match &c.fix {
+                crate::app::SetupFix::None => C_DIM(),
+                crate::app::SetupFix::Command(_) => Color::Gray,
+                _ => C_ACC(),
+            };
+            Row::new(vec![
+                Cell::from(c.state.glyph()).style(Style::default().fg(sc).add_modifier(Modifier::BOLD)),
+                Cell::from(cat).style(Style::default().fg(C_DIM())),
+                Cell::from(truncw(&c.name, 20)).style(
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Cell::from(truncw(&c.detail, 60)).style(Style::default().fg(Color::Gray)),
+                Cell::from(act).style(Style::default().fg(ac)),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(1),  // STATE glyph
+        Constraint::Length(12), // CATEGORY
+        Constraint::Length(20), // CHECK
+        Constraint::Min(24),    // DETAIL
+        Constraint::Length(15), // ACTION
+    ];
+    let header = ["", "CATEGORY", "CHECK", "DETAIL", "ACTION"];
+    let conn = if app.snap.setup.probed {
+        format!("{} ok · {} missing", ok, missing)
+    } else {
+        "cluster unreachable".to_string()
+    };
+    let title = format!(
+        "Setup · llm-d platform prerequisites · {} · ⏎ fix/show · read-only checks{}",
+        conn,
+        count_suffix(app.selected, checks.len())
+    );
+    let mut st = TableState::default();
+    st.select(Some(app.selected));
+    f.render_stateful_widget(
+        Table::new(rows, widths)
+            .header(hrow(&header))
+            .column_spacing(1)
+            .row_highlight_style(hl_style())
+            .highlight_symbol("▎")
+            .block(block_active(&title)),
+        area,
+        &mut st,
+    );
+    list_scrollbar(f, area, checks.len(), app.selected, 1);
 }
 
 // ── Events (k8s + llm-d 이벤트) ─────────────────────────

@@ -27,6 +27,53 @@ pub fn cm_data<'a>(cm: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     cm["data"][key].as_str()
 }
 
+/// Existence probe: `kubectl get <args> --ignore-not-found -o name`.
+/// `Some(true)`=object present, `Some(false)`=absent, `None`=kubectl error (kind/CRD missing or cluster unreachable).
+/// Read-only; used by the Setup(Doctor) view's prerequisite checks.
+pub async fn get_exists(args: &[&str]) -> Option<bool> {
+    let out = Command::new("kubectl")
+        .args(args)
+        .args(["--ignore-not-found", "-o", "name", "--request-timeout=8s"])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(!String::from_utf8_lossy(&out.stdout).trim().is_empty())
+}
+
+/// `kubectl get <args> -o jsonpath=<jp>` → trimmed stdout, or `None` on kubectl error (object/kind absent).
+pub async fn get_jsonpath(args: &[&str], jp: &str) -> Option<String> {
+    let out = Command::new("kubectl")
+        .args(args)
+        .arg(format!("-o=jsonpath={}", jp))
+        .arg("--request-timeout=8s")
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Apply an upstream release manifest by URL: `kubectl apply -f <url>` (server-side).
+/// For Setup(Doctor) CRD installs (Gateway API / Inference Extension). Sync (worker thread).
+pub fn apply_url(url: &str) -> Result<String> {
+    let out = std::process::Command::new("kubectl")
+        .args(["apply", "--server-side", "-f", url, "--request-timeout=60s"])
+        .output()?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "apply -f {} failed: {}",
+            url,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Tail pod logs (sync, called from UI thread). --all-containers, last `tail` lines.
 pub fn logs(ns: &str, pod: &str, tail: u32) -> Result<Vec<String>> {
     let out = std::process::Command::new("kubectl")
