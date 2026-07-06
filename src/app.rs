@@ -399,6 +399,7 @@ pub struct App {
     pub preview_apply: bool, // true=generated manifest (v to verify, a to apply), false=read-only (describe/yaml)
     pub compile_form: Option<CompileForm>, // NPU compile options edit form (c → edit → Enter → preview)
     pub deploy_form: Option<DeployForm>, // deploy (serving) options edit form (d → edit → Enter → preview)
+    pub place_picker: Option<PlacePick>, // deploy 폼의 place 필드 → 후보 노드 상태 목록에서 선택
     pub action_menu: Option<ActionMenu>, // Enter context action menu (Info/Compile/Deploy/Stop…)
     pub objectives: HashMap<String, Objective>, // per-model serving objective (SLO) — user input
     pub objective_form: Option<ObjectiveForm>, // objective edit form
@@ -490,6 +491,7 @@ impl App {
             preview_apply: false,
             compile_form: None,
             deploy_form: None,
+            place_picker: None,
             action_menu: None,
             objectives: HashMap::new(),
             objective_form: None,
@@ -1765,7 +1767,7 @@ mod tests {
     fn overlay_precedence_single_source() {
         use crate::ui::Overlay;
         // PRECEDENCE must include every variant exactly once; missing entries are not drawn/consumed.
-        assert_eq!(Overlay::PRECEDENCE.len(), 12);
+        assert_eq!(Overlay::PRECEDENCE.len(), 13);
         let mut seen = std::collections::HashSet::new();
         for ov in Overlay::PRECEDENCE {
             assert!(
@@ -2298,5 +2300,68 @@ mod tests {
             rows.iter().any(|r| r.running_compile && r.progress == Some(0.5)),
             "진행 중 compile 은 진행률을 싣는다"
         );
+    }
+
+    #[test]
+    fn place_picker_lists_candidate_nodes() {
+        use crate::collect::AccelKind::Rbln;
+        let mut a = App::new();
+        let mut node = crate::collect::NodeInfo {
+            name: "n-drv".into(),
+            ..Default::default()
+        };
+        node.ready = true;
+        node.npu = "RBLN drv3.0".into();
+        a.snap = Snapshot {
+            accel: vec![
+                accel(Rbln, "n-drv", true, ""),  // 유휴
+                accel(Rbln, "n-drv", true, "m"), // 점유
+            ],
+            nodes: vec![node],
+            ..Default::default()
+        };
+        a.deploy_form = Some(deploy_form("rbln", "1", "1", "any"));
+        a.open_place_picker();
+        let p = a.place_picker.clone().expect("picker opens");
+        assert_eq!(p.rows[0].value, "any");
+        assert_eq!(p.rows[1].value, "spread");
+        let n = p.rows.iter().find(|r| r.value == "n-drv").expect("node row");
+        assert_eq!((n.total, n.free), (2, 1), "총 2 · 유휴 1");
+        assert!(n.schedulable, "ready + 드라이버 → 스케줄 가능");
+        // 노드 선택 → place 필드에 반영, 피커 닫힘.
+        a.place_picker.as_mut().unwrap().cursor = 2;
+        a.place_pick_apply();
+        assert!(a.place_picker.is_none());
+        assert_eq!(a.deploy_form.as_ref().unwrap().get("place"), "n-drv");
+    }
+
+    #[test]
+    fn place_picker_renders_without_panic() {
+        use crate::collect::AccelKind::Rbln;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut a = App::new();
+        a.snap = Snapshot {
+            accel: vec![accel(Rbln, "etri-001", true, "")],
+            ..Default::default()
+        };
+        a.view = View::Library;
+        a.deploy_form = Some(deploy_form("rbln", "1", "1", "any"));
+        a.open_place_picker();
+        let mut fx = crate::ui::FxState::disabled();
+        let mut t = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if let Some(c) = buf.cell((x, y)) {
+                    s.push_str(c.symbol());
+                }
+            }
+        }
+        assert!(s.contains("NODE"), "picker 헤더\n{s}");
+        assert!(s.contains("etri-001"), "후보 노드 행");
+        assert!(s.contains("placement"), "picker 타이틀");
     }
 }

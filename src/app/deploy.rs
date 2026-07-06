@@ -187,7 +187,7 @@ impl App {
                 value: "any".into(),
                 choices: place_choices,
                 numeric: false,
-                help: "Node placement: any=no extra constraint, spread=topology spread, hostname=pinned node.".into(),
+                help: "Node placement: any / spread / pinned node. ⏎ 로 후보 노드 상태(유휴·util·mem) 보고 선택.".into(),
             },
             CompileField {
                 key: "routing".into(),
@@ -208,6 +208,106 @@ impl App {
             cursor: 0,
             editing: false,
         });
+    }
+
+    /// deploy 폼의 place 필드 → 후보 노드 상태 목록(유휴/전체/util/mem/스케줄가능)을 만든다.
+    /// 사용자가 근거를 보고 배치를 고르도록 — placement 선택을 "다음 화면"으로 분리.
+    pub fn open_place_picker(&mut self) {
+        let Some(form) = self.deploy_form.as_ref() else {
+            return;
+        };
+        let (kind, drv) = match form.vendor {
+            "rbln" => (crate::collect::AccelKind::Rbln, "RBLN"),
+            "furiosa" => (crate::collect::AccelKind::Rngd, "RNGD"),
+            _ => (crate::collect::AccelKind::Gpu, ""),
+        };
+        // 노드별 집계: (total, free, util_sum, mem_used, mem_total).
+        let mut agg: std::collections::BTreeMap<String, (i64, i64, f64, f64, f64)> =
+            std::collections::BTreeMap::new();
+        for a in self
+            .snap
+            .accel
+            .iter()
+            .filter(|a| a.kind == kind && !a.node.is_empty())
+        {
+            let e = agg.entry(a.node.clone()).or_default();
+            e.0 += 1;
+            if a.alive && a.busy_model.is_empty() {
+                e.1 += 1;
+            }
+            e.2 += a.util;
+            e.3 += a.mem_used_gb;
+            e.4 += a.mem_total_gb;
+        }
+        let pseudo = |value: &str, note: &str| PlaceRow {
+            value: value.into(),
+            label: value.into(),
+            free: 0,
+            total: 0,
+            util: f64::NAN,
+            mem_used: 0.0,
+            mem_total: 0.0,
+            schedulable: true,
+            note: note.into(),
+        };
+        let mut rows = vec![
+            pseudo("any", "제약 없음 — 스케줄러가 유휴 리소스로 배치"),
+            pseudo("spread", "replica 를 여러 노드에 고르게 분산"),
+        ];
+        for (node, (total, free, util_sum, mu, mt)) in agg {
+            let nd = self.snap.nodes.iter().find(|n| n.name == node);
+            let ready = nd.map(|n| n.ready && !n.cordoned).unwrap_or(true);
+            let has_drv =
+                drv.is_empty() || nd.map(|n| n.npu.to_uppercase().contains(drv)).unwrap_or(false);
+            let note = if !ready {
+                "NotReady/cordon".into()
+            } else if !has_drv {
+                format!("{} 드라이버 없음", drv)
+            } else {
+                String::new()
+            };
+            rows.push(PlaceRow {
+                util: if total > 0 {
+                    util_sum / total as f64
+                } else {
+                    f64::NAN
+                },
+                value: node.clone(),
+                label: node,
+                free,
+                total,
+                mem_used: mu,
+                mem_total: mt,
+                schedulable: ready && has_drv,
+                note,
+            });
+        }
+        self.place_picker = Some(PlacePick { cursor: 0, rows });
+    }
+
+    /// placement 피커 커서 이동(순환).
+    pub fn place_pick_move(&mut self, delta: i64) {
+        if let Some(p) = self.place_picker.as_mut() {
+            let n = p.rows.len() as i64;
+            if n > 0 {
+                p.cursor = ((p.cursor as i64 + delta).rem_euclid(n)) as usize;
+            }
+        }
+    }
+
+    /// 선택한 노드를 deploy 폼의 place 필드에 반영하고 피커를 닫는다.
+    pub fn place_pick_apply(&mut self) {
+        let Some(p) = self.place_picker.take() else {
+            return;
+        };
+        let Some(value) = p.rows.get(p.cursor).map(|r| r.value.clone()) else {
+            return;
+        };
+        if let Some(form) = self.deploy_form.as_mut() {
+            if let Some(f) = form.fields.iter_mut().find(|f| f.key == "place") {
+                f.value = value;
+            }
+        }
     }
 
     /// 배포 용량 판정 — 총 디바이스 수요 대 클러스터 동종 가속기(총/유휴).
