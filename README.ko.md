@@ -49,7 +49,7 @@
 **빌드된 바이너리** (Linux x86_64):
 
 ```bash
-VER=v0.32.0   # 최신 버전: https://github.com/gspark-etri/lmd-top/releases/latest
+VER=v0.34.0   # 최신 버전: https://github.com/gspark-etri/lmd-top/releases/latest
 curl -fsSL "https://github.com/gspark-etri/lmd-top/releases/download/$VER/lmd-top-$VER-x86_64-linux.tar.gz" | tar xz
 sudo install -m 0755 lmd-top /usr/local/bin/
 ```
@@ -130,19 +130,20 @@ Kubernetes 는 `kubectl` 로 조회합니다.
 
 ## 현황 & 로드맵
 
-**지금 바로 되는 것 (트래픽 불필요).** 11개 뷰 전부, 자동 감지·통합 메모리를 포함한 GPU/RBLN/RNGD
+**지금 바로 되는 것 (트래픽 불필요).** 12개 뷰 전부, 자동 감지·통합 메모리를 포함한 GPU/RBLN/RNGD
 및 노드/디스크 모니터링, Flow 토폴로지와 EPP 우회 진단, EPP ConfigMap 조회, 능동 알림,
-`scale`·`logs` 액션, Deploy 섹션의 Serving/Library 렌즈(서빙 중 배포·카탈로그 가능성·컴파일 Job), 헤드리스 `--json`·`--doctor`·
+`scale`·`logs` 액션, Deploy 섹션의 Serving/Library 렌즈(서빙 중 배포·카탈로그 가능성·RBLN/Furiosa
+컴파일·배포 매니페스트 생성 + 권한 모드 게이팅 apply), 헤드리스 `--json`·`--doctor`·
 `--snapshot`·`--cast`, 그리고 테마·애니메이션·zoom·권한 모드.
 
 **실제 트래픽이 EPP 를 거치고 vLLM 이 지표를 내보내면 채워지는 것.** 모델별 p95 지연 분해, tok/s,
 파드별 큐 분배, KV%/TTFT/E2E, EPP 요청 분배. (EPP 가중치 `+`/`-` 는 로컬 시뮬레이션이며, 클러스터에
 실제로 적용되지는 않습니다.)
 
-**예정된 것.** 적용형 컨트롤 플레인 액션(엔드포인트 drain, 트래픽/정책 가중치 적용, rollout —
-각각 dry-run → 확인 → 감사), EPP 엔드포인트별 점수 디버거, 그리고 **NPU 컴파일·배포 자동화** —
-Deploy 뷰에서 모델을 RBLN/Furiosa 용으로 컴파일하고(벤더 툴체인을 도는 Kubernetes Job) ModelService
-로 배포까지, 권한 모드로 게이팅. 자세한 내용은 [ROADMAP.md](ROADMAP.md) 와 [CHANGELOG.md](CHANGELOG.md) 참고.
+**예정된 것.** 현재 apply 흐름을 넘어서는 적용형 컨트롤 플레인 액션(엔드포인트 drain, 트래픽/정책
+가중치 적용, rollout — 각각 dry-run → 확인 → 감사)과 EPP 엔드포인트별 점수 디버거. (**NPU 컴파일·배포
+자동화** — Deploy 뷰에서 RBLN/Furiosa 컴파일 Job·서빙 Deployment 를 생성하고 권한 모드로 게이팅 —
+는 이미 반영됨; Highlights 참고.) 자세한 내용은 [ROADMAP.md](ROADMAP.md) 와 [CHANGELOG.md](CHANGELOG.md) 참고.
 
 ## 성숙도
 

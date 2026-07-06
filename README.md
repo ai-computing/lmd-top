@@ -51,7 +51,7 @@ List headers show a `Σ` aggregate of the shown rows (all rows, or just the filt
 **Prebuilt binary** (Linux x86_64):
 
 ```bash
-VER=v0.32.0   # latest: https://github.com/gspark-etri/lmd-top/releases/latest
+VER=v0.34.0   # latest: https://github.com/gspark-etri/lmd-top/releases/latest
 curl -fsSL "https://github.com/gspark-etri/lmd-top/releases/download/$VER/lmd-top-$VER-x86_64-linux.tar.gz" | tar xz
 sudo install -m 0755 lmd-top /usr/local/bin/
 ```
@@ -134,22 +134,24 @@ HTTP/1.0, and Kubernetes through `kubectl`.
 
 ## Status & roadmap
 
-**Works today, with no traffic required.** All eleven views; GPU/RBLN/RNGD and node/disk
+**Works today, with no traffic required.** All twelve views; GPU/RBLN/RNGD and node/disk
 monitoring with auto-detection and unified memory; the Flow topology and EPP-bypass
 diagnosis; EPP ConfigMap introspection; active alerting; the `scale` and `logs` actions; the
-Deploy section's Serving/Library lenses (running deployments, catalog feasibility, compile jobs); the headless `--json`,
-`--doctor`, `--snapshot`, and `--cast` modes; and themes, animation, zoom, and permission modes.
+Deploy section's Serving/Library lenses (running deployments, catalog feasibility, and
+RBLN/Furiosa compile & deploy manifest generation with a mode-gated apply); the headless
+`--json`, `--doctor`, `--snapshot`, and `--cast` modes; and themes, animation, zoom, and
+permission modes.
 
 **Fills in once real traffic flows through the EPP and vLLM exposes metrics.** Per-model p95
 latency breakdown, tok/s, per-pod queue distribution, KV%/TTFT/E2E, and EPP request
 distribution. (The EPP weight `+`/`-` is a local weight-share simulation — it does not apply
 to the cluster.)
 
-**Planned.** Applied control-plane actions (endpoint drain, traffic/policy-weight apply, and
-rollout, each as dry-run → confirm → audit); an EPP per-endpoint score debugger; and **NPU
-compile & deploy automation** — from the Deploy view, compile a model for RBLN or Furiosa (as
-a Kubernetes Job running the vendor toolchain) and deploy the artifact through ModelService,
-gated by permission mode. See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
+**Planned.** Applied control-plane actions beyond the current apply flow (endpoint drain,
+traffic/policy-weight apply, and rollout, each as dry-run → confirm → audit) and an EPP
+per-endpoint score debugger. (NPU **compile & deploy automation** — generating RBLN/Furiosa
+compile Jobs and serving Deployments from the Deploy view, gated by permission mode — has
+since shipped; see Highlights.) See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## Maturity
 
