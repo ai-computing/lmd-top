@@ -10,7 +10,7 @@ impl App {
     pub(super) fn pivot_items(&self) -> Vec<ActionItem> {
         // (menu_key, label, pivot_key)
         let defs: &[(char, &'static str, char)] = match self.view {
-            View::Models | View::Overview => &[
+            View::Overview | View::Serving => &[
                 ('p', "Go: Pods", 'p'),
                 ('v', "Go: Devices", 'i'),
                 ('e', "Go: EPP", 'e'),
@@ -39,11 +39,11 @@ impl App {
         let mut items: Vec<ActionItem> = Vec::new();
         let (title, subject) = match self.view {
             View::Serving if self.panel_focus == 0 => {
+                // Serving = 돌아가는 배포의 *운영* 렌즈. 컴파일/신규 배포는 Deploy▸Model List 로.
                 let Some(a) = self.selected_artifact() else {
                     return;
                 };
-                let model_id = Self::artifact_model_id(a);
-                let deployed = self
+                let running = self
                     .snap
                     .models
                     .iter()
@@ -51,35 +51,14 @@ impl App {
                 items.push(ActionItem {
                     key: 'i',
                     label: "Info",
-                    desc: "show full build detail",
+                    desc: "show full deployment detail",
                     action: Action::Info,
                 });
-                // 컴파일 대상 벤더 — 엔진이 NPU 면 그 벤더, 아니면 지원 목록(GPU/HF→NPU)에서.
-                let rbln_ok = a.engine.contains("RBLN")
-                    || crate::compat::compilable_vendors(&model_id).contains(&"rbln");
-                let furiosa_ok = a.engine.contains("Furiosa")
-                    || crate::compat::compilable_vendors(&model_id).contains(&"furiosa");
-                if rbln_ok {
-                    items.push(ActionItem {
-                        key: 'c',
-                        label: "Compile→RBLN",
-                        desc: "optimum-rbln compile → .rbln in store",
-                        action: Action::Compile("rbln"),
-                    });
-                }
-                if furiosa_ok {
-                    items.push(ActionItem {
-                        key: 'f',
-                        label: "Compile→Furiosa",
-                        desc: "furiosa-llm build → artifact in store",
-                        action: Action::Compile("furiosa"),
-                    });
-                }
                 items.push(ActionItem {
-                    key: 'd',
-                    label: "Deploy",
-                    desc: "serving options → Deployment",
-                    action: Action::Deploy,
+                    key: 'l',
+                    label: "Logs",
+                    desc: "tail serving pod logs",
+                    action: Action::Logs,
                 });
                 items.push(ActionItem {
                     key: 'y',
@@ -87,7 +66,25 @@ impl App {
                     desc: "live Deployment YAML (read-only)",
                     action: Action::Yaml,
                 });
-                if deployed {
+                items.push(ActionItem {
+                    key: 's',
+                    label: "Scale",
+                    desc: "toggle replicas 0/1",
+                    action: Action::Scale,
+                });
+                items.push(ActionItem {
+                    key: 'S',
+                    label: "Restart",
+                    desc: "rollout restart (rolling)",
+                    action: Action::Restart,
+                });
+                items.push(ActionItem {
+                    key: 'O',
+                    label: "Objective",
+                    desc: "set SLO target (TTFT/TPOT/E2E/tok·s) — drives advisor",
+                    action: Action::Objective,
+                });
+                if running {
                     items.push(ActionItem {
                         key: 'x',
                         label: "Stop",
@@ -188,24 +185,30 @@ impl App {
                 }
                 (format!("catalog · {}", m.id), m.id.clone())
             }
-            View::Library if self.panel_focus == 1 => {
-                // 진행 중 컴파일 패널 — 로그 확인 / Job 삭제(취소·정리).
-                let Some(c) = self.sel_orig().and_then(|i| self.snap.compiles.get(i)) else {
+            View::Activity => {
+                // 통합 작업 피드 — compile Job / deploy rollout. 로그 · (Job 이면) 삭제.
+                let Some(row) = self.selected_activity() else {
                     return;
                 };
-                items.push(ActionItem {
-                    key: 'l',
-                    label: "Logs",
-                    desc: "tail compile pod logs",
-                    action: Action::Logs,
-                });
-                items.push(ActionItem {
-                    key: 'D',
-                    label: "Delete",
-                    desc: "delete job (cancel / clean up)",
-                    action: Action::DeleteJob,
-                });
-                (format!("compile · {}", c.name), c.name.clone())
+                if row.pod.is_some() {
+                    items.push(ActionItem {
+                        key: 'l',
+                        label: "Logs",
+                        desc: "tail the operation's pod logs",
+                        action: Action::Logs,
+                    });
+                }
+                if row.job.is_some() {
+                    items.push(ActionItem {
+                        key: 'D',
+                        label: "Delete",
+                        desc: "delete compile job (cancel / clean up)",
+                        action: Action::DeleteJob,
+                    });
+                }
+                // subject = 삭제 대상 Job 이름(있으면), 없으면 요약 라벨.
+                let subject = row.job.clone().unwrap_or_else(|| row.label.clone());
+                (format!("activity · {}", row.label), subject)
             }
             View::Nodes => {
                 // 노드 관리 — 스케줄 차단/해제(예전 Deploy 타깃 패널에서 이동).
@@ -235,7 +238,7 @@ impl App {
                 }
                 (format!("node · {}", node.0), node.0)
             }
-            View::Models | View::Overview => {
+            View::Overview => {
                 let Some(m) = self.selected_model() else {
                     return;
                 };

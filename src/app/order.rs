@@ -34,7 +34,7 @@ impl App {
                 });
                 idx
             }
-            View::Models | View::Overview => {
+            View::Overview => {
                 let v = &self.snap.models;
                 let desc = self.sort_desc;
                 let oc = |a: Option<f64>, b: Option<f64>| {
@@ -117,9 +117,10 @@ impl App {
             }
             // Serving: 배포된 아티팩트를 family›version 그룹 순서로(트리 내비게이션이 그룹을 따라가게).
             View::Serving => self.serving_order(),
-            // Library: 0 통합 배포 트리(카탈로그+스토어) · 1 진행 중 컴파일.
-            View::Library if self.panel_focus == 1 => (0..self.snap.compiles.len()).collect(),
+            // Deploy▸Model List: 배포 가능한 것 통합 트리(카탈로그+스토어), 단일 패널.
             View::Library => (0..self.library_items().len()).collect(),
+            // Deploy▸Activity: compile Job + deploy rollout 통합 피드.
+            View::Activity => (0..self.activity_rows().len()).collect(),
             View::Epp if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
             View::Epp => {
                 (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect()
@@ -182,7 +183,7 @@ impl App {
                     scope, n, busy, util, mu, mt, pw
                 ))
             }
-            View::Models | View::Overview => {
+            View::Overview => {
                 let m: Vec<&ModelRow> = order
                     .iter()
                     .filter_map(|&i| self.snap.models.get(i))

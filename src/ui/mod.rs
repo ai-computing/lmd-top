@@ -134,7 +134,6 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
         && matches!(
             app.view,
             View::Accel
-                | View::Models
                 | View::Overview
                 | View::Pods
                 | View::Nodes
@@ -148,13 +147,13 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
         match app.view {
             View::Overview => view_overview(f, body, app),
             View::Accel => view_accel(f, body, app),
-            View::Models => view_models(f, body, app),
             View::Epp => view_epp(f, body, app),
             View::Routing => view_routing(f, body, app),
             View::Pods => view_pods(f, body, app),
             View::Perf => view_perf(f, body, app),
             View::Serving => view_serving(f, body, app),
             View::Library => view_library(f, body, app),
+            View::Activity => view_activity(f, body, app),
             View::Events => view_events(f, body, app),
             View::Nodes => view_nodes(f, body, app),
             View::Topo => view_topo(f, body, app),
@@ -875,7 +874,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     }
     if matches!(
         v,
-        Accel | Models | Overview | Pods | Serving | Library | Epp | Events | Nodes
+        Accel | Overview | Pods | Serving | Library | Activity | Epp | Events | Nodes
     ) {
         parts.push("/ filter".into());
     }
@@ -901,13 +900,13 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         parts.push(format!("←→ {}", strip.join("·")));
     }
     // Enter/action behavior: views with action menus expose a single compact hint.
-    let has_menu = matches!(v, Models | Overview | Pods | Serving | Library | Routing);
+    let has_menu = matches!(v, Overview | Pods | Serving | Library | Activity | Routing);
     if has_menu {
         parts.push("a/⏎ actions".into());
     }
     // pivot(액션 메뉴 밖 — 크로스레이어 점프).
     match v {
-        Models | Overview => parts.push("p/i/r/e pivot".into()),
+        Overview | Serving => parts.push("p/i/r/e pivot".into()),
         Accel => parts.push("p/m/n pivot".into()),
         Pods => parts.push("i/m pivot".into()),
         Nodes => parts.push("i pivot".into()),
@@ -1046,18 +1045,6 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
 }
 
 // ── Models ─────────────────────────────────────────────
-fn view_models(f: &mut Frame, area: Rect, app: &App) {
-    let mut st = TableState::default();
-    st.select(Some(app.selected));
-    let total = app.order().len();
-    let title = match app.agg_summary() {
-        Some(a) => format!("Models · ⏎ detail  —  {}", a),
-        None => "Models · ⏎ detail".to_string(),
-    };
-    f.render_stateful_widget(models_table(app, &title), area, &mut st);
-    list_scrollbar(f, area, total, app.selected, 1);
-}
-
 const MODEL_COLS: [&str; 10] = [
     "name", "engine", "accel", "ready", "run", "wait", "kv", "tps", "path", "status",
 ];
@@ -3649,9 +3636,11 @@ fn view_serving(f: &mut Frame, area: Rect, app: &App) {
     let mut sel_line = 0usize;
     lines.push(Line::from(vec![
         Span::styled("state: ", Style::default().fg(C_DIM())),
-        Span::styled("● running ", Style::default().fg(C_OK())),
+        Span::styled("● serving ", Style::default().fg(C_OK())),
         Span::styled("◑ starting ", Style::default().fg(C_WARN())),
-        Span::styled("○ stopped(0)   ", Style::default().fg(C_DIM())),
+        Span::styled("⚠ degraded ", Style::default().fg(C_WARN())),
+        Span::styled("✗ failed ", Style::default().fg(C_BAD())),
+        Span::styled("○ stopped   ", Style::default().fg(C_DIM())),
         Span::styled("type: ", Style::default().fg(C_DIM())),
         tag("HF", C_ACC()),
         tag("RBLN", Color::Magenta),
@@ -3707,10 +3696,19 @@ fn view_serving(f: &mut Frame, area: Rect, app: &App) {
         }
         let indent = if ver_cnt > 1 { "     └ " } else { "  └ " };
         let m = app.snap.models.iter().find(|m| m.name == a.model);
-        let (g, gc) = match m {
-            Some(m) if m.ready > 0 => ("●", C_OK()),
-            Some(m) if m.desired > 0 => ("◑", C_WARN()),
-            _ => ("○", C_DIM()),
+        // 배포 생애주기 상태(pods 교차) — 서빙 중/시도 중/실패를 구분해 표시.
+        let phase = m.map(|m| app.deploy_phase(&m.name, m.desired, m.ready));
+        let (g, gc, plabel) = match phase {
+            Some(p) => {
+                let c = match p.label() {
+                    "Serving" => C_OK(),
+                    "Failed" => C_BAD(),
+                    "Scaled-0" => C_DIM(),
+                    _ => C_WARN(), // Starting / Degraded
+                };
+                (p.glyph(), c, p.label())
+            }
+            None => ("○", C_DIM(), "–"),
         };
         let tbadge = if a.engine.contains("RBLN") {
             tag("RBLN", Color::Magenta)
@@ -3723,8 +3721,8 @@ fn view_serving(f: &mut Frame, area: Rect, app: &App) {
         let npu =
             matches!(a.engine.as_str(), "vLLM-RBLN" | "Furiosa-LLM") || a.engine.contains("RBLN");
         let reps = m
-            .map(|m| format!("{}/{} rep", m.ready, m.desired))
-            .unwrap_or_else(|| "–".into());
+            .map(|m| format!("{} {}/{}", plabel, m.ready, m.desired))
+            .unwrap_or_else(|| plabel.to_string());
         let selected = pos == app.selected;
         if selected {
             sel_line = lines.len();
@@ -3746,7 +3744,7 @@ fn view_serving(f: &mut Frame, area: Rect, app: &App) {
                 ),
                 Style::default().fg(if npu { C_WARN() } else { Color::Gray }),
             ),
-            Span::styled(format!("{:<9} ", reps), Style::default().fg(C_ACC())),
+            Span::styled(format!("{:<14} ", reps), Style::default().fg(gc)),
             Span::styled(
                 format!("@{}", if a.node.is_empty() { "?" } else { &a.node }),
                 Style::default().fg(C_DIM()),
@@ -3779,25 +3777,59 @@ fn view_serving(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-// ── Deploy▸Library — 배포 가능한 모델 라이브러리(통합 트리). ──
-// 배포 렌즈 2패널: 0 배포 가능 전부(카탈로그 조직정의 + 스토어 컴파일본, family 로 묶음) · 1 진행 중 컴파일.
-// 한 패널에서 배포 가능한 모든 것을 고른다 — 카탈로그/스토어를 오가는 패널 전환 불필요.
+// ── Deploy▸Activity — compile Job + deploy rollout 을 한 목록으로(통합 작업 피드). ──
+// compile(빌드 진행률)과 deploy rollout(시도/실패)을 상태와 함께 최신순으로. ⏎ actions · l logs · D delete.
+fn view_activity(f: &mut Frame, area: Rect, app: &App) {
+    let rows = app.activity_rows();
+    let sel = app.sel_orig();
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("compile", Style::default().fg(C_ACC())),
+        Span::styled(" 빌드 + ", Style::default().fg(C_DIM())),
+        Span::styled("deploy", Style::default().fg(C_OK())),
+        Span::styled(" rollout · ⏎ actions · l logs · D delete", Style::default().fg(C_DIM())),
+    ]));
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(진행 중이거나 시도/실패 중인 작업 없음 — 컴파일하거나 배포하면 여기 표시)",
+            Style::default().fg(C_DIM()),
+        )));
+    }
+    for (i, r) in rows.iter().enumerate() {
+        // 상태 키워드로 라인 색을 정함(실패=빨강, 완료/서빙=초록, 진행/시도=노랑).
+        let base = if r.label.contains("Failed") || r.label.contains("✗") {
+            C_BAD()
+        } else if r.label.contains("Complete") || r.label.contains("Serving") {
+            C_OK()
+        } else {
+            C_WARN()
+        };
+        let selected = Some(i) == sel;
+        let marker = if selected { "› " } else { "  " };
+        let mut spans =
+            vec![Span::styled(format!("{}{}  ", marker, r.label), Style::default().fg(base))];
+        if r.running_compile {
+            spans.extend(compile_progress_bar(r.progress, app.tick, 12));
+        }
+        let mut line = Line::from(spans);
+        if selected {
+            line.style = Style::default().add_modifier(Modifier::REVERSED);
+        }
+        lines.push(line);
+    }
+    let title = format!("Activity · {} 작업 (compile + deploy)", rows.len());
+    let p = Paragraph::new(lines).block(block(&title));
+    f.render_widget(p, area);
+    list_scrollbar(f, area, rows.len(), app.selected, 1);
+}
+
+// ── Deploy▸Model List — 배포 가능한 모델(카탈로그 조직정의 + 스토어 컴파일본, family 로 묶음). ──
+// 단일 패널: 배포 가능한 모든 것을 한 곳에서 고른다(진행 중 작업은 Activity 탭에서).
 fn view_library(f: &mut Frame, area: Rect, app: &App) {
     use crate::app::LibItem;
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(6), Constraint::Length(7)])
-        .split(area);
-    let focus = app.panel_focus; // 0 통합 배포 트리 · 1 진행 중 컴파일
-    let blk = |title: &str, active: bool| {
-        if active {
-            block_active(title)
-        } else {
-            block(title)
-        }
-    };
+    let focus = 0usize; // 단일 패널(Model List) — 진행 중 작업은 Activity 탭.
 
-    // ── 1) 통합 배포 트리: family › (카탈로그 모델 · 스토어 컴파일본). 재고 가능성 ✓⚙✗ / ◇ 스토어 빌드. ──
+    // ── 통합 배포 트리: family › (카탈로그 모델 · 스토어 컴파일본). 재고 가능성 ✓⚙✗ / ◇ 스토어 빌드. ──
     let items = app.library_items();
     let fam_of = |it: LibItem| match it {
         LibItem::Catalog(k) => crate::app::App::catalog_family(&app.catalog[k]).to_lowercase(),
@@ -3962,120 +3994,22 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
         ll.push(line);
     }
     ll.push(Line::from(Span::styled(
-        "⏎/a actions · d deploy · c RBLN / f Furiosa compile (지원 모델) · ◇=스토어 실재 빌드",
+        "⏎/a actions · d deploy · c RBLN / f Furiosa compile (지원 모델) · ◇=스토어 실재 빌드 · 진행 중 작업은 Activity[→]",
         Style::default().fg(C_DIM()),
     )));
-    let lvis = (rows[0].height as usize).saturating_sub(2);
+    let lvis = (area.height as usize).saturating_sub(2);
     let lscroll = if lsel_line + 2 > lvis {
         (lsel_line + 3).saturating_sub(lvis) as u16
     } else {
         0
     };
     f.render_widget(
-        Paragraph::new(ll).scroll((lscroll, 0)).block(blk(
-            &format!(
-                "Library · 배포 가능 (family › model/build › target){}",
-                count_suffix(app.selected, items.len())
-            ),
-            focus == 0,
-        )),
-        rows[0],
+        Paragraph::new(ll).scroll((lscroll, 0)).block(block_active(&format!(
+            "Model List · 배포 가능 (family › model/build › target){}",
+            count_suffix(app.selected, items.len())
+        ))),
+        area,
     );
-
-    // ── 2) 진행 중/최근 컴파일 Job(focus 1) — 상태·경과·진행바·힌트. 완료 1시간 후 자동정리. ──
-    let mut jl: Vec<Line> = Vec::new();
-    if app.snap.compiles.is_empty() {
-        jl.push(Line::from(Span::styled(
-            "(진행 중 컴파일 없음) — 지원 모델에서 [c] RBLN · [f] Furiosa 로 컴파일하면 여기 표시",
-            Style::default().fg(C_DIM()),
-        )));
-    }
-    for (j, c) in app.snap.compiles.iter().enumerate() {
-        let (g, gc) = match c.status.as_str() {
-            "Complete" => ("✓", C_OK()),
-            "Running" => ("◑", C_WARN()),
-            "Failed" => ("✗", C_BAD()),
-            _ => ("○", C_DIM()),
-        };
-        let vbadge = match c.vendor.as_str() {
-            "RBLN" => tag("RBLN", Color::Magenta),
-            "RNGD" => tag("RNGD", C_WARN()),
-            _ => tag("?", C_DIM()),
-        };
-        let timing = match (c.status.as_str(), c.duration_secs) {
-            (_, Some(d)) => format!("{} elapsed", fmt_dur(d)),
-            ("Running", _) => format!("{}…", fmt_dur(c.age_secs)),
-            _ => fmt_dur(c.age_secs),
-        };
-        let (hint, hc) = if c.status == "Complete" {
-            (
-                "→ stored; appears in 스토어 빌드 after discovery refresh".to_string(),
-                C_OK(),
-            )
-        } else {
-            (truncw(&c.phase, 44), C_ACC())
-        };
-        let mut spans = vec![
-            Span::styled(format!("{} ", g), Style::default().fg(gc)),
-            vbadge,
-            Span::styled(
-                format!(" {:<20} ", truncw(&c.model, 20)),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{:<16} ", truncw(&c.target, 16)),
-                Style::default().fg(C_WARN()),
-            ),
-            Span::styled(format!("{:<9} ", c.status), Style::default().fg(gc)),
-            Span::styled(format!("{:<11} ", timing), Style::default().fg(C_DIM())),
-        ];
-        if c.status == "Running" {
-            spans.extend(compile_progress_bar(c.progress, app.tick, 12));
-            spans.push(Span::styled(
-                format!("  {}", truncw(&c.phase, 26)),
-                Style::default().fg(C_ACC()),
-            ));
-        } else {
-            spans.push(Span::styled(hint, Style::default().fg(hc)));
-        }
-        let mut line = Line::from(spans);
-        if focus == 1 && app.selected == j {
-            line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
-        }
-        jl.push(line);
-    }
-    let jscroll = if focus == 1 && app.selected + 3 > (rows[1].height as usize).saturating_sub(2) {
-        (app.selected + 3).saturating_sub((rows[1].height as usize).saturating_sub(2)) as u16
-    } else {
-        0
-    };
-    f.render_widget(
-        Paragraph::new(jl).scroll((jscroll, 0)).block(blk(
-            &format!(
-                "compile jobs · ✓done ◑running ✗failed · ⏎ logs/delete · auto-clean 1h{}",
-                if focus == 1 {
-                    count_suffix(app.selected, app.snap.compiles.len())
-                } else {
-                    String::new()
-                }
-            ),
-            focus == 1,
-        )),
-        rows[1],
-    );
-}
-
-/// 초 → 사람이 읽는 짧은 시간(예: 45s, 3m12s, 1h04m). 컴파일 경과/소요 표시용.
-fn fmt_dur(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
-    }
 }
 
 // ── Nodes (health / placement) — all-smi 식 트리: node → devices ──────

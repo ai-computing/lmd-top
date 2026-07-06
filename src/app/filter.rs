@@ -33,7 +33,7 @@ impl App {
                 .get(i)
                 .map(|a| format!("{} {} {} {}", a.kind.label(), a.id, a.node, a.busy_model))
                 .unwrap_or_default(),
-            View::Models | View::Overview => self
+            View::Overview => self
                 .snap
                 .models
                 .get(i)
@@ -51,11 +51,10 @@ impl App {
                 .get(i)
                 .map(|a| format!("{} {} {}", a.model, a.family, a.source))
                 .unwrap_or_default(),
-            View::Library if self.panel_focus == 1 => self
-                .snap
-                .compiles
+            View::Activity => self
+                .activity_rows()
                 .get(i)
-                .map(|c| format!("{} {} {}", c.name, c.status, c.phase))
+                .map(|r| r.label.clone())
                 .unwrap_or_default(),
             View::Library => match self.library_items().get(i) {
                 Some(LibItem::Catalog(k)) => self
