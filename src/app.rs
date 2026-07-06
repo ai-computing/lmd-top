@@ -315,6 +315,14 @@ impl Section {
     }
 }
 
+/// Deploy▸Library 통합 배포 트리의 한 항목 — 조직 카탈로그 정의 또는 스토어에 실재하는 컴파일본.
+/// 둘을 한 리스트에 섞어 family 로 묶으므로, 사용자는 패널을 옮기지 않고 배포 가능한 모든 것을 한 곳에서 고른다.
+#[derive(Clone, Copy)]
+pub enum LibItem {
+    Catalog(usize), // self.catalog[i]
+    Stored(usize),  // self.snap.stored[i]
+}
+
 pub const HIST: usize = 40;
 
 pub struct App {
@@ -801,23 +809,26 @@ impl App {
                 .get(i)
                 .map(|a| format!("{} {} {}", a.model, a.family, a.source))
                 .unwrap_or_default(),
-            View::Library if self.panel_focus == 2 => self
+            View::Library if self.panel_focus == 1 => self
                 .snap
                 .compiles
                 .get(i)
                 .map(|c| format!("{} {} {}", c.name, c.status, c.phase))
                 .unwrap_or_default(),
-            View::Library if self.panel_focus == 1 => self
-                .catalog
-                .get(i)
-                .map(|m| format!("{} {}", m.id, m.role))
-                .unwrap_or_default(),
-            View::Library => self
-                .snap
-                .stored
-                .get(i)
-                .map(|s| format!("{} {} {}", s.repo, s.format, s.compiled_for))
-                .unwrap_or_default(),
+            View::Library => match self.library_items().get(i) {
+                Some(LibItem::Catalog(k)) => self
+                    .catalog
+                    .get(*k)
+                    .map(|m| format!("{} {}", m.id, m.role))
+                    .unwrap_or_default(),
+                Some(LibItem::Stored(k)) => self
+                    .snap
+                    .stored
+                    .get(*k)
+                    .map(|s| format!("{} {} {}", s.repo, s.format, s.compiled_for))
+                    .unwrap_or_default(),
+                None => String::new(),
+            },
             View::Epp if self.panel_focus == 1 => self
                 .snap
                 .pools
@@ -877,6 +888,7 @@ impl App {
                 | View::Nodes
                 | View::Events
                 | View::Serving
+                | View::Library
         )
     }
 
@@ -1369,7 +1381,7 @@ impl App {
     /// 현재 뷰의 포커스 가능한 패널 수(멀티패널 뷰만 >1).
     pub fn panel_count(&self) -> usize {
         match self.view {
-            View::Library => 3, // Deploy▸Library: 스토어 컴파일본 / 카탈로그 / 진행 중 컴파일
+            View::Library => 2, // Deploy▸Library: 통합 배포 트리(카탈로그+스토어) / 진행 중 컴파일
             View::Serving => 1, // Deploy▸Serving: 라이브 배포 트리(단일 패널)
             View::Epp => 2,     // scorers / InferencePool
             View::Routing => 2, // routes / InferencePool
@@ -1391,6 +1403,10 @@ impl App {
         self.panel_focus = 0;
         self.panel_move = false;
         self.dev_sel = 0;
+        // 서브탭 전환은 "새 내비게이션" — 이전 pivot 브레드크럼을 비워, 이후 Esc 가 엉뚱한 곳(옛 pivot 출발점)
+        // 으로 되짚지 않게 한다. (goto_view 와 동일한 브레드크럼 리셋)
+        self.nav_stack.clear();
+        self.epp_weights.clear();
     }
     /// The sub-tab reached by stepping `delta` from the current view (for prev/next preview). None if single-member.
     #[allow(dead_code)]
@@ -1653,10 +1669,9 @@ impl App {
             }
             // Serving: 배포된 아티팩트를 family›version 그룹 순서로(트리 내비게이션이 그룹을 따라가게).
             View::Serving => self.serving_order(),
-            // Library: 0 스토어 컴파일본(family›repo 그룹) · 1 카탈로그(family›model 그룹) · 2 진행 중 컴파일.
-            View::Library if self.panel_focus == 2 => (0..self.snap.compiles.len()).collect(),
-            View::Library if self.panel_focus == 1 => self.library_order(),
-            View::Library => self.stored_order(),
+            // Library: 0 통합 배포 트리(카탈로그+스토어) · 1 진행 중 컴파일.
+            View::Library if self.panel_focus == 1 => (0..self.snap.compiles.len()).collect(),
+            View::Library => (0..self.library_items().len()).collect(),
             View::Epp if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
             View::Epp => {
                 (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect()
@@ -1846,27 +1861,6 @@ impl App {
         }
     }
 
-    /// 카탈로그 모델 feasibility 요약(placement 별 ready/needs-artifact/미지원).
-    pub fn catalog_feasibility(&self, id: &str) -> String {
-        let Some(m) = self.catalog.iter().find(|c| c.id == id) else {
-            return format!("{}: not in catalog", id);
-        };
-        let mut ready = 0;
-        let mut needs = 0;
-        let mut no = 0;
-        for p in &m.placements {
-            match crate::catalog::solve(p, &self.snap.inventory).0 {
-                crate::catalog::Ready::Ready => ready += 1,
-                crate::catalog::Ready::NeedsArtifact => needs += 1,
-                _ => no += 1,
-            }
-        }
-        format!(
-            "{}: {} ready · {} needs-compile · {} unsupported placement(s)",
-            id, ready, needs, no
-        )
-    }
-
     /// Serving 뷰에서 선택된 아티팩트(라이브 배포).
     pub fn selected_artifact(&self) -> Option<&crate::collect::ModelArtifact> {
         if self.view == View::Serving && self.panel_focus == 0 {
@@ -1929,31 +1923,55 @@ impl App {
             .collect();
         Self::grouped_indices(&keys)
     }
-    /// Library 카탈로그 트리의 그룹 순서 원본 인덱스.
-    pub fn library_order(&self) -> Vec<usize> {
-        let keys: Vec<(String, String)> = self
-            .catalog
-            .iter()
-            .map(|m| (Self::catalog_family(m), m.id.clone()))
-            .collect();
-        Self::grouped_indices(&keys)
+    /// family 그룹 키(소문자) — 카탈로그·스토어를 한 트리로 묶을 때 공용.
+    fn lib_family(&self, it: LibItem) -> String {
+        match it {
+            LibItem::Catalog(i) => Self::catalog_family(&self.catalog[i]).to_lowercase(),
+            LibItem::Stored(i) => self.snap.stored[i].family.to_lowercase(),
+        }
     }
-    /// Library 스토어 컴파일본 트리(family › repo › target)의 그룹 순서 원본 인덱스.
-    pub fn stored_order(&self) -> Vec<usize> {
-        let keys: Vec<(String, String)> = self
-            .snap
-            .stored
-            .iter()
-            .map(|s| (s.family.clone(), s.repo.clone()))
-            .collect();
-        Self::grouped_indices(&keys)
+    /// family 첫 등장 순서를 보존하며 같은 family 를 인접시킨다(존 내부 그룹핑).
+    fn group_by_family(&self, items: &[LibItem]) -> Vec<LibItem> {
+        let mut fam_order: Vec<String> = Vec::new();
+        for &it in items {
+            let f = self.lib_family(it);
+            if !fam_order.contains(&f) {
+                fam_order.push(f);
+            }
+        }
+        let mut out = Vec::with_capacity(items.len());
+        for f in &fam_order {
+            for &it in items {
+                if &self.lib_family(it) == f {
+                    out.push(it);
+                }
+            }
+        }
+        out
     }
-    /// Library 패널0(스토어 컴파일본)에서 선택된 빌드.
-    pub fn selected_stored(&self) -> Option<&crate::collect::StoredModel> {
+    /// Library 패널0 통합 배포 트리 — 카탈로그(조직 제공)를 **상단**에, 그 아래 스토어 컴파일본.
+    /// 각 존은 family 로 묶는다. order()·렌더 공용. 카탈로그가 "무엇을 배포할 수 있나"의 1차 관문.
+    pub fn library_items(&self) -> Vec<LibItem> {
+        let cat: Vec<LibItem> = (0..self.catalog.len()).map(LibItem::Catalog).collect();
+        let sto: Vec<LibItem> = (0..self.snap.stored.len()).map(LibItem::Stored).collect();
+        let mut out = self.group_by_family(&cat);
+        out.extend(self.group_by_family(&sto));
+        out
+    }
+    /// Library 패널0에서 선택된 항목(카탈로그 모델 또는 스토어 빌드).
+    pub fn selected_lib_item(&self) -> Option<LibItem> {
         if self.view == View::Library && self.panel_focus == 0 {
-            self.sel_orig().and_then(|i| self.snap.stored.get(i))
+            self.sel_orig()
+                .and_then(|i| self.library_items().get(i).copied())
         } else {
             None
+        }
+    }
+    /// Library 패널0에서 선택된 스토어 빌드(있으면).
+    pub fn selected_stored(&self) -> Option<&crate::collect::StoredModel> {
+        match self.selected_lib_item() {
+            Some(LibItem::Stored(i)) => self.snap.stored.get(i),
+            _ => None,
         }
     }
 
@@ -1974,10 +1992,9 @@ impl App {
     }
 
     pub fn selected_catalog_model(&self) -> Option<&crate::catalog::CatModel> {
-        if self.view == View::Library && self.panel_focus == 1 {
-            self.sel_orig().and_then(|i| self.catalog.get(i))
-        } else {
-            None
+        match self.selected_lib_item() {
+            Some(LibItem::Catalog(i)) => self.catalog.get(i),
+            _ => None,
         }
     }
 
@@ -3043,8 +3060,11 @@ impl App {
                 }
                 (format!("actions · {}", a.model), a.model.clone())
             }
-            View::Library if self.panel_focus == 0 => {
-                // 스토어 컴파일본 — 물리적으로 존재하는 배포 가능 빌드. Info + Deploy.
+            View::Library
+                if self.panel_focus == 0
+                    && matches!(self.selected_lib_item(), Some(LibItem::Stored(_))) =>
+            {
+                // 통합 트리의 스토어 컴파일본 — 물리적으로 존재하는 배포 가능 빌드. Info + Deploy.
                 let Some(s) = self.selected_stored().map(|s| {
                     (
                         s.repo.clone(),
@@ -3077,9 +3097,9 @@ impl App {
                 };
                 (label, s.0)
             }
-            View::Library if self.panel_focus == 1 => {
-                // Catalog row — explain feasibility, then offer direct deploy/compile paths.
-                let Some(m) = self.sel_orig().and_then(|i| self.catalog.get(i)) else {
+            View::Library if self.panel_focus == 0 => {
+                // 통합 트리의 카탈로그(조직 제공) 행 — 가능성 설명 + 배포/컴파일 경로.
+                let Some(m) = self.selected_catalog_model() else {
                     return;
                 };
                 items.push(ActionItem {
@@ -3131,7 +3151,7 @@ impl App {
                 }
                 (format!("catalog · {}", m.id), m.id.clone())
             }
-            View::Library if self.panel_focus == 2 => {
+            View::Library if self.panel_focus == 1 => {
                 // 진행 중 컴파일 패널 — 로그 확인 / Job 삭제(취소·정리).
                 let Some(c) = self.sel_orig().and_then(|i| self.snap.compiles.get(i)) else {
                     return;
@@ -4252,7 +4272,7 @@ impl App {
                 .filter(|a| !a.busy_model.is_empty())
                 .map(|a| a.busy_model.clone()),
             // Deploy▸Library '진행 중 컴파일' 패널 — 선택 Job 의 파드 로그.
-            View::Library if self.panel_focus == 2 => self
+            View::Library if self.panel_focus == 1 => self
                 .sel_orig()
                 .and_then(|i| self.snap.compiles.get(i))
                 .and_then(|c| {
@@ -4480,15 +4500,14 @@ mod tests {
     fn panel_cycle_and_reverse_tab() {
         use crate::app::Section;
         let mut a = App::new();
-        a.goto_view(View::Library); // Deploy▸Library: 3 패널(스토어 빌드 / 카탈로그 / 진행 중 컴파일)
-        assert_eq!(a.panel_count(), 3);
+        a.goto_view(View::Library); // Deploy▸Library: 2 패널(통합 배포 트리 / 진행 중 컴파일)
+        assert_eq!(a.panel_count(), 2);
         a.selected = 2;
         a.cycle_panel_dir(1); // Ctrl-w — 패널 포커스만 이동(서브탭과 직교)
         assert_eq!(a.panel_focus, 1);
         assert_eq!(a.selected, 0, "패널 전환 시 선택 리셋");
         a.cycle_panel_dir(1);
-        a.cycle_panel_dir(1);
-        assert_eq!(a.panel_focus, 0, "3패널 순환");
+        assert_eq!(a.panel_focus, 0, "2패널 순환");
         // Serving 서브탭은 단일 패널.
         a.goto_view(View::Serving);
         assert_eq!(a.panel_count(), 1);
@@ -4521,6 +4540,22 @@ mod tests {
         a.goto_view(View::Overview);
         a.cycle_subtab(1);
         assert_eq!(a.view, View::Overview);
+    }
+
+    // 회귀: pivot 으로 브레드크럼을 쌓은 뒤 서브탭을 바꾸면 Esc(nav_back)가 옛 pivot 출발점으로
+    // 튀지 않아야 한다(브레드크럼이 비워짐). — 사용자 보고 "Esc 가 이상한 곳으로".
+    #[test]
+    fn subtab_switch_clears_stale_breadcrumb() {
+        let mut a = app_with(vec![model("m1")], vec![pod("m1-abc")]);
+        a.pivot('p'); // Models → Pods, nav_stack=[Models]
+        assert_eq!(a.view, View::Pods);
+        assert!(!a.nav_stack.is_empty(), "pivot 은 브레드크럼을 쌓는다");
+        a.cycle_subtab(1); // Pods → Models(같은 섹션 서브탭) = 새 내비게이션
+        assert!(
+            a.nav_stack.is_empty(),
+            "서브탭 전환이 stale 브레드크럼을 비운다"
+        );
+        assert!(!a.nav_back(), "Esc 는 이제 엉뚱한 곳으로 되짚지 않는다");
     }
 
     #[test]
@@ -5467,7 +5502,7 @@ mod tests {
         t2.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
         let ltext = buf_text(t2.backend().buffer());
         assert!(ltext.contains("Library"), "Library 타이틀\n{ltext}");
-        assert!(!a.library_order().is_empty(), "임베드 카탈로그 로드됨");
+        assert!(!a.library_items().is_empty(), "임베드 카탈로그 로드됨");
     }
 
     // 회귀: Furiosa 로 컴파일한 스토어 빌드가 Library 에서 선택·배포 가능해야 한다.
@@ -5490,8 +5525,13 @@ mod tests {
             ..Default::default()
         };
         a.view = View::Library;
-        a.panel_focus = 0; // 스토어 빌드 패널
-        a.selected = 0;
+        a.panel_focus = 0; // 통합 배포 트리
+        // 통합 트리에서 스토어 빌드의 위치로 커서 이동(카탈로그가 먼저 나열됨).
+        a.selected = a
+            .library_items()
+            .iter()
+            .position(|it| matches!(it, LibItem::Stored(_)))
+            .expect("stored build present in unified library tree");
         // 선택 가능해야(예전엔 어느 뷰에도 안 떠서 선택 불가).
         let s = a
             .selected_stored()
@@ -5518,5 +5558,62 @@ mod tests {
             yaml.to_lowercase().contains("furiosa") || yaml.contains("rngd"),
             "furiosa serving manifest\n{yaml}"
         );
+    }
+
+    // 통합 트리: 카탈로그가 상단(스토어 빌드보다 먼저), 선택 항목 상세 패널이 뜬다.
+    #[test]
+    fn library_catalog_on_top_and_detail_renders() {
+        use crate::collect::StoredModel;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut a = App::new(); // 임베드 카탈로그 로드됨
+        a.snap = Snapshot {
+            stored: vec![StoredModel {
+                repo: "furiosa-ai/Qwen3-4B-FP8".into(),
+                family: "qwen3".into(),
+                revision: "-".into(),
+                format: "furiosa".into(),
+                compiled_for: "RNGD-tp4-s8192".into(),
+                size: "9G".into(),
+                path: "compiled/x".into(),
+            }],
+            ..Default::default()
+        };
+        // 카탈로그가 상단: 통합 리스트의 앞쪽은 전부 카탈로그, 스토어 빌드는 뒤.
+        let items = a.library_items();
+        let first_stored = items
+            .iter()
+            .position(|it| matches!(it, LibItem::Stored(_)))
+            .unwrap();
+        assert!(
+            items[..first_stored]
+                .iter()
+                .all(|it| matches!(it, LibItem::Catalog(_))),
+            "카탈로그가 스토어 빌드보다 위에 온다"
+        );
+        // 선택 항목 상세 패널 — 카탈로그 모델의 placement/소스가 보인다.
+        a.view = View::Library;
+        a.panel_focus = 0;
+        a.selected = a
+            .library_items()
+            .iter()
+            .position(|it| matches!(it, LibItem::Catalog(c) if a.catalog[*c].id == "qwen3-4b-fp8"))
+            .expect("qwen3-4b-fp8 in catalog");
+        a.detail = true;
+        let mut fx = crate::ui::FxState::disabled();
+        let mut t = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+        let buf = t.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if let Some(c) = buf.cell((x, y)) {
+                    text.push_str(c.symbol());
+                }
+            }
+        }
+        assert!(text.contains("qwen3-4b-fp8"), "상세: 모델 id\n{text}");
+        assert!(text.contains("placement"), "상세: 배치 후보 섹션\n{text}");
+        assert!(text.contains("furiosa.ai/rngd"), "상세: 리소스\n{text}");
     }
 }

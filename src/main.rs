@@ -547,28 +547,8 @@ fn dispatch_action(
         Action::Info => {
             if app.view == View::Routing {
                 app.drill_route();
-            } else if app.view == View::Library && app.panel_focus == 0 {
-                // 스토어 컴파일본 → 빌드 상세(포맷·타깃·크기·경로) 요약.
-                if let Some(msg) = app.selected_stored().map(|s| {
-                    format!(
-                        "{} · {} · {} · {} · {}",
-                        s.repo,
-                        s.format,
-                        if s.compiled_for.is_empty() {
-                            "-"
-                        } else {
-                            &s.compiled_for
-                        },
-                        s.size,
-                        s.path
-                    )
-                }) {
-                    app.notify(msg);
-                }
-            } else if app.view == View::Library && app.panel_focus == 1 {
-                let s = app.catalog_feasibility(subject); // 카탈로그 행 → 배포 가능성 설명
-                app.notify(s);
             } else {
+                // Library(통합 트리)·Serving·Models 등 — 선택 항목 상세 패널.
                 app.detail = true;
             }
         }
