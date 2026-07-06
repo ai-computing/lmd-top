@@ -6,42 +6,6 @@
 use super::*;
 
 impl App {
-    /// family›version 계층 그룹핑 — 키 목록을 (family, version) 로 받아, family/version
-    /// 첫 등장 순서를 보존하며 같은 그룹을 인접시킨 원본 인덱스 순서를 돌려준다(트리 표시·내비 공용).
-    pub(super) fn grouped_indices(keys: &[(String, String)]) -> Vec<usize> {
-        let mut fam_order: Vec<&str> = Vec::new();
-        for (f, _) in keys {
-            if !fam_order.contains(&f.as_str()) {
-                fam_order.push(f);
-            }
-        }
-        let mut out = Vec::with_capacity(keys.len());
-        for f in &fam_order {
-            let mut ver_order: Vec<&str> = Vec::new();
-            for (ff, v) in keys {
-                if ff == f && !ver_order.contains(&v.as_str()) {
-                    ver_order.push(v);
-                }
-            }
-            for v in &ver_order {
-                for (i, (ff, vv)) in keys.iter().enumerate() {
-                    if ff == f && vv == v {
-                        out.push(i);
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    /// 아티팩트의 version(중간 티어) 라벨 — HF repo/소스(양자화·revision 을 가르는 자리).
-    pub fn artifact_version(a: &crate::collect::ModelArtifact) -> String {
-        if a.source.is_empty() {
-            a.model.clone()
-        } else {
-            a.source.clone()
-        }
-    }
     /// 카탈로그 모델의 family 키 — NPU 지원목록 계열명, 없으면 id.
     pub fn catalog_family(m: &crate::catalog::CatModel) -> String {
         crate::compat::family_of(&m.id)
@@ -49,16 +13,6 @@ impl App {
             .unwrap_or_else(|| m.id.clone())
     }
 
-    /// Serving 트리(배포 아티팩트)의 그룹 순서 원본 인덱스.
-    pub fn serving_order(&self) -> Vec<usize> {
-        let keys: Vec<(String, String)> = self
-            .snap
-            .artifacts
-            .iter()
-            .map(|a| (a.family.clone(), Self::artifact_version(a)))
-            .collect();
-        Self::grouped_indices(&keys)
-    }
     /// family 그룹 키(소문자) — 카탈로그·스토어를 한 트리로 묶을 때 공용.
     pub(super) fn lib_family(&self, it: LibItem) -> String {
         match it {

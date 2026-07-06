@@ -1876,29 +1876,22 @@ mod tests {
             models: vec![running],
             ..Default::default()
         };
-        // serving_order 는 family›version 그룹 순서 — 같은 family 가 인접해야 트리 내비가 자연스럽다.
-        let ord = a.serving_order();
-        assert_eq!(ord.len(), 3);
-        assert_eq!(a.snap.artifacts[ord[0]].family, "llama3");
-        assert_eq!(a.snap.artifacts[ord[1]].family, "llama3");
-        assert_eq!(a.snap.artifacts[ord[2]].family, "qwen2.5");
-
-        // Serving 렌즈 — 패닉 없이 family/version/replica 표시.
+        // Serving 렌즈 — 균일 정렬표. 3개 배포 모두 행으로.
         a.view = View::Serving;
         a.selected = 0;
+        assert_eq!(a.order().len(), 3, "3개 배포 모두 표에");
         let mut fx = crate::ui::FxState::disabled();
         let mut t = Terminal::new(TestBackend::new(120, 30)).unwrap();
         t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
         let text = buf_text(t.backend().buffer());
-        assert!(text.contains("llama3"), "family 헤더\n{text}");
-        assert!(text.contains("qwen2.5"), "두 번째 family 헤더");
         assert!(
-            text.contains("Instruct-FP8"),
-            "version 이 둘 이상이면 version 티어 노출"
+            text.contains("STATUS") && text.contains("MODEL"),
+            "정렬표 헤더\n{text}"
         );
+        assert!(text.contains("llama-a"), "모델 행 표시\n{text}");
         assert!(
-            text.contains("Serving 2/2"),
-            "배포 상태·replica 반영(Serving 2/2)\n{text}"
+            text.contains("Serving") && text.contains("2/2"),
+            "상태·replica 반영(Serving · 2/2)\n{text}"
         );
 
         // Model List 렌즈 — 카탈로그 트리(임베드 카탈로그) + 패닉 없음.

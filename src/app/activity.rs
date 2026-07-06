@@ -24,6 +24,16 @@ impl DeployPhase {
             DeployPhase::ScaledZero => "Scaled-0",
         }
     }
+    /// Attention rank for sorting (higher = needs attention first).
+    pub fn rank(self) -> u8 {
+        match self {
+            DeployPhase::Failed => 4,
+            DeployPhase::Degraded => 3,
+            DeployPhase::Starting => 2,
+            DeployPhase::Serving => 1,
+            DeployPhase::ScaledZero => 0,
+        }
+    }
     /// Severity glyph for the phase (legible in the colorblind theme).
     pub fn glyph(self) -> &'static str {
         match self {

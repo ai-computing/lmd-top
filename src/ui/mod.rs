@@ -3628,153 +3628,84 @@ fn compile_progress_bar(progress: Option<f32>, tick: u64, width: usize) -> Vec<S
     }
 }
 
-// ── Deploy▸Serving — 현재 서빙 중인 배포(라이브 아티팩트). family › version › running-target 트리. ──
-// 라이프사이클 렌즈: 무엇이 도는지 · 어느 컴파일 타깃/디바이스로 · replica 상태. 액션 x/s/r/y/l/o.
+// ── Serving — 현재 서빙 중인 배포(라이브 아티팩트)를 균일 정렬표로. ──
+// 컬럼: ● 상태(좌) · MODEL · ENGINE · TARGET(opts) · REP · NODE · t/s. o/O 정렬 · x/s/r/y/l/⏎ 액션.
 fn view_serving(f: &mut Frame, area: Rect, app: &App) {
-    let order = app.serving_order(); // family›version 그룹 순서(내비=표시 일치)
-    let mut lines: Vec<Line> = Vec::new();
-    let mut sel_line = 0usize;
-    lines.push(Line::from(vec![
-        Span::styled("state: ", Style::default().fg(C_DIM())),
-        Span::styled("● serving ", Style::default().fg(C_OK())),
-        Span::styled("◑ starting ", Style::default().fg(C_WARN())),
-        Span::styled("⚠ degraded ", Style::default().fg(C_WARN())),
-        Span::styled("✗ failed ", Style::default().fg(C_BAD())),
-        Span::styled("○ stopped   ", Style::default().fg(C_DIM())),
-        Span::styled("type: ", Style::default().fg(C_DIM())),
-        tag("HF", C_ACC()),
-        tag("RBLN", Color::Magenta),
-        tag("RNGD", C_WARN()),
-    ]));
-    if order.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "(현재 서빙 중인 배포 없음 — Library[Tab]에서 모델을 배포하세요)",
-            Style::default().fg(C_DIM()),
-        )));
-    }
-    let ver_of = crate::app::App::artifact_version;
-    let mut last_fam = String::new();
-    let mut last_ver = String::new();
-    for (pos, &i) in order.iter().enumerate() {
-        let a = &app.snap.artifacts[i];
-        let fam = a.family.clone();
-        let ver = ver_of(a);
-        // 같은 family 안에 서로 다른 version 이 둘 이상일 때만 version 티어를 노출(적응형 접기).
-        let ver_cnt = order
-            .iter()
-            .filter(|&&k| app.snap.artifacts[k].family == fam)
-            .map(|&k| ver_of(&app.snap.artifacts[k]))
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
-        if fam != last_fam {
-            let cnt = order
-                .iter()
-                .filter(|&&k| app.snap.artifacts[k].family == fam)
-                .count();
-            lines.push(Line::from(vec![
-                Span::styled("▪ ", Style::default().fg(C_ACC())),
-                Span::styled(
-                    fam.clone(),
-                    Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  ({} deploy{})", cnt, if cnt == 1 { "" } else { "s" }),
-                    Style::default().fg(C_DIM()),
-                ),
-            ]));
-            last_fam = fam.clone();
-            last_ver.clear();
-        }
-        if ver != last_ver {
-            if ver_cnt > 1 {
-                lines.push(Line::from(vec![
-                    Span::styled("  › ", Style::default().fg(C_TRACK())),
-                    Span::styled(truncw(&ver, 48), Style::default().fg(Color::Gray)),
-                ]));
-            }
-            last_ver = ver.clone();
-        }
-        let indent = if ver_cnt > 1 { "     └ " } else { "  └ " };
-        let m = app.snap.models.iter().find(|m| m.name == a.model);
-        // 배포 생애주기 상태(pods 교차) — 서빙 중/시도 중/실패를 구분해 표시.
-        let phase = m.map(|m| app.deploy_phase(&m.name, m.desired, m.ready));
-        let (g, gc, plabel) = match phase {
-            Some(p) => {
-                let c = match p.label() {
-                    "Serving" => C_OK(),
-                    "Failed" => C_BAD(),
-                    "Scaled-0" => C_DIM(),
-                    _ => C_WARN(), // Starting / Degraded
-                };
-                (p.glyph(), c, p.label())
-            }
-            None => ("○", C_DIM(), "–"),
-        };
-        let tbadge = if a.engine.contains("RBLN") {
-            tag("RBLN", Color::Magenta)
-        } else if a.engine.contains("Furiosa") {
-            tag("RNGD", C_WARN())
+    let order = app.order(); // 컬럼 정렬 반영
+    let engine_short = |e: &str| -> &'static str {
+        if e.contains("RBLN") {
+            "vLLM-RBLN"
+        } else if e.contains("Furiosa") {
+            "Furiosa-LLM"
+        } else if e.contains("vLLM") {
+            "vLLM"
         } else {
-            tag("HF", C_ACC())
-        };
-        let opts = opts_summary(a);
-        let npu =
-            matches!(a.engine.as_str(), "vLLM-RBLN" | "Furiosa-LLM") || a.engine.contains("RBLN");
-        let reps = m
-            .map(|m| format!("{} {}/{}", plabel, m.ready, m.desired))
-            .unwrap_or_else(|| plabel.to_string());
-        let selected = pos == app.selected;
-        if selected {
-            sel_line = lines.len();
+            "custom"
         }
-        let mut sp = vec![
-            Span::styled(indent.to_string(), Style::default().fg(C_TRACK())),
-            Span::styled(format!("{} ", g), Style::default().fg(gc)),
-            tbadge,
-            Span::styled(
-                format!(" {:<14} ", truncw(&a.model, 14)),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(
-                    "{:<24} ",
-                    truncw(if opts.is_empty() { "–" } else { &opts }, 24)
-                ),
-                Style::default().fg(if npu { C_WARN() } else { Color::Gray }),
-            ),
-            Span::styled(format!("{:<14} ", reps), Style::default().fg(gc)),
-            Span::styled(
-                format!("@{}", if a.node.is_empty() { "?" } else { &a.node }),
-                Style::default().fg(C_DIM()),
-            ),
-        ];
-        if let Some(t) = m.and_then(|m| m.tps) {
-            sp.push(Span::styled(
-                format!("  {:.0} tok/s", t),
-                Style::default().fg(C_OK()),
-            ));
-        }
-        let mut line = Line::from(sp);
-        if selected {
-            line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
-        }
-        lines.push(line);
-    }
-    let vis = (area.height as usize).saturating_sub(2);
-    let scroll = if sel_line + 2 > vis {
-        (sel_line + 3).saturating_sub(vis) as u16
-    } else {
-        0
     };
-    f.render_widget(
-        Paragraph::new(lines).scroll((scroll, 0)).block(block_active(&format!(
-            "Serving · 현재 서빙 중 (family › version › target) · x stop · s scale · r restart · y yaml · l logs · ⏎ actions{}",
-            count_suffix(app.selected, order.len())
-        ))),
-        area,
+    let rows: Vec<Row> = order
+        .iter()
+        .map(|&i| {
+            let a = &app.snap.artifacts[i];
+            let m = app.snap.models.iter().find(|m| m.name == a.model);
+            let (desired, ready, tps) =
+                m.map(|m| (m.desired, m.ready, m.tps)).unwrap_or((0, 0, None));
+            let phase = app.deploy_phase(&a.model, desired, ready);
+            let gc = match phase.label() {
+                "Serving" => C_OK(),
+                "Failed" => C_BAD(),
+                "Scaled-0" => C_DIM(),
+                _ => C_WARN(), // Starting / Degraded
+            };
+            let opts = opts_summary(a);
+            let target = if opts.is_empty() { "–".to_string() } else { opts };
+            let npu = a.engine.contains("RBLN") || a.engine.contains("Furiosa");
+            let tps_s = tps.map(|t| format!("{:.0}", t)).unwrap_or_else(|| "–".into());
+            Row::new(vec![
+                Cell::from(format!("{} {}", phase.glyph(), phase.label()))
+                    .style(Style::default().fg(gc)),
+                Cell::from(truncw(&a.model, 22)).style(
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Cell::from(engine_short(&a.engine)).style(Style::default().fg(C_DIM())),
+                Cell::from(truncw(&target, 20))
+                    .style(Style::default().fg(if npu { C_WARN() } else { Color::Gray })),
+                Cell::from(format!("{}/{}", ready, desired)).style(Style::default().fg(gc)),
+                Cell::from(truncw(if a.node.is_empty() { "?" } else { &a.node }, 14))
+                    .style(Style::default().fg(C_DIM())),
+                Cell::from(tps_s).style(Style::default().fg(C_OK())),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(11), // STATUS
+        Constraint::Min(16),    // MODEL
+        Constraint::Length(12), // ENGINE
+        Constraint::Length(20), // TARGET
+        Constraint::Length(6),  // REP
+        Constraint::Length(14), // NODE
+        Constraint::Length(6),  // t/s
+    ];
+    let header = ["STATUS", "MODEL", "ENGINE", "TARGET", "REP", "NODE", "t/s"];
+    let title = format!(
+        "Serving · running deployments · x stop · s scale · r restart · o sort · ⏎ actions{}",
+        count_suffix(app.selected, order.len())
     );
+    let mut st = TableState::default();
+    st.select(Some(app.selected));
+    f.render_stateful_widget(
+        Table::new(rows, widths)
+            .header(hrow_sorted(&header, app.sort_header_label(), app.sort_arrow()))
+            .column_spacing(1)
+            .row_highlight_style(hl_style())
+            .highlight_symbol("▎")
+            .block(block_active(&title)),
+        area,
+        &mut st,
+    );
+    list_scrollbar(f, area, order.len(), app.selected, 1);
 }
 
 // ── Deploy▸Activity — compile Job + deploy rollout 을 한 목록으로(통합 작업 피드). ──

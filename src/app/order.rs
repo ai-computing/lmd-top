@@ -115,8 +115,41 @@ impl App {
                 });
                 idx
             }
-            // Serving: 배포된 아티팩트를 family›version 그룹 순서로(트리 내비게이션이 그룹을 따라가게).
-            View::Serving => self.serving_order(),
+            // Serving: 배포 아티팩트를 컬럼 기준 정렬(o=컬럼 · O=방향). 균일 정렬표 내비.
+            View::Serving => {
+                let v = &self.snap.artifacts;
+                let desc = self.sort_desc;
+                let dr = |a: &crate::collect::ModelArtifact| {
+                    self.snap
+                        .models
+                        .iter()
+                        .find(|m| m.name == a.model)
+                        .map(|m| (m.desired, m.ready, m.tps))
+                        .unwrap_or((0, 0, None))
+                };
+                let mut idx: Vec<usize> = (0..v.len()).collect();
+                idx.sort_by(|&x, &y| {
+                    let (ax, ay) = (&v[x], &v[y]);
+                    let (dx, rx, tx) = dr(ax);
+                    let (dy, ry, ty) = dr(ay);
+                    let asc = match self.sort {
+                        0 => self
+                            .deploy_phase(&ax.model, dx, rx)
+                            .rank()
+                            .cmp(&self.deploy_phase(&ay.model, dy, ry).rank()),
+                        2 => rx.cmp(&ry),
+                        3 => tx
+                            .unwrap_or(f64::NEG_INFINITY)
+                            .partial_cmp(&ty.unwrap_or(f64::NEG_INFINITY))
+                            .unwrap_or(Equal),
+                        4 => ax.node.cmp(&ay.node),
+                        _ => ax.model.cmp(&ay.model),
+                    };
+                    let asc = if desc { asc.reverse() } else { asc };
+                    asc.then_with(|| ax.model.cmp(&ay.model))
+                });
+                idx
+            }
             // Deploy▸Model List: 배포 가능한 것 통합 트리(카탈로그+스토어), 단일 패널.
             View::Library => (0..self.library_items().len()).collect(),
             // Deploy▸Activity: compile Job + deploy rollout 통합 피드.
