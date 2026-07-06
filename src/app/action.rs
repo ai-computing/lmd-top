@@ -118,7 +118,7 @@ impl App {
                     key: 'd',
                     label: "Deploy",
                     desc: if s.1 == "hf" {
-                        "serve source weights (GPU); NPU 는 먼저 컴파일 필요"
+                        "serve source weights (GPU); Rebellions/Furiosa 는 먼저 컴파일 필요"
                     } else {
                         "serve this compiled build → Deployment"
                     },

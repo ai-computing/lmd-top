@@ -1799,7 +1799,7 @@ async fn collect_node_npu(nodes: &mut [NodeInfo]) {
         let mut parts = Vec::new();
         if let Some(prod) = l["furiosa.ai/npu.product"].as_str() {
             let drv = l["furiosa.ai/driver.version"].as_str().unwrap_or("?");
-            parts.push(format!("{} drv{}", prod.to_uppercase(), drv));
+            parts.push(format!("Furiosa {} drv{}", prod.to_uppercase(), drv));
         }
         if l["rebellions.ai/npu.present"].as_str() == Some("true")
             || l.get("rebellions.ai/npu.product").is_some()
@@ -1810,7 +1810,7 @@ async fn collect_node_npu(nodes: &mut [NodeInfo]) {
                 .unwrap_or("?");
             let installed = l["rebellions.ai/npu.driver.status"].as_str() == Some("installed");
             parts.push(format!(
-                "{} drv{}{}",
+                "Rebellions {} drv{}{}",
                 prod,
                 drv,
                 if installed { "" } else { "(!drv)" }

@@ -150,7 +150,7 @@ impl App {
             value: dev_default.to_string(),
             choices: dev_choices,
             numeric: true,
-            help: "Requested NPU device count (resources.limits). Usually TP for RBLN or ceil(TP/8)×PP for Furiosa.".into(),
+            help: "Requested accelerator device count (resources.limits). Usually TP for Rebellions or ceil(TP/8)×PP for Furiosa.".into(),
         });
         // Add driver/SDK summaries to node choices.
         let node_drv = |n: &str| -> String {
@@ -773,7 +773,7 @@ impl App {
                 let want = if rbln { "RBLN" } else { "RNGD" };
                 if !nd.npu.to_uppercase().contains(want) {
                     tips.push(format!(
-                        "⚠ 노드 {} 에 {} 드라이버 없음(npu: {}) — 컴파일 실패",
+                        "⚠ 노드 {} 에 {} 드라이버 없음(accel: {}) — 컴파일 실패",
                         node_host,
                         want,
                         if nd.npu.is_empty() { "none" } else { &nd.npu }

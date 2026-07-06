@@ -659,7 +659,7 @@ impl App {
                     mount = form.mount, served = served, port = port, devices = devices, res_key = res_key
                 );
                 let vols = "\x20     volumes:\n\x20       - { name: store, persistentVolumeClaim: { claimName: model-store } }\n".to_string();
-                (img, "# GPU: vLLM loads the model/store path directly; no NPU compile step required.".to_string(), spec, vols)
+                (img, "# GPU: vLLM loads the model/store path directly; no compile step required.".to_string(), spec, vols)
             }
         };
         let yaml = format!(
