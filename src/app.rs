@@ -147,6 +147,39 @@ pub use crate::ops::*;
 
 /// Compile Job name — `compile-{model}-{target}`. Including the target (vendor·chip·tp·pp·seq)
 /// lets "same model, different options" compiles coexist as distinct Jobs (same identity as the store path).
+/// 컴파일 타깃 문자열(예: "rbln-ca22-tp4-s8192" / "rngd-tp4-pp1-s8192" / "RNGD-tp4-s8192")을
+/// 사람이 읽는 컴파일 옵션 (라벨, 값) 목록으로 디코드. 스토어 컴파일본의 compiled_for 가 무슨
+/// 옵션을 담았는지(TP/PP/seq/칩) 상세 패널·행에서 풀어 보여주기 위함. `target()` 인코딩의 역함수.
+pub fn decode_compiled_for(s: &str) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let digits_after = |lc: &str, p: &str| -> Option<String> {
+        lc.strip_prefix(p)
+            .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            .map(|n| n.to_string())
+    };
+    for tok in s.split(['-', '_', ' ']).filter(|t| !t.is_empty()) {
+        let lc = tok.to_lowercase();
+        if lc == "rbln" {
+            out.push(("vendor", "RBLN (Rebellions)".into()));
+        } else if lc == "rngd" || lc == "furiosa" {
+            out.push(("vendor", "RNGD (Furiosa)".into()));
+        } else if lc == "hf" {
+            out.push(("format", "HF source weights".into()));
+        } else if let Some(n) = digits_after(&lc, "tp") {
+            out.push(("tensor-parallel", n));
+        } else if let Some(n) = digits_after(&lc, "pp") {
+            out.push(("pipeline-parallel", n));
+        } else if let Some(n) = digits_after(&lc, "s") {
+            out.push(("max-seq-len", n));
+        } else if lc.starts_with("ca") || lc.starts_with("rbln") {
+            out.push(("npu-chip", tok.to_uppercase()));
+        } else {
+            out.push(("target", tok.to_string()));
+        }
+    }
+    out
+}
+
 /// Guarantees DNS-1123 label rules (lowercase [a-z0-9-], ≤63 chars, alphanumeric at both ends). When exceeded, the model part is truncated
 /// and a short option-identifying hash is appended to keep uniqueness (target is always preserved).
 pub fn compile_job_name(repo_dir: &str, target: &str) -> String {
@@ -5615,5 +5648,40 @@ mod tests {
         assert!(text.contains("qwen3-4b-fp8"), "상세: 모델 id\n{text}");
         assert!(text.contains("placement"), "상세: 배치 후보 섹션\n{text}");
         assert!(text.contains("furiosa.ai/rngd"), "상세: 리소스\n{text}");
+
+        // 스토어 컴파일본 상세 — compiled_for 가 사람이 읽는 옵션으로 풀려야 한다.
+        a.selected = a
+            .library_items()
+            .iter()
+            .position(|it| matches!(it, LibItem::Stored(_)))
+            .expect("stored build present");
+        let mut t2 = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        t2.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+        let b2 = t2.backend().buffer();
+        let mut st = String::new();
+        for y in 0..b2.area.height {
+            for x in 0..b2.area.width {
+                if let Some(c) = b2.cell((x, y)) {
+                    st.push_str(c.symbol());
+                }
+            }
+        }
+        assert!(st.contains("compile options"), "스토어 상세: 옵션 섹션\n{st}");
+        assert!(st.contains("tensor-parallel"), "스토어 상세: TP 디코드\n{st}");
+        assert!(st.contains("max-seq-len"), "스토어 상세: seq 디코드\n{st}");
+    }
+
+    #[test]
+    fn decode_compiled_for_expands_options() {
+        let d = decode_compiled_for("rbln-ca22-tp4-s8192");
+        assert!(d.contains(&("vendor", "RBLN (Rebellions)".to_string())));
+        assert!(d.contains(&("npu-chip", "CA22".to_string())));
+        assert!(d.contains(&("tensor-parallel", "4".to_string())));
+        assert!(d.contains(&("max-seq-len", "8192".to_string())));
+        let f = decode_compiled_for("RNGD-tp4-pp1-s8192");
+        assert!(f.contains(&("vendor", "RNGD (Furiosa)".to_string())));
+        assert!(f.contains(&("tensor-parallel", "4".to_string())));
+        assert!(f.contains(&("pipeline-parallel", "1".to_string())));
+        assert!(f.contains(&("max-seq-len", "8192".to_string())));
     }
 }

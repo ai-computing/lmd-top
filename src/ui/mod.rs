@@ -2924,6 +2924,23 @@ fn library_detail(f: &mut Frame, area: Rect, app: &App) {
                 if s.compiled_for.is_empty() { "-" } else { &s.compiled_for },
                 if s.format == "hf" { C_DIM() } else { C_WARN() },
             ));
+            // compiled_for 인코딩을 풀어 "무슨 옵션으로 컴파일됐는지" 명시.
+            let opts = crate::app::decode_compiled_for(&s.compiled_for);
+            if s.format != "hf" && !opts.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  compile options — 이 빌드에 박힌 옵션",
+                    Style::default().fg(C_ACC()),
+                )));
+                for (label, val) in opts {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("    {:<18}", label),
+                            Style::default().fg(C_DIM()),
+                        ),
+                        Span::styled(val, Style::default().fg(Color::White)),
+                    ]));
+                }
+            }
             lines.push(kv(
                 "revision",
                 if s.revision.is_empty() { "-" } else { &s.revision },
@@ -3905,7 +3922,22 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
                         format!("source @{}", truncw(&s.revision, 8))
                     }
                 } else {
-                    format!("compiled · {}", s.compiled_for)
+                    // compiled_for 를 사람이 읽는 옵션(tp/pp/seq/칩)으로 풀어 표시.
+                    let toks: Vec<String> = crate::app::decode_compiled_for(&s.compiled_for)
+                        .into_iter()
+                        .filter_map(|(k, v)| match k {
+                            "tensor-parallel" => Some(format!("tp{}", v)),
+                            "pipeline-parallel" => Some(format!("pp{}", v)),
+                            "max-seq-len" => Some(format!("seq{}", v)),
+                            "npu-chip" => Some(v),
+                            _ => None,
+                        })
+                        .collect();
+                    if toks.is_empty() {
+                        format!("compiled · {}", s.compiled_for)
+                    } else {
+                        format!("compiled · {}", toks.join(" "))
+                    }
                 };
                 sp.push(Span::styled("◇ ", Style::default().fg(C_ACC())));
                 sp.push(tbadge);
