@@ -84,6 +84,28 @@ impl App {
                     desc: false,
                 },
             ],
+            Serving => &[
+                SortCol {
+                    label: "status",
+                    desc: true,
+                },
+                SortCol {
+                    label: "name",
+                    desc: false,
+                },
+                SortCol {
+                    label: "rep",
+                    desc: true,
+                },
+                SortCol {
+                    label: "tok/s",
+                    desc: true,
+                },
+                SortCol {
+                    label: "node",
+                    desc: false,
+                },
+            ],
             Nodes => &[
                 SortCol {
                     label: "name",
@@ -209,6 +231,11 @@ impl App {
             (Perf, 2) => "TTFT",
             (Perf, 3) => "QUEUE",
             (Perf, 4) => "MODEL",
+            (Serving, 0) => "STATUS",
+            (Serving, 1) => "MODEL",
+            (Serving, 2) => "REP",
+            (Serving, 3) => "t/s",
+            (Serving, 4) => "NODE",
             _ => "", // Events recent, Nodes(헤더 없음), 그 외 → 마킹 안 함
         }
     }
