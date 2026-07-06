@@ -18,6 +18,7 @@ mod select;
 mod setup;
 mod sort;
 mod state;
+mod zoo;
 
 pub use setup::{CheckState, SetupFix};
 
@@ -275,12 +276,13 @@ pub enum View {
     Events,
     Nodes,
     Topo,  // Nodes hub's topology / device pressure map (Canvas)
+    Zoo,   // Deploy 섹션: 벤더(Furiosa/Rebellions) 모델 zoo — prefetch/compile/deploy
     Setup, // 새 클러스터 부트스트랩 점검(Doctor): 플랫폼 전제조건 present/missing + 가이드된 apply
 }
 
 impl View {
     /// Every view — for headless render coverage and exhaustive iteration (not a nav order).
-    pub const EVERY: [View; 12] = [
+    pub const EVERY: [View; 13] = [
         View::Overview,
         View::Routing,
         View::Epp,
@@ -291,6 +293,7 @@ impl View {
         View::Accel,
         View::Topo,
         View::Library,
+        View::Zoo,
         View::Events,
         View::Setup,
     ];
@@ -301,7 +304,7 @@ impl View {
             View::Routing | View::Epp => Section::Traffic,
             View::Serving | View::Perf | View::Pods => Section::Serving,
             View::Nodes | View::Accel | View::Topo => Section::Infra,
-            View::Library => Section::Deploy,
+            View::Library | View::Zoo => Section::Deploy,
             View::Events => Section::Events,
             View::Setup => Section::Setup,
         }
@@ -320,6 +323,7 @@ impl View {
             View::Events => "Events",
             View::Nodes => "Nodes",
             View::Topo => "Topology",
+            View::Zoo => "Zoo",
             View::Setup => "Setup",
         }
     }
@@ -370,8 +374,8 @@ impl Section {
             // Serving: 현재 서빙 중인 배포(랜딩) → Perf → Pods.
             Section::Serving => &[View::Serving, View::Perf, View::Pods],
             Section::Infra => &[View::Nodes, View::Accel, View::Topo],
-            // Deploy: 단일 뷰(위=Model List · 아래=Activity 2패널, Ctrl+w 로 포커스 전환).
-            Section::Deploy => &[View::Library],
+            // Deploy: Library(위 Model List · 아래 Activity) + Zoo(벤더 모델 zoo).
+            Section::Deploy => &[View::Library, View::Zoo],
             Section::Events => &[View::Events],
             Section::Setup => &[View::Setup],
         }
@@ -427,6 +431,7 @@ pub struct App {
     pub logs_scroll: u16,
     pub cols: HashMap<String, Vec<String>>, // per-view displayed columns (order) — config file
     pub catalog: Vec<crate::catalog::CatModel>, // model catalog (launcher)
+    pub zoo: Vec<crate::catalog::ZooModel>, // vendor model zoo (Deploy▸Zoo)
     // ── Active alerts ──
     pub alerts: VecDeque<Alert>,         // history (newest first), cap 50
     pub active_alerts: HashSet<String>,  // currently active keys (for edge detection)
@@ -519,6 +524,7 @@ impl App {
             logs_scroll: 0,
             cols: load_columns(),
             catalog: crate::catalog::load(),
+            zoo: crate::catalog::load_zoo(),
             alerts: VecDeque::new(),
             active_alerts: HashSet::new(),
             alerts_panel: false,

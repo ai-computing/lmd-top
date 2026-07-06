@@ -54,6 +54,38 @@ pub fn load() -> Vec<CatModel> {
         .unwrap_or_default()
 }
 
+/// Vendor model-zoo entry — a Hugging Face model that can be prefetched/compiled/served
+/// on Furiosa(RNGD) / Rebellions(RBLN). Compilable vendors are derived from `source`
+/// via `crate::compat`, so this only needs the canonical HF id + display.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ZooModel {
+    pub display: String,
+    pub source: String, // HF repo id (org/name)
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ZooRoot {
+    #[serde(default)]
+    models: Vec<ZooModel>,
+}
+
+const DEFAULT_ZOO: &str = include_str!("../catalog/zoo.yaml");
+
+/// Load the vendor model zoo (bundled `catalog/zoo.yaml`, override with `LMD_ZOO`).
+pub fn load_zoo() -> Vec<ZooModel> {
+    let txt = std::env::var("LMD_ZOO")
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_else(|| DEFAULT_ZOO.to_string());
+    serde_yaml::from_str::<ZooRoot>(&txt)
+        .map(|r| r.models)
+        .unwrap_or_default()
+}
+
 /// 배치 준비 상태.
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq, Debug)]

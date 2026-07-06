@@ -114,6 +114,11 @@ impl App {
                 .map(|r| r.model.clone())
                 .unwrap_or_default(),
             View::Topo => String::new(), // 맵 뷰 — 리스트 선택 없음
+            View::Zoo => self
+                .zoo
+                .get(i)
+                .map(|z| format!("{} {} {}", z.display, z.source, z.role))
+                .unwrap_or_default(),
             View::Setup => self
                 .setup_checks()
                 .get(i)

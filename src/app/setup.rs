@@ -262,6 +262,26 @@ impl App {
                 ),
             )
         });
+        // Cilium 게이트웨이는 InferencePool 을 HTTPRoute backendRef 로 인식 못함 → EPP 지능형
+        // 스케줄링이 데이터 경로에서 우회(round-robin). 진짜 GIE 라우팅엔 Istio 등 GIE 호환 GW 필요.
+        if s.gateway && s.gatewayclasses.iter().any(|c| c == "cilium") {
+            v.push(SetupCheck::new(
+                "Gateway",
+                "EPP routing (GIE)",
+                CheckState::Warn,
+                "Cilium can't use InferencePool as an HTTPRoute backend — EPP scheduling is bypassed (round-robin)".into(),
+                SetupFix::Command(
+                    "# lmd-top generates standard InferencePool+EPP, but Cilium's GatewayClass doesn't implement\n\
+                     # GIE ext_proc, so intelligent routing is bypassed. For true EPP scheduling use a\n\
+                     # GIE-compatible gateway (Istio) and point the Gateway at it:\n\
+                     #   helm install istio-base istio/base -n istio-system --set defaultRevision=default --create-namespace\n\
+                     #   helm install istiod istio/istiod -n istio-system \\\n\
+                     #     --set pilot.env.ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true --wait\n\
+                     #   then set the Gateway's gatewayClassName to istio.\n\
+                     # ref: https://developer.furiosa.ai/latest/en/cloud_native_toolkit/llm_d.html".into(),
+                ),
+            ));
+        }
 
         // ── RBAC / EPP ──
         v.push(if s.epp_role_sa && s.epp_role_non_sa {

@@ -1,0 +1,64 @@
+# Vendor model zoo — Furiosa(RNGD) / Rebellions(RBLN) 로 컴파일·서빙 가능한 공개 모델 목록.
+# lmd-top Deploy▸Zoo 뷰가 렌더 → ⏎ 로 Prefetch(가중치 다운로드)·Compile→벤더.
+# 컴파일 가능 벤더는 src/npu-compat.json(패밀리 지원) 에서 자동 판정한다(여기 명시 불필요).
+# source 는 Hugging Face repo id(org/name) — 컴파일/프리페치가 이 id 로 가중치를 받는다.
+# 커스터마이즈: LMD_ZOO=<path.yaml> 로 이 목록을 대체.
+#
+# 출처: Furiosa Supported Models(developer.furiosa.ai) · Rebellions rbln-model-zoo / optimum-rbln.
+models:
+  # ── Llama ──
+  - display: Llama-3.1-8B-Instruct
+    source: meta-llama/Llama-3.1-8B-Instruct
+    role: chat
+    note: gated — HF 토큰 필요(meta-llama)
+  - display: Llama-3.1-70B-Instruct
+    source: meta-llama/Llama-3.1-70B-Instruct
+    role: chat
+    note: gated · 대형(다중 카드)
+  - display: Llama-3.3-70B-Instruct
+    source: meta-llama/Llama-3.3-70B-Instruct
+    role: chat
+    note: gated · 대형
+  # ── Qwen ──
+  - display: Qwen2.5-7B-Instruct
+    source: Qwen/Qwen2.5-7B-Instruct
+    role: chat
+  - display: Qwen2.5-14B-Instruct
+    source: Qwen/Qwen2.5-14B-Instruct
+    role: chat
+  - display: Qwen3-8B
+    source: Qwen/Qwen3-8B
+    role: chat
+  - display: Qwen3-Embedding-8B
+    source: Qwen/Qwen3-Embedding-8B
+    role: embedding
+    note: RAG 임베딩(Furiosa RNGD 가속)
+  # ── Gemma ──
+  - display: Gemma-2-9B-IT
+    source: google/gemma-2-9b-it
+    role: chat
+  - display: Gemma-2-27B-IT
+    source: google/gemma-2-27b-it
+    role: chat
+  # ── EXAONE (LG) ──
+  - display: EXAONE-3.5-7.8B-Instruct
+    source: LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct
+    role: chat
+    note: 한국어
+  - display: EXAONE-3.5-32B-Instruct
+    source: LGAI-EXAONE/EXAONE-3.5-32B-Instruct
+    role: chat
+    note: 한국어 · 대형
+  # ── Mistral ──
+  - display: Mistral-7B-Instruct-v0.3
+    source: mistralai/Mistral-7B-Instruct-v0.3
+    role: chat
+  # ── Furiosa 사전 양자화 체크포인트(furiosa-ai HF org) ──
+  - display: Qwen3-4B-FP8 (Furiosa)
+    source: furiosa-ai/Qwen3-4B-FP8
+    role: chat
+    note: Furiosa 사전 양자화(FP8)
+  - display: Llama-3.1-8B-Instruct (Furiosa)
+    source: furiosa-ai/Llama-3.1-8B-Instruct
+    role: chat
+    note: Furiosa 사전 양자화

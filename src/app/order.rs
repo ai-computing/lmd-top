@@ -169,6 +169,7 @@ impl App {
             View::Routing if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
             View::Routing => (0..self.snap.routes.len()).collect(),
             View::Topo => Vec::new(), // 맵 뷰 — 리스트 선택 없음
+            View::Zoo => (0..self.zoo.len()).collect(),
             View::Setup => (0..self.setup_checks().len()).collect(),
         };
         if !self.filter.is_empty() {

@@ -17,7 +17,7 @@ kind: Plugin
 metadata:
   name: lmd-top
 spec:
-  version: v0.34.0
+  version: v0.35.0
   homepage: https://github.com/gspark-etri/lmd-top
   shortDescription: Terminal observability & ops for llm-d clusters
   description: |
@@ -33,22 +33,22 @@ spec:
     * A truecolor terminal with braille/box-drawing glyphs is recommended.
   platforms:
     - selector: { matchLabels: { os: linux, arch: amd64 } }
-      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.34.0/lmd-top-v0.34.0-x86_64-linux.tar.gz
+      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.35.0/lmd-top-v0.35.0-x86_64-linux.tar.gz
       sha256: "REPLACE_WITH_x86_64_linux_SHA256"
       bin: lmd-top
       files: [{ from: "*/lmd-top", to: "." }]
     - selector: { matchLabels: { os: linux, arch: arm64 } }
-      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.34.0/lmd-top-v0.34.0-aarch64-linux.tar.gz
+      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.35.0/lmd-top-v0.35.0-aarch64-linux.tar.gz
       sha256: "REPLACE_WITH_aarch64_linux_SHA256"
       bin: lmd-top
       files: [{ from: "*/lmd-top", to: "." }]
     - selector: { matchLabels: { os: darwin, arch: arm64 } }
-      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.34.0/lmd-top-v0.34.0-aarch64-darwin.tar.gz
+      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.35.0/lmd-top-v0.35.0-aarch64-darwin.tar.gz
       sha256: "REPLACE_WITH_aarch64_darwin_SHA256"
       bin: lmd-top
       files: [{ from: "*/lmd-top", to: "." }]
     - selector: { matchLabels: { os: darwin, arch: amd64 } }
-      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.34.0/lmd-top-v0.34.0-x86_64-darwin.tar.gz
+      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.35.0/lmd-top-v0.35.0-x86_64-darwin.tar.gz
       sha256: "REPLACE_WITH_x86_64_darwin_SHA256"
       bin: lmd-top
       files: [{ from: "*/lmd-top", to: "." }]
