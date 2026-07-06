@@ -185,8 +185,8 @@ impl App {
                 }
                 (format!("catalog · {}", m.id), m.id.clone())
             }
-            View::Activity => {
-                // 통합 작업 피드 — compile Job / deploy rollout. 로그 · (Job 이면) 삭제.
+            View::Library if self.panel_focus == 1 => {
+                // Deploy 하단 Activity 패널 — compile Job / deploy rollout. 로그 · (Job 이면) 삭제.
                 let Some(row) = self.selected_activity() else {
                     return;
                 };

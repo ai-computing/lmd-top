@@ -52,7 +52,6 @@ impl Palette {
             v(View::Accel),
             v(View::Perf),
             v(View::Topo),
-            v(View::Activity),
             v(View::Epp),
             v(View::Routing),
             v(View::Pods),

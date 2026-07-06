@@ -119,12 +119,8 @@ impl App {
                 None => String::new(),
             };
             let target = format!("{} → {}", c.model, vt);
-            // running 은 진행바로 %를 그리므로 상태엔 상태명만.
-            let status = if running {
-                c.status.clone()
-            } else {
-                format!("{}{}", c.status, pct)
-            };
+            // 상태 텍스트에 진행률(%)을 항상 함께 — 진행바와 별개로 숫자로도 보이게.
+            let status = format!("{}{}", c.status, pct);
             let sev = match c.status.as_str() {
                 "Failed" => 2,
                 "Complete" => 0,
