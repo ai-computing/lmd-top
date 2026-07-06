@@ -25,7 +25,7 @@ Kubernetes; it stores no data of its own.
 - **Four layers on one screen.** The Gateway, EPP/InferencePool, model servers, and hardware are correlated, so you can answer *which model runs where, how requests are routed, and how load is distributed* without switching tools.
 - **Heterogeneous accelerators, unified.** NVIDIA GPU, Rebellions RBLN, and Furiosa RNGD sit side by side. The exact GPU model and its VRAM are auto-detected, unified-memory parts (GB10, GH200) are recognized and marked `∪`, and per-node disk usage is tracked too.
 - **EPP-aware.** It reads the EPP `ConfigMap` (active scorers, weights, and picker), visualizes routing decisions and per-pod queues, and diagnoses whether an HTTPRoute actually flows through the InferencePool or bypasses it.
-- **Deployment lifecycle.** The Deploy section splits into two lenses over one `family › version › target` tree: **Serving** (what is running now — compiled target, replicas, node, throughput) and **Library** (what you can deploy — catalog feasibility, placement capacity, RBLN/Furiosa compile jobs). Same tree, one `Tab` apart.
+- **Lifecycle split — provision vs. run.** **Serving** (section 2) is the running side: every deployment as a `family › version › target` tree with a live phase (serving / starting / degraded / failed, cross-referenced from pods) plus scale/restart/stop, so you can tell whether a model *is serving, still trying, or has failed*. **Deploy** (section 4) is the provision side: a **Model List** of what you can deploy (catalog feasibility + store builds) and an **Activity** feed that unifies compile Jobs and deploy rollouts with status and progress.
 - **A rich terminal UI.** An LED device grid, a stacked VRAM bar, braille timelines, active alerting, log tailing, and a `scale` action — with four themes and understated animations, all in a single static Rust binary that has no C dependencies.
 
 ## Views
@@ -39,9 +39,9 @@ mode (then `h`/`j`/`k`/`l` or arrows move focus, `Esc` exits) — the vi/tmux wi
 |---|---|---|---|
 | 0 | **Overview** | — | Cluster summary, LED device grid, VRAM bar, accelerators by kind/node, EPP path, models, and a one-line diagnosis |
 | 1 | **Traffic** | Flow · EPP | **Flow**: Gateway → HTTPRoute → backend → pods, with InferencePool/EPP/SLO and the EPP-bypass diagnosis (`⏎` jumps to the backend model). **EPP**: scorers/weights, the picker, InferencePool endpoints, and request distribution |
-| 2 | **Models** | Models · Perf · Pods | **Models**: per-model accel/node, ready, running/waiting, KV%, tok/s, route, status. **Perf**: p95 latency QUEUE→PREFILL→DECODE→TPOT→E2E, tok/s, + SLO advisor. **Pods**: `llm-serving` pods (ready/phase/node/restarts). `⏎` opens the action menu |
+| 2 | **Serving** | Serving · Perf · Pods | **Serving**: running deployments as a `family › version › target` tree — phase (`● serving` / `◑ starting` / `⚠ degraded` / `✗ failed` / `○ stopped`, cross-referenced from pods), replicas, `@node`, tok/s; `⏎` → Scale/Restart/Stop/Objective/YAML/Logs. **Perf**: p95 latency QUEUE→PREFILL→DECODE→TPOT→E2E, tok/s, + SLO advisor. **Pods**: `llm-serving` pods (ready/phase/node/restarts) |
 | 3 | **Infra** | Nodes · Devices · Topology | **Nodes**: health (CPU/mem/disk/load + devices). **Devices**: per-device util/VRAM/temp/power. **Topology**: Canvas Gateway→EPP→Pool flow + device pressure heatmap |
-| 4 | **Deploy** | Serving · Library | Two lenses over one `family › version › target` tree. **Serving**: what is running now — state, compiled target, replicas, `@node`, tok/s (`⏎` → Stop/Scale/Restart/YAML/Logs). **Library**: what you can deploy — catalog feasibility (`✓ ready` / `⚙ needs-compile` / `✗ no-capacity`) + placement targets, with in-flight compile jobs (`⏎` → Deploy/Compile). Single-child version tiers collapse automatically |
+| 4 | **Deploy** | Model List · Activity | Provision, not runtime. **Model List**: everything you can deploy — org-catalog feasibility (`✓ ready` / `⚙ needs-compile` / `✗ no-capacity`) + placement targets and store builds, grouped by family; `⏎` → Deploy/Compile. **Activity**: a unified feed of in-flight compile Jobs (with progress) and deploy rollouts still starting or failed; `⏎` → Logs/Delete |
 | 5 | **Events** | — | Kubernetes + llm-d events, newest first; `⏎` shows the full message |
 
 List headers show a `Σ` aggregate of the shown rows (all rows, or just the filtered ones). `y` shows any selected resource's live YAML (read-only).
@@ -137,8 +137,9 @@ HTTP/1.0, and Kubernetes through `kubectl`.
 **Works today, with no traffic required.** All twelve views; GPU/RBLN/RNGD and node/disk
 monitoring with auto-detection and unified memory; the Flow topology and EPP-bypass
 diagnosis; EPP ConfigMap introspection; active alerting; the `scale` and `logs` actions; the
-Deploy section's Serving/Library lenses (running deployments, catalog feasibility, and
-RBLN/Furiosa compile & deploy manifest generation with a mode-gated apply); the headless
+Serving section (running deployments with a serving/starting/failed phase) and the Deploy
+section's Model List + Activity (catalog feasibility, and RBLN/Furiosa compile & deploy
+manifest generation with a mode-gated apply, tracked in one activity feed); the headless
 `--json`, `--doctor`, `--snapshot`, and `--cast` modes; and themes, animation, zoom, and
 permission modes.
 
