@@ -196,6 +196,28 @@ impl App {
         let model_id = &form.model_id;
         let vendor = form.vendor;
         let target = form.target();
+        // 사전 차단: 컴파일은 from_pretrained(MODEL_ID) 로 소스 가중치를 받는다. MODEL_ID 가
+        // 유효한 HF repo id(org/name)도 로컬 경로(/…)도 아니면 HF 에서 404 → 25분짜리 Job 이
+        // 무의미하게 죽는다(실기 원인). Job 을 띄우기 전에 명확히 안내하고 중단.
+        if !model_id.contains('/') {
+            self.preview = Some((
+                format!("compile · {} — source unresolved", form.model),
+                format!(
+                    "# Cannot compile: MODEL_ID '{id}' is not a valid Hugging Face repo id (expected org/name)\n\
+                     # and is not a local path. RBLN/Furiosa compile downloads the source weights via\n\
+                     # from_pretrained(MODEL_ID), so it would 404 on https://huggingface.co/{id}.\n\
+                     #\n\
+                     # Fix: give this model a canonical HF source. In your catalog (catalog/models.yaml or LMD_CATALOG):\n\
+                     #   - id: {id}\n\
+                     #     source: <org>/<name>        # e.g. meta-llama/Llama-3.1-8B-Instruct\n\
+                     # or add an `hf://<org>/<name>` placement. Alternatively pre-place the weights in the store.\n",
+                    id = model_id
+                ),
+            ));
+            self.preview_scroll = 0;
+            self.preview_apply = false;
+            return;
+        }
         let repo_dir = model_id.replace('/', "--");
         // Job 이름 = 모델 + 타깃(vendor·chip·tp·pp·seq). 같은 모델을 다른 옵션으로 컴파일하면
         // 서로 다른 Job 이 되어 공존 가능(스토어 산출물 경로와 동일한 정체성). DNS-1123(≤63자) 보장.
@@ -263,7 +285,9 @@ impl App {
                 "OUTPUT".into(),
                 format!("/mnt/store/compiled/{}/{}/{}", repo_dir, vendor, target),
             ),
-            ("HF_HOME".into(), "/work/hub".into()),
+            // HF 캐시를 공유 스토어에 둠 — 이미 받은 가중치 재사용(오프라인·재다운로드 방지),
+            // 컴파일 간/노드 간 공유(PLAYBOOK: 가중치는 PVC 에 두는 게 안정). RBLN 경로에 반영.
+            ("HF_HOME".into(), "/mnt/store/hub".into()),
         ];
         for f in &form.fields {
             if f.value.is_empty() || f.value == "none" {
@@ -331,7 +355,7 @@ impl App {
             );
             (
                 "        - { name: work, emptyDir: {} }\n".to_string(),
-                "            - { name: HF_HOME, value: /work/hub }\n            - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true } } }\n".to_string(),
+                "            - { name: HF_HOME, value: /mnt/store/hub }\n            - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true } } }\n".to_string(),
                 "            - { name: work, mountPath: /work }\n".to_string(),
                 format!("[\"sh\", \"-c\", \"{}\"]", cmd),
                 "# Furiosa: run fxb build directly for furiosa-ai quantized checkpoints. Installs aarch64 cross-compiler, builds locally, then copies to model-store.",
@@ -883,5 +907,92 @@ impl App {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod compile_tests {
+    use super::*;
+    use crate::catalog::{CatModel, CatPlacement};
+
+    fn placement(engine: &str, resource: &str, uri: &str) -> CatPlacement {
+        CatPlacement {
+            engine: engine.into(),
+            accel: String::new(),
+            resource: resource.into(),
+            count: 4,
+            replicas: 1,
+            uri: uri.into(),
+            requires_artifact: uri.starts_with("pvc://"),
+        }
+    }
+    fn model(id: &str, source: &str, placements: Vec<CatPlacement>) -> CatModel {
+        CatModel {
+            id: id.into(),
+            display: String::new(),
+            role: "chat".into(),
+            source: source.into(),
+            placements,
+        }
+    }
+
+    // 실기 버그: RBLN placement(pvc://) 를 골라도 컴파일 소스는 형제 hf:// 가중치 id 여야 한다.
+    #[test]
+    fn hf_source_prefers_sibling_hf_placement_over_pvc() {
+        let m = model(
+            "llama3.1-8b",
+            "",
+            vec![
+                placement("vllm", "nvidia.com/gpu", "hf://meta-llama/Llama-3.1-8B-Instruct"),
+                placement("vllm-rbln", "rebellions.ai/ATOM", "pvc://rbln-artifacts/llama31-8b-tp4"),
+            ],
+        );
+        assert_eq!(
+            App::catalog_hf_source(&m),
+            "meta-llama/Llama-3.1-8B-Instruct"
+        );
+        // 그리고 그 아티팩트의 컴파일 model_id 도 유효한 HF id 여야 함(예전엔 family "llama3.1-8b" 로 폴백해 404).
+        let rbln_p = &m.placements[1];
+        let art = App::catalog_artifact(&m, rbln_p);
+        assert_eq!(App::artifact_model_id(&art), "meta-llama/Llama-3.1-8B-Instruct");
+    }
+
+    #[test]
+    fn hf_source_explicit_field_wins() {
+        let m = model(
+            "qwen3-embedding-8b",
+            "Qwen/Qwen3-Embedding-8B",
+            vec![placement("furiosa", "furiosa.ai/rngd", "pvc://furiosa-artifacts/qwen3-embed")],
+        );
+        assert_eq!(App::catalog_hf_source(&m), "Qwen/Qwen3-Embedding-8B");
+    }
+
+    #[test]
+    fn hf_source_falls_back_to_id_when_unknown() {
+        // hf:// placement 도 source 도 없으면 id 로 폴백 → compile 가드가 이후 걸러낸다.
+        let m = model(
+            "koni-llama3.1-8b",
+            "",
+            vec![placement("vllm-rbln", "rebellions.ai/ATOM", "pvc://rbln-artifacts/koni-tp4")],
+        );
+        assert_eq!(App::catalog_hf_source(&m), "koni-llama3.1-8b");
+    }
+
+    // 사전 차단: 유효한 HF id(org/name)가 아니면 Job 매니페스트를 만들지 않는다.
+    #[test]
+    fn compile_blocks_invalid_hf_id() {
+        let mut a = App::new();
+        let r = a.plan_compile_for_model("llama3.1-8b", "rbln", &[]);
+        assert!(r.is_err(), "bare name must not produce a compile manifest");
+        assert!(a.preview.is_some(), "should surface a guidance preview");
+    }
+
+    #[test]
+    fn compile_allows_valid_hf_id() {
+        let mut a = App::new();
+        let r = a.plan_compile_for_model("meta-llama/Llama-3.1-8B-Instruct", "rbln", &[]);
+        let (_, yaml) = r.expect("valid HF id should produce a manifest");
+        assert!(yaml.contains("meta-llama/Llama-3.1-8B-Instruct"));
+        assert!(yaml.contains("/mnt/store/hub"), "HF cache on shared store");
     }
 }
