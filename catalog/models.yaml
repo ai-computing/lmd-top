@@ -38,6 +38,7 @@ models:
   - id: qwen3-embedding-8b
     display: Qwen3-Embedding-8B (Furiosa)
     role: embedding
+    source: Qwen/Qwen3-Embedding-8B   # 컴파일 소스(가중치); placement 는 precompiled pvc://
     placements:
       - engine: furiosa
         accel: furiosa

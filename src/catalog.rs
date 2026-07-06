@@ -10,6 +10,11 @@ pub struct CatModel {
     pub display: String,
     #[serde(default)]
     pub role: String,
+    /// Canonical Hugging Face weights id (org/name) for **compilation** — the source to build
+    /// RBLN/Furiosa artifacts from. Falls back to the first `hf://` placement, then `id`.
+    /// Set this for models whose only placement is a precompiled `pvc://` artifact.
+    #[serde(default)]
+    pub source: String,
     #[serde(default)]
     pub placements: Vec<CatPlacement>,
 }

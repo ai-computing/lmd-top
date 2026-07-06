@@ -121,6 +121,23 @@ impl App {
         }
     }
 
+    /// Canonical HF weights id for **compiling** this model (org/name):
+    /// explicit `source:` → first `hf://` placement → `id`. Unlike [`placement_model_id`],
+    /// this ignores the chosen placement's `pvc://` (compiled-artifact) uri, so RBLN/Furiosa
+    /// compile always resolves to the real source weights instead of the artifact path.
+    pub(super) fn catalog_hf_source(m: &crate::catalog::CatModel) -> String {
+        let src = m.source.trim();
+        if !src.is_empty() {
+            return src.to_string();
+        }
+        for p in &m.placements {
+            if let Some(hf) = p.uri.trim().strip_prefix("hf://") {
+                return hf.trim_start_matches('/').to_string();
+            }
+        }
+        m.id.clone()
+    }
+
     pub(super) fn placement_model_id(
         m: &crate::catalog::CatModel,
         p: &crate::catalog::CatPlacement,
@@ -153,7 +170,9 @@ impl App {
         m: &crate::catalog::CatModel,
         p: &crate::catalog::CatPlacement,
     ) -> crate::collect::ModelArtifact {
-        let model_id = Self::placement_model_id(m, p);
+        // 이 아티팩트는 **컴파일 전용**(selected_catalog_artifact → compile_preview).
+        // deploy 는 placement_model_id 를 직접 쓰므로, 여기 source 는 컴파일 소스 HF id 로 둔다
+        // (pvc:// placement 를 골라도 실제 가중치 org/name 을 잃지 않도록).
         crate::collect::ModelArtifact {
             model: if m.display.is_empty() {
                 m.id.clone()
@@ -164,7 +183,7 @@ impl App {
             engine: Self::placement_engine(p).to_string(),
             node: String::new(),
             image: String::new(),
-            source: model_id,
+            source: Self::catalog_hf_source(m),
             mount: Self::placement_mount(m, p),
             opts: vec![("tp".into(), p.count.max(1).to_string())],
         }
