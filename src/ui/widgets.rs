@@ -336,7 +336,6 @@ pub(crate) fn list_scrollbar(f: &mut Frame, area: Rect, total: usize, pos: usize
 /// 균일한 리스트 테이블 렌더 — Table+헤더+선택 하이라이트+스크롤바+위치카운터 보일러플레이트 1곳.
 /// (Accel/Pods/Events 등 표준 리스트 뷰 공용. 커스텀 레이아웃 뷰는 직접 그림.)
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_list_table(
     f: &mut Frame,
     area: Rect,
