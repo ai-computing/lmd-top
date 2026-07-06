@@ -181,11 +181,17 @@ impl App {
              \x20             set -e\n\
              \x20             pip install -q --no-cache-dir huggingface_hub\n\
              \x20             pip install -q --no-cache-dir hf_transfer && export HF_HUB_ENABLE_HF_TRANSFER=1 || true\n\
+             \x20             MDIR={hf_home}/hub/models--{repo_dashes}\n\
+             \x20             TOTAL=$(python -c \"from huggingface_hub import HfApi; i=HfApi().model_info('{source}', files_metadata=True); print(sum((f.size or 0) for f in i.siblings))\" 2>/dev/null || echo 0)\n\
              \x20             python -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id='{source}'{rev_arg})\" &\n\
              \x20             DL=$!\n\
-             \x20             while kill -0 $DL 2>/dev/null; do sz=$(du -sh {hf_home} 2>/dev/null | cut -f1); echo \"downloading {source}: ${{sz:-0}} on disk\"; sleep 15; done\n\
+             \x20             while kill -0 $DL 2>/dev/null; do\n\
+             \x20               B=$(du -sb \"$MDIR\" 2>/dev/null | cut -f1); B=${{B:-0}}\n\
+             \x20               if [ \"$TOTAL\" -gt 0 ] 2>/dev/null; then echo \"downloading {source}: $((B*100/TOTAL))% ($((B/1073741824))G/$((TOTAL/1073741824))G)\"; else echo \"downloading {source}: $(du -sh \"$MDIR\" 2>/dev/null|cut -f1) on disk\"; fi\n\
+             \x20               sleep 15\n\
+             \x20             done\n\
              \x20             wait $DL\n\
-             \x20             echo PREFETCH_DONE {source} -> {hf_home} ($(du -sh {hf_home} 2>/dev/null | cut -f1))\n\
+             \x20             echo PREFETCH_DONE {source} 100%% -> {hf_home}\n\
              \x20         volumeMounts:\n\
              \x20           - {{ name: store, mountPath: /mnt/store }}\n",
             source = source,
@@ -193,6 +199,7 @@ impl App {
             ns = ns,
             pvc = pvc,
             hf_home = hf_home,
+            repo_dashes = repo_dir,
             rev = if revision.trim().is_empty() { "main" } else { &revision },
             rev_arg = rev_arg,
         );
