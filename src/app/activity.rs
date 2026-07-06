@@ -46,12 +46,17 @@ impl DeployPhase {
     }
 }
 
-/// One row in the unified Activity feed.
+/// One row in the unified Activity feed. Structured so the view can lay it out
+/// as aligned columns (kind · target · status), matching the other list views.
 #[derive(Clone)]
 pub struct ActivityRow {
-    pub label: String,        // composed one-line summary
-    pub pod: Option<String>,  // pod to tail logs from (Logs action)
-    pub job: Option<String>,  // compile Job name to delete (Delete action); None for deploys
+    pub kind: &'static str,    // "compile" | "deploy"
+    pub target: String,        // "model → vendor target" / "model ×N"
+    pub status: String,        // "Running" / "Starting 0/2" / "Failed" / "Complete"
+    pub sev: u8,               // 0 ok · 1 warn/active · 2 bad  (view maps to color)
+    pub label: String,         // searchable one-line (kind + target + status)
+    pub pod: Option<String>,   // pod to tail logs from (Logs action)
+    pub job: Option<String>,   // compile Job name to delete (Delete action); None for deploys
     pub running_compile: bool, // a compile Job still in progress → show a progress bar
     pub progress: Option<f32>, // compile progress 0.0..1.0 (None = indeterminate)
 }
@@ -103,23 +108,34 @@ impl App {
 
         // Compile Jobs — always shown (Running/Pending/Complete/Failed).
         for c in &self.snap.compiles {
-            let pct = match c.progress {
-                Some(p) => format!(" {:.0}%", (p * 100.0).clamp(0.0, 100.0)),
-                None => String::new(),
-            };
             let vt = if c.target.is_empty() {
                 c.vendor.clone()
             } else {
                 format!("{} {}", c.vendor, c.target)
             };
             let running = c.status == "Running";
+            let pct = match c.progress {
+                Some(p) => format!(" {:.0}%", (p * 100.0).clamp(0.0, 100.0)),
+                None => String::new(),
+            };
+            let target = format!("{} → {}", c.model, vt);
+            // running 은 진행바로 %를 그리므로 상태엔 상태명만.
+            let status = if running {
+                c.status.clone()
+            } else {
+                format!("{}{}", c.status, pct)
+            };
+            let sev = match c.status.as_str() {
+                "Failed" => 2,
+                "Complete" => 0,
+                _ => 1,
+            };
             out.push(ActivityRow {
-                // running 은 진행바로 %를 그리므로 라벨엔 상태만.
-                label: if running {
-                    format!("compile · {} → {}   {}", c.model, vt, c.status)
-                } else {
-                    format!("compile · {} → {}   {}{}", c.model, vt, c.status, pct)
-                },
+                kind: "compile",
+                label: format!("compile {} {}", target, status),
+                target,
+                status,
+                sev,
                 pod: self.pod_for(&c.name),
                 job: Some(c.name.clone()),
                 running_compile: running,
@@ -134,16 +150,18 @@ impl App {
                 phase,
                 DeployPhase::Starting | DeployPhase::Degraded | DeployPhase::Failed
             ) {
+                let target = format!("{} ×{}", m.name, m.desired);
+                let status = format!("{} {} {}/{}", phase.glyph(), phase.label(), m.ready, m.desired);
+                let sev = match phase {
+                    DeployPhase::Failed => 2,
+                    _ => 1,
+                };
                 out.push(ActivityRow {
-                    label: format!(
-                        "deploy · {} ×{}   {} {} {}/{}",
-                        m.name,
-                        m.desired,
-                        phase.glyph(),
-                        phase.label(),
-                        m.ready,
-                        m.desired
-                    ),
+                    kind: "deploy",
+                    label: format!("deploy {} {}", target, status),
+                    target,
+                    status,
+                    sev,
                     pod: self.pod_for(&m.name),
                     job: None,
                     running_compile: false,
