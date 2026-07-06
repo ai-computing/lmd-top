@@ -125,24 +125,7 @@ impl App {
         else {
             return;
         };
-        let want_kind = match vendor {
-            "rbln" => crate::collect::AccelKind::Rbln,
-            "furiosa" => crate::collect::AccelKind::Rngd,
-            _ => crate::collect::AccelKind::Gpu,
-        };
-        let mut per_node: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        for ac in self
-            .snap
-            .accel
-            .iter()
-            .filter(|x| x.kind == want_kind && !x.node.is_empty())
-        {
-            *per_node.entry(ac.node.clone()).or_insert(0) += 1;
-        }
-        let mut cand_nodes: Vec<String> = per_node.keys().cloned().collect();
-        cand_nodes.sort();
-        let mut place_choices = vec!["any".to_string(), "spread".to_string()];
-        place_choices.extend(cand_nodes.iter().map(|n| format!("{}({})", n, per_node[n])));
+        // placement 는 폼 필드가 아니라 제출 직전 placement 화면에서 고른다(open_place_picker).
         let mut fields = vec![CompileField {
             key: "replicas".into(),
             label: "replicas".into(),
@@ -182,14 +165,6 @@ impl App {
                 help: "Serving container port.".into(),
             },
             CompileField {
-                key: "place".into(),
-                label: "placement".into(),
-                value: "any".into(),
-                choices: place_choices,
-                numeric: false,
-                help: "Node placement: any / spread / pinned node. ⏎ 로 후보 노드 상태(유휴·util·mem) 보고 선택.".into(),
-            },
-            CompileField {
                 key: "routing".into(),
                 label: "routing".into(),
                 value: "llm-d".into(),
@@ -205,13 +180,14 @@ impl App {
             vendor,
             mount,
             fields,
+            place: "any".into(), // placement 화면에서 선택; 기본은 제약 없음.
             cursor: 0,
             editing: false,
         });
     }
 
-    /// deploy 폼의 place 필드 → 후보 노드 상태 목록(유휴/전체/util/mem/스케줄가능)을 만든다.
-    /// 사용자가 근거를 보고 배치를 고르도록 — placement 선택을 "다음 화면"으로 분리.
+    /// deploy 옵션 확정(Enter) 후 열리는 placement 선택 화면 — 후보 노드 상태 목록
+    /// (유휴/전체 디바이스·util·mem·스케줄가능)을 만든다. 선택하면 배치 확정 + 매니페스트 생성.
     pub fn open_place_picker(&mut self) {
         let Some(form) = self.deploy_form.as_ref() else {
             return;
@@ -295,7 +271,7 @@ impl App {
         }
     }
 
-    /// 선택한 노드를 deploy 폼의 place 필드에 반영하고 피커를 닫는다.
+    /// 선택한 노드를 배치로 확정 → 매니페스트 생성(제출)까지 진행. placement 는 제출 직전 단계.
     pub fn place_pick_apply(&mut self) {
         let Some(p) = self.place_picker.take() else {
             return;
@@ -304,10 +280,9 @@ impl App {
             return;
         };
         if let Some(form) = self.deploy_form.as_mut() {
-            if let Some(f) = form.fields.iter_mut().find(|f| f.key == "place") {
-                f.value = value;
-            }
+            form.place = value;
         }
+        self.deploy_form_submit(); // placement 확정 후 바로 매니페스트 미리보기
     }
 
     /// 배포 용량 판정 — 총 디바이스 수요 대 클러스터 동종 가속기(총/유휴).
@@ -387,7 +362,7 @@ impl App {
                 free, resource_free
             ));
         }
-        if form.get("place") == "spread" && replicas > nodes && nodes > 0 {
+        if form.place == "spread" && replicas > nodes && nodes > 0 {
             tips.push(format!(
                 "⚠ spread: replicas {} > 노드 {} — 일부는 같은 노드로",
                 replicas, nodes
@@ -523,7 +498,7 @@ impl App {
             "furiosa" => ("furiosa.ai/rngd", "furiosa.ai/npu.product: rngd"),
             _ => ("nvidia.com/gpu", ""),
         };
-        let place = form.get("place");
+        let place = form.place.clone();
         let place_host = place.split('(').next().unwrap_or("any").trim().to_string();
         // 배치 스펙 — spread=topologySpread, 특정=nodeSelector hostname, any=제약 없음(디바이스 resource 로 스케줄).
         let placement_yaml = if place_host == "spread" {
