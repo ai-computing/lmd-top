@@ -700,6 +700,12 @@ pub(super) fn place_picker_overlay(f: &mut Frame, app: &App) {
                 C_DIM(),
             )
         } else if r.schedulable {
+            let (st, sc) = if r.free > 0 {
+                (format!("✓ {} free", r.free), C_OK())
+            } else {
+                // ready·드라이버 OK 지만 전부 할당됨 → 배치 불가.
+                (format!("· full ({} allocated)", r.total - r.free), C_WARN())
+            };
             (
                 format!("{}/{}", r.free, r.total),
                 if r.util.is_nan() {
@@ -708,8 +714,8 @@ pub(super) fn place_picker_overlay(f: &mut Frame, app: &App) {
                     format!("{:.0}%", r.util)
                 },
                 format!("{:.0}/{:.0}", r.mem_used, r.mem_total),
-                format!("✓ {} free", r.free),
-                if r.free > 0 { C_OK() } else { C_WARN() },
+                st,
+                sc,
             )
         } else {
             (
