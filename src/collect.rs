@@ -206,6 +206,23 @@ pub struct EppCfg {
     pub picker: String,
 }
 
+/// 플랫폼 부트스트랩 전제조건 프로브 — 새 llm-d 환경 셋업 시 "무엇이 이미 있고 무엇이 없나".
+/// Setup 뷰(Doctor)가 이걸 읽어 present/missing + 가이드된 조치를 렌더한다. 전부 read-only kubectl.
+#[derive(Clone, Default)]
+pub struct SetupProbe {
+    pub probed: bool,       // kubectl 도달 가능 → 프로브 수행됨(false 면 클러스터 미연결)
+    pub ns_exists: bool,    // 대상 namespace 존재
+    pub crd_gateway: bool,  // gateways.gateway.networking.k8s.io CRD
+    pub crd_httproute: bool, // httproutes.gateway.networking.k8s.io CRD
+    pub crd_infpool: bool,  // inferencepools.inference.networking.k8s.io CRD (GIE GA)
+    pub gatewayclasses: Vec<String>, // 사용 가능한 GatewayClass 이름들(Gateway 생성 시 선택)
+    pub gateway: bool,      // llm-d-gateway (대상 ns)
+    pub epp_role_sa: bool,  // 공유 Role llmd-router-epp-sa (helm 생성)
+    pub epp_role_non_sa: bool, // 공유 Role llmd-router-epp-non-sa
+    pub secret_hf: bool,    // hf-token secret (gated 모델 가중치 다운로드용)
+    pub pvc_model_store: Option<String>, // model-store PVC phase(Bound/Pending) 또는 None(없음)
+}
+
 #[derive(Clone, Default)]
 pub struct Snapshot {
     pub ts: u64,
@@ -235,6 +252,7 @@ pub struct Snapshot {
     pub node_alloc: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>>, // node → resource → 할당(파드 requests)
     pub warnings: Vec<String>,
     pub prom_ok: bool, // Prometheus 도달 가능 여부(false 면 "가속기 없음"이 아니라 연결 문제)
+    pub setup: SetupProbe, // 플랫폼 부트스트랩 전제조건(Setup 뷰)
 }
 
 impl Snapshot {
@@ -1350,8 +1368,64 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     // ---------- 가속기 재고(런처 솔버용) ----------
     collect_inventory(&mut snap.inventory, &mut snap.node_alloc, &mut warn).await;
 
+    // ---------- 플랫폼 부트스트랩 전제조건(Setup 뷰) ----------
+    snap.setup = collect_setup(&cfg.ns).await;
+
     snap.warnings = warn;
     snap
+}
+
+/// 플랫폼 전제조건 프로브 — read-only kubectl 몇 번으로 CRD/Gateway/Role/PVC/Secret 존재 확인.
+/// kubectl 미도달이면 probed=false 로 반환(Setup 뷰가 "클러스터 미연결" 표시).
+async fn collect_setup(ns: &str) -> SetupProbe {
+    let mut p = SetupProbe::default();
+    let ns_ref = format!("namespace/{}", ns);
+    // kubectl 도달성 겸 namespace 존재 확인 — None(에러)이면 클러스터 미연결로 조기 반환.
+    match kube::get_exists(&["get", &ns_ref]).await {
+        Some(exists) => {
+            p.probed = true;
+            p.ns_exists = exists;
+        }
+        None => return p,
+    }
+    // CRDs (get_exists: kind/이름 없으면 Some(false), kubectl 자체 에러면 None→false)
+    p.crd_gateway = kube::get_exists(&["get", "crd", "gateways.gateway.networking.k8s.io"])
+        .await
+        .unwrap_or(false);
+    p.crd_httproute = kube::get_exists(&["get", "crd", "httproutes.gateway.networking.k8s.io"])
+        .await
+        .unwrap_or(false);
+    p.crd_infpool = kube::get_exists(&["get", "crd", "inferencepools.inference.networking.k8s.io"])
+        .await
+        .unwrap_or(false);
+    // 사용 가능한 GatewayClass 이름(Gateway 생성 시 gatewayClassName 후보)
+    if p.crd_gateway {
+        if let Some(s) =
+            kube::get_jsonpath(&["get", "gatewayclass"], "{.items[*].metadata.name}").await
+        {
+            p.gatewayclasses = s.split_whitespace().map(|x| x.to_string()).collect();
+        }
+    }
+    // 네임스페이스 스코프 오브젝트(CRD 없으면 get 자체가 실패 → false 로 안전 처리)
+    if p.crd_gateway {
+        p.gateway = kube::get_exists(&["get", "gateway", "llm-d-gateway", "-n", ns])
+            .await
+            .unwrap_or(false);
+    }
+    p.epp_role_sa = kube::get_exists(&["get", "role", "llmd-router-epp-sa", "-n", ns])
+        .await
+        .unwrap_or(false);
+    p.epp_role_non_sa = kube::get_exists(&["get", "role", "llmd-router-epp-non-sa", "-n", ns])
+        .await
+        .unwrap_or(false);
+    p.secret_hf = kube::get_exists(&["get", "secret", "hf-token", "-n", ns])
+        .await
+        .unwrap_or(false);
+    p.pvc_model_store =
+        kube::get_jsonpath(&["get", "pvc", "model-store", "-n", ns], "{.status.phase}")
+            .await
+            .filter(|s| !s.is_empty());
+    p
 }
 
 const ACCEL_RESOURCES: [&str; 3] = ["nvidia.com/gpu", "rebellions.ai/ATOM", "furiosa.ai/rngd"];

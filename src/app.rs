@@ -15,8 +15,11 @@ mod nav;
 mod objective;
 mod order;
 mod select;
+mod setup;
 mod sort;
 mod state;
+
+pub use setup::{CheckState, SetupFix};
 
 /// Alert severity.
 #[derive(Clone, Copy, PartialEq)]
@@ -86,6 +89,10 @@ pub enum Pending {
         title: String,
         yaml: String,
     }, // kubectl apply the previewed manifest
+    ApplyUrl {
+        title: String,
+        url: String,
+    }, // kubectl apply -f <url> — 상류 릴리스 매니페스트(예: Gateway/Inference CRD) 설치
     Cordon {
         node: String,
         on: bool,
@@ -120,6 +127,9 @@ impl Pending {
             Pending::Restart { name } => format!("rollout restart {} (rolling)?", name),
             Pending::Stop { name } => format!("stop serving {} (scale → 0, frees devices)?", name),
             Pending::Apply { title, .. } => format!("apply manifest to cluster — {}?", title),
+            Pending::ApplyUrl { title, url } => {
+                format!("apply upstream manifest — {} (from {})?", title, url)
+            }
             Pending::Cordon { node, on } => format!(
                 "{} node {}?",
                 if *on {
@@ -264,12 +274,13 @@ pub enum View {
     Library,  // Deploy 섹션: 위=Model List(배포 가능) · 아래=Activity(compile/deploy 작업) 2패널
     Events,
     Nodes,
-    Topo, // Nodes hub's topology / device pressure map (Canvas)
+    Topo,  // Nodes hub's topology / device pressure map (Canvas)
+    Setup, // 새 클러스터 부트스트랩 점검(Doctor): 플랫폼 전제조건 present/missing + 가이드된 apply
 }
 
 impl View {
     /// Every view — for headless render coverage and exhaustive iteration (not a nav order).
-    pub const EVERY: [View; 11] = [
+    pub const EVERY: [View; 12] = [
         View::Overview,
         View::Routing,
         View::Epp,
@@ -281,6 +292,7 @@ impl View {
         View::Topo,
         View::Library,
         View::Events,
+        View::Setup,
     ];
     /// Which top-level section this view belongs to (a view is one sub-tab of its section).
     pub fn section(&self) -> Section {
@@ -291,6 +303,7 @@ impl View {
             View::Nodes | View::Accel | View::Topo => Section::Infra,
             View::Library => Section::Deploy,
             View::Events => Section::Events,
+            View::Setup => Section::Setup,
         }
     }
     /// Sub-tab label within a section (short; the section carries the group name).
@@ -307,6 +320,7 @@ impl View {
             View::Events => "Events",
             View::Nodes => "Nodes",
             View::Topo => "Topology",
+            View::Setup => "Setup",
         }
     }
 }
@@ -321,16 +335,18 @@ pub enum Section {
     Infra,    // Nodes · Devices · Topology  (heterogeneous accelerators)
     Deploy,   // Model List · Activity  (provision: deployable models + compile/deploy jobs)
     Events,   // events + alerts
+    Setup,    // 플랫폼 부트스트랩 점검(새 환경 셋업 시 전제조건 진단 + 가이드된 apply)
 }
 impl Section {
-    /// Number-key order (0-5) and tab order.
-    pub const ALL: [Section; 6] = [
+    /// Number-key order (0-6) and tab order.
+    pub const ALL: [Section; 7] = [
         Section::Overview,
         Section::Traffic,
         Section::Serving,
         Section::Infra,
         Section::Deploy,
         Section::Events,
+        Section::Setup,
     ];
     pub fn idx(&self) -> usize {
         Section::ALL.iter().position(|s| s == self).unwrap_or(0)
@@ -343,6 +359,7 @@ impl Section {
             Section::Infra => "Infra",
             Section::Deploy => "Deploy",
             Section::Events => "Events",
+            Section::Setup => "Setup",
         }
     }
     /// Sub-tabs (views) of this section, in `[`/`]` cycle order. First entry is the landing view.
@@ -356,6 +373,7 @@ impl Section {
             // Deploy: 단일 뷰(위=Model List · 아래=Activity 2패널, Ctrl+w 로 포커스 전환).
             Section::Deploy => &[View::Library],
             Section::Events => &[View::Events],
+            Section::Setup => &[View::Setup],
         }
     }
 }

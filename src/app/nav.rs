@@ -190,7 +190,7 @@ impl App {
         }
     }
 
-    /// Jump to a top-level section by number key (0-5) — lands on its first sub-tab.
+    /// Jump to a top-level section by number key (0-6) — lands on its first sub-tab.
     pub fn goto_section(&mut self, i: usize) {
         if let Some(sec) = Section::ALL.get(i) {
             if let Some(v) = sec.members().first() {
