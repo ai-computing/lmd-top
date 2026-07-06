@@ -139,20 +139,33 @@ impl App {
             });
         }
 
-        // Deploy rollouts — only the not-yet-steady ones (trying / failed).
+        // Deploy rollouts — every active deployment (desired > 0), troubled first.
+        // Scaled-0 은 "작업"이 아니므로 제외(그건 Serving 뷰에서 관리).
+        let mut deploys: Vec<(DeployPhase, ActivityRow)> = Vec::new();
         for m in &self.snap.models {
             let phase = self.deploy_phase(&m.name, m.desired, m.ready);
-            if matches!(
+            if phase == DeployPhase::ScaledZero {
+                continue;
+            }
+            // 서빙 노드 — 매칭 아티팩트에서(없으면 ?).
+            let node = self
+                .snap
+                .artifacts
+                .iter()
+                .find(|a| a.model == m.name)
+                .map(|a| a.node.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "?".into());
+            let target = format!("{} ×{} @{}", m.name, m.desired, node);
+            let status = format!("{} {} {}/{}", phase.glyph(), phase.label(), m.ready, m.desired);
+            let sev = match phase {
+                DeployPhase::Failed => 2,
+                DeployPhase::Serving => 0,
+                _ => 1,
+            };
+            deploys.push((
                 phase,
-                DeployPhase::Starting | DeployPhase::Degraded | DeployPhase::Failed
-            ) {
-                let target = format!("{} ×{}", m.name, m.desired);
-                let status = format!("{} {} {}/{}", phase.glyph(), phase.label(), m.ready, m.desired);
-                let sev = match phase {
-                    DeployPhase::Failed => 2,
-                    _ => 1,
-                };
-                out.push(ActivityRow {
+                ActivityRow {
                     kind: "deploy",
                     label: format!("deploy {} {}", target, status),
                     target,
@@ -162,9 +175,12 @@ impl App {
                     job: None,
                     running_compile: false,
                     progress: None,
-                });
-            }
+                },
+            ));
         }
+        // 주의를 요하는 것(Failed/Degraded/Starting)을 서빙 중보다 위로.
+        deploys.sort_by_key(|(p, _)| std::cmp::Reverse(p.rank()));
+        out.extend(deploys.into_iter().map(|(_, r)| r));
         out
     }
 
