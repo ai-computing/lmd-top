@@ -41,10 +41,10 @@ fn gpu_model(raw: &str) -> String {
 #[derive(Clone)]
 pub struct Accel {
     pub kind: AccelKind,
-    pub model: String,     // 실제 모델(예: GB10/A100/H100) — 메트릭 자동 감지, 없으면 ""
-    pub id: String,        // rbln0 / npu0 / gpu0
+    pub model: String, // 실제 모델(예: GB10/A100/H100) — 메트릭 자동 감지, 없으면 ""
+    pub id: String,    // rbln0 / npu0 / gpu0
     pub node: String,
-    pub util: f64,         // 0..100
+    pub util: f64, // 0..100
     pub mem_used_gb: f64,
     pub mem_total_gb: f64,
     pub temp: f64,
@@ -61,14 +61,21 @@ pub struct Accel {
 impl Accel {
     /// 표시용 계열/모델 라벨 — 감지된 모델이 있으면 그것, 없으면 벤더 라벨.
     pub fn disp(&self) -> &str {
-        if self.model.is_empty() { self.kind.label() } else { self.model.as_str() }
+        if self.model.is_empty() {
+            self.kind.label()
+        } else {
+            self.model.as_str()
+        }
     }
 }
 
 /// 통합 메모리(Grace 계열 superchip: GB10/GH200/GB200/GB300) 여부 — 별도 VRAM 없이 호스트와 공유.
 fn is_unified(model: &str) -> bool {
     let m = model.to_uppercase();
-    m.starts_with("GB10") || m.starts_with("GH200") || m.starts_with("GB200") || m.starts_with("GB300")
+    m.starts_with("GB10")
+        || m.starts_with("GH200")
+        || m.starts_with("GB200")
+        || m.starts_with("GB300")
 }
 
 #[derive(Clone, Default)]
@@ -78,7 +85,7 @@ pub struct NodeInfo {
     pub mem_used_gb: f64,
     pub mem_total_gb: f64,
     pub cpu_pct: f64,
-    pub disk_used_gb: f64,  // 루트 파일시스템(mountpoint="/")
+    pub disk_used_gb: f64, // 루트 파일시스템(mountpoint="/")
     pub disk_total_gb: f64,
     pub ready: bool,
     pub cordoned: bool,
@@ -94,17 +101,17 @@ pub struct Pool {
     pub queue: f64,
     pub kv: f64,
     pub sat: f64,
-    pub selector: String,    // app=vllm-rbln-llama31-8b
-    pub epp: String,         // endpointPickerRef (EPP service)
-    pub ep_ready: i64,       // selector 매칭 파드 중 ready
-    pub ep_total: i64,       // selector 매칭 파드 총수
+    pub selector: String, // app=vllm-rbln-llama31-8b
+    pub epp: String,      // endpointPickerRef (EPP service)
+    pub ep_ready: i64,    // selector 매칭 파드 중 ready
+    pub ep_total: i64,    // selector 매칭 파드 총수
 }
 
 #[derive(Clone)]
 pub struct Route {
     pub path: String,
     pub backend: String,
-    pub kind: String, // Service | InferencePool
+    pub kind: String,  // Service | InferencePool
     pub route: String, // 소속 HTTPRoute 이름(편집 대상 지정용)
 }
 
@@ -123,7 +130,7 @@ pub struct ModelRow {
     pub status: String,
     pub route: String,
     pub engine: String, // 추론 엔진(vLLM/SGLang/vLLM-RBLN/Ollama/Furiosa/custom)
-    pub accel: String, // 어떤 가속기/노드에서 도는지(파드 노드/가속기 추정)
+    pub accel: String,  // 어떤 가속기/노드에서 도는지(파드 노드/가속기 추정)
     pub running: Option<f64>,
     pub waiting: Option<f64>,
     pub tps: Option<f64>,
@@ -144,6 +151,20 @@ pub struct StoredModel {
     pub path: String,         // 스토어 내 상대 경로
 }
 
+/// 컴파일 Job 진행 상태(Deploy 뷰 '진행 중 컴파일' 패널). `compile-*` Job 을 요약.
+#[derive(Clone, Default)]
+pub struct CompileJob {
+    pub name: String,               // Job 이름(compile-{모델}-{타깃})
+    pub model: String,              // 사람이 읽는 모델(이름에서 추출)
+    pub vendor: String,             // RBLN | RNGD | -
+    pub target: String,             // 옵션 요약(tp/pp/seq 등, 이름의 타깃 부분)
+    pub status: String,             // Running | Complete | Failed | Pending
+    pub age_secs: u64,              // 시작(없으면 생성) 후 경과 초
+    pub duration_secs: Option<u64>, // 완료된 경우 소요 초
+    pub phase: String,              // 진행 힌트(파드 로그 마지막 줄 또는 상태)
+    pub progress: Option<f32>,      // 로그에서 파싱한 진행률 0.0~1.0(없으면 indeterminate 바)
+}
+
 /// Store 뷰용 — 모델이 "어디에(경로/볼륨)" 저장되고 "어떤 옵션으로" 컴파일/서빙되는지.
 /// deploy 컨테이너 spec(command/args/env/volumeMounts)에서 추출(휴리스틱).
 #[derive(Clone, Default)]
@@ -160,7 +181,7 @@ pub struct ModelArtifact {
 
 #[derive(Clone)]
 pub struct EventRow {
-    pub typ: String,    // Normal | Warning
+    pub typ: String, // Normal | Warning
     pub reason: String,
     pub object: String, // kind/name
     pub message: String,
@@ -191,7 +212,8 @@ pub struct Snapshot {
     pub pools: Vec<Pool>,
     pub models: Vec<ModelRow>,
     pub artifacts: Vec<ModelArtifact>, // Store 뷰: 모델 저장 위치 + 컴파일/서빙 옵션
-    pub stored: Vec<StoredModel>,      // 공유 스토어 인벤토리(model-inventory ConfigMap) — 배포 무관
+    pub stored: Vec<StoredModel>, // 공유 스토어 인벤토리(model-inventory ConfigMap) — 배포 무관
+    pub compiles: Vec<CompileJob>, // 진행/최근 컴파일 Job(compile-*) — Deploy 뷰 모니터 패널
     pub pods: Vec<PodRow>,
     pub events: Vec<EventRow>,
     pub routes: Vec<Route>,
@@ -212,6 +234,13 @@ pub struct Snapshot {
     pub prom_ok: bool, // Prometheus 도달 가능 여부(false 면 "가속기 없음"이 아니라 연결 문제)
 }
 
+impl Snapshot {
+    /// 서빙 중(ready>0)인 모델 수 — 진단·요약·헤더가 공유하는 파생 지표.
+    pub fn serving_count(&self) -> usize {
+        self.models.iter().filter(|m| m.ready > 0).count()
+    }
+}
+
 /// EPP 정책 수립용 성능 지표(구간별 지연 percentile·토큰분포·처리량). 값 없으면 NaN.
 /// 클러스터 전역 성능 요약(throughput 라인 + timeline 용). 상세는 per-model(perf_rows)/drill-down.
 #[derive(Clone)]
@@ -226,7 +255,14 @@ pub struct Perf {
 impl Default for Perf {
     fn default() -> Self {
         let n = f64::NAN;
-        Perf { req_rate: n, err_rate: n, tps: n, prefix_hit: n, ttft_p95: n, e2e_p95: n }
+        Perf {
+            req_rate: n,
+            err_rate: n,
+            tps: n,
+            prefix_hit: n,
+            ttft_p95: n,
+            e2e_p95: n,
+        }
     }
 }
 
@@ -251,8 +287,17 @@ impl PerfRow {
         let n = f64::NAN;
         PerfRow {
             model: model.to_string(),
-            req: n, tps: n, ttft_p95: n, tpot_p95: n, e2e_p95: n, in_tok_p95: n, out_tok_p95: n,
-            queue_p95: n, prefill_p95: n, decode_p95: n, preempt: n,
+            req: n,
+            tps: n,
+            ttft_p95: n,
+            tpot_p95: n,
+            e2e_p95: n,
+            in_tok_p95: n,
+            out_tok_p95: n,
+            queue_p95: n,
+            prefill_p95: n,
+            decode_p95: n,
+            preempt: n,
         }
     }
 }
@@ -292,7 +337,11 @@ fn short(s: &str) -> String {
 }
 
 /// prom::query 결과에 q() 와 동일한 warn 처리 — tokio::join! 로 병렬 조회 후 결과 해소용.
-fn resolve(r: Result<Vec<Series>, anyhow::Error>, promql: &str, warn: &mut Vec<String>) -> Vec<Series> {
+fn resolve(
+    r: Result<Vec<Series>, anyhow::Error>,
+    promql: &str,
+    warn: &mut Vec<String>,
+) -> Vec<Series> {
     match r {
         Ok(v) => v,
         Err(e) => {
@@ -304,14 +353,18 @@ fn resolve(r: Result<Vec<Series>, anyhow::Error>, promql: &str, warn: &mut Vec<S
 
 /// 단일 스칼라 결과(첫 값) — 없으면 NaN. (join! 병렬용, warn 없음)
 async fn qs1(prom_base: &str, promql: &str) -> f64 {
-    prom::query(prom_base, promql).await.ok().and_then(|v| v.first().map(|s| s.value)).unwrap_or(f64::NAN)
+    prom::query(prom_base, promql)
+        .await
+        .ok()
+        .and_then(|v| v.first().map(|s| s.value))
+        .unwrap_or(f64::NAN)
 }
 
 /// Perf 드릴다운(선택 모델) 온디맨드 상세 — 구간별 p50/p95/p99 + E2E 지연 버킷 분포(히스토그램).
 #[derive(Clone, Default)]
 pub struct PerfDetail {
     pub model: String,
-    pub e2e: [f64; 3],   // p50/p95/p99 (s)
+    pub e2e: [f64; 3], // p50/p95/p99 (s)
     pub ttft: [f64; 3],
     pub tpot: [f64; 3],
     pub buckets: Vec<(f64, f64)>, // (le 상한 s, 해당 구간 rate) — 누적차 분포
@@ -321,7 +374,12 @@ pub struct PerfDetail {
 pub async fn perf_detail(prom: &str, model: &str) -> PerfDetail {
     // (E2E metric, TTFT metric, TPOT metric, selector)
     let (e2e_m, ttft_m, tpot_m, sel) = if model == "ds4-proxy" {
-        ("ds4_proxy_request_duration_seconds", "ds4_proxy_ttft_seconds", "", String::new())
+        (
+            "ds4_proxy_request_duration_seconds",
+            "ds4_proxy_ttft_seconds",
+            "",
+            String::new(),
+        )
     } else {
         (
             "vllm:e2e_request_latency_seconds",
@@ -331,7 +389,10 @@ pub async fn perf_detail(prom: &str, model: &str) -> PerfDetail {
         )
     };
     let q = |base: &str, quant: f64| {
-        format!("histogram_quantile({}, sum by (le)(rate({}_bucket{}[5m])))", quant, base, sel)
+        format!(
+            "histogram_quantile({}, sum by (le)(rate({}_bucket{}[5m])))",
+            quant, base, sel
+        )
     };
     let has_tpot = !tpot_m.is_empty();
     // 쿼리 문자열을 먼저 바인딩(참조가 join 전체에서 살아있도록).
@@ -346,9 +407,27 @@ pub async fn perf_detail(prom: &str, model: &str) -> PerfDetail {
         qs1(prom, &qt50),
         qs1(prom, &qt95),
         qs1(prom, &qt99),
-        async { if has_tpot { qs1(prom, &qp50).await } else { f64::NAN } },
-        async { if has_tpot { qs1(prom, &qp95).await } else { f64::NAN } },
-        async { if has_tpot { qs1(prom, &qp99).await } else { f64::NAN } },
+        async {
+            if has_tpot {
+                qs1(prom, &qp50).await
+            } else {
+                f64::NAN
+            }
+        },
+        async {
+            if has_tpot {
+                qs1(prom, &qp95).await
+            } else {
+                f64::NAN
+            }
+        },
+        async {
+            if has_tpot {
+                qs1(prom, &qp99).await
+            } else {
+                f64::NAN
+            }
+        },
         prom::query(prom, &qbuckets),
     );
     // 누적 버킷 → 구간별 분포(le 오름차순, 인접 차분).
@@ -357,7 +436,11 @@ pub async fn perf_detail(prom: &str, model: &str) -> PerfDetail {
         .iter()
         .filter_map(|s| {
             let le = s.l("le");
-            let up = if le == "+Inf" { f64::INFINITY } else { le.parse::<f64>().ok()? };
+            let up = if le == "+Inf" {
+                f64::INFINITY
+            } else {
+                le.parse::<f64>().ok()?
+            };
             Some((up, s.value))
         })
         .collect();
@@ -398,9 +481,12 @@ fn model_container(spec: &serde_json::Value) -> &serde_json::Value {
     let is_sidecar = |c: &serde_json::Value| {
         let n = c["name"].as_str().unwrap_or("").to_lowercase();
         let img = c["image"].as_str().unwrap_or("").to_lowercase();
-        ["proxy", "sidecar", "istio", "envoy", "-router", "gateway", "dcgm", "exporter", "vector", "fluent", "otel"]
-            .iter()
-            .any(|k| n.contains(k) || img.contains(k))
+        [
+            "proxy", "sidecar", "istio", "envoy", "-router", "gateway", "dcgm", "exporter",
+            "vector", "fluent", "otel",
+        ]
+        .iter()
+        .any(|k| n.contains(k) || img.contains(k))
     };
     let looks_server = |c: &serde_json::Value| {
         let mut t = String::new();
@@ -415,7 +501,17 @@ fn model_container(spec: &serde_json::Value) -> &serde_json::Value {
             }
         }
         let img = c["image"].as_str().unwrap_or("").to_lowercase();
-        ["vllm", "sglang", "furiosa", "ollama", "--model", "optimum", "text-generation"].iter().any(|k| t.contains(k) || img.contains(k))
+        [
+            "vllm",
+            "sglang",
+            "furiosa",
+            "ollama",
+            "--model",
+            "optimum",
+            "text-generation",
+        ]
+        .iter()
+        .any(|k| t.contains(k) || img.contains(k))
     };
     if let Some(c) = arr.iter().find(|c| looks_server(c)) {
         return c;
@@ -445,7 +541,11 @@ fn detect_engine(d: &serde_json::Value, accel: &str) -> String {
     if t.contains("sglang") {
         "SGLang".into()
     } else if t.contains("vllm") {
-        if rbln { "vLLM-RBLN".into() } else { "vLLM".into() }
+        if rbln {
+            "vLLM-RBLN".into()
+        } else {
+            "vLLM".into()
+        }
     } else if t.contains("ollama") || img.contains("ollama") {
         "Ollama".into()
     } else if t.contains("furiosa") {
@@ -496,18 +596,31 @@ fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtif
         None
     };
     let env_val = |keys: &[&str]| -> Option<String> {
-        env.iter().find(|(n, _)| keys.iter().any(|k| n.eq_ignore_ascii_case(k))).map(|(_, v)| v.clone())
+        env.iter()
+            .find(|(n, _)| keys.iter().any(|k| n.eq_ignore_ascii_case(k)))
+            .map(|(_, v)| v.clone())
     };
 
     // HF id(`org/model`) 또는 경로처럼 보이는 토큰만(셸 스크립트 인자 `sh -c "…"` 는 공백/개행 포함 → 제외).
     let looks_like_model = |t: &&String| -> bool {
         !t.starts_with('-')
             && t.contains('/')
-            && !t.chars().any(|c| c.is_whitespace() || matches!(c, ';' | '#' | '&' | '|' | '='))
+            && !t
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, ';' | '#' | '&' | '|' | '='))
     };
     let source = arg_val("--model")
         .or_else(|| arg_val("--model-path"))
-        .or_else(|| env_val(&["MODEL_ID", "HF_MODEL_ID", "MODEL_PATH", "MODEL", "HF_MODEL", "SERVED_MODEL_NAME"]))
+        .or_else(|| {
+            env_val(&[
+                "MODEL_ID",
+                "HF_MODEL_ID",
+                "MODEL_PATH",
+                "MODEL",
+                "HF_MODEL",
+                "SERVED_MODEL_NAME",
+            ])
+        })
         .or_else(|| toks.iter().find(looks_like_model).cloned())
         .unwrap_or_default();
 
@@ -519,7 +632,11 @@ fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtif
             .find(|m| {
                 let p = m["mountPath"].as_str().unwrap_or("").to_lowercase();
                 let n = m["name"].as_str().unwrap_or("").to_lowercase();
-                ["model", "hf", "cache", "data", "weight", "ckpt", "rbln", "npu"].iter().any(|h| p.contains(h) || n.contains(h))
+                [
+                    "model", "hf", "cache", "data", "weight", "ckpt", "rbln", "npu",
+                ]
+                .iter()
+                .any(|h| p.contains(h) || n.contains(h))
             })
             .or_else(|| vms.first());
         if let Some(m) = pick {
@@ -542,7 +659,11 @@ fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtif
                     }
                 })
                 .unwrap_or_default();
-            mount = if backing.is_empty() { mp } else { format!("{} ← {}", mp, backing) };
+            mount = if backing.is_empty() {
+                mp
+            } else {
+                format!("{} ← {}", mp, backing)
+            };
         }
     }
 
@@ -556,17 +677,45 @@ fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtif
         }
     };
     // 병렬화(공통): TP/PP/DP.
-    push("tp", arg_val("--tensor-parallel-size").or_else(|| arg_val("-tp")).or_else(|| env_val(&["TENSOR_PARALLEL_SIZE", "RBLN_TENSOR_PARALLEL_SIZE"])));
-    push("pp", arg_val("--pipeline-parallel-size").or_else(|| arg_val("-pp")));
-    push("dp", arg_val("--data-parallel-size").or_else(|| arg_val("-dp")));
+    push(
+        "tp",
+        arg_val("--tensor-parallel-size")
+            .or_else(|| arg_val("-tp"))
+            .or_else(|| env_val(&["TENSOR_PARALLEL_SIZE", "RBLN_TENSOR_PARALLEL_SIZE"])),
+    );
+    push(
+        "pp",
+        arg_val("--pipeline-parallel-size").or_else(|| arg_val("-pp")),
+    );
+    push(
+        "dp",
+        arg_val("--data-parallel-size").or_else(|| arg_val("-dp")),
+    );
     // 길이/배치(NPU 는 컴파일 시 고정되는 값 — RBLN max_seq_len / Furiosa bucket).
-    push("max-len", arg_val("--max-model-len").or_else(|| arg_val("--max-seq-len")).or_else(|| env_val(&["RBLN_MAX_SEQ_LEN", "MAX_SEQ_LEN"])));
+    push(
+        "max-len",
+        arg_val("--max-model-len")
+            .or_else(|| arg_val("--max-seq-len"))
+            .or_else(|| env_val(&["RBLN_MAX_SEQ_LEN", "MAX_SEQ_LEN"])),
+    );
     push("max-seqs", arg_val("--max-num-seqs"));
-    push("batch", arg_val("--max-num-batched-tokens").or_else(|| env_val(&["BATCH_SIZE", "MAX_BATCH_SIZE", "RBLN_BATCH_SIZE"])));
-    push("bucket", arg_val("--bucket-config").or_else(|| arg_val("--prefill-buckets")).or_else(|| arg_val("--decode-buckets"))); // Furiosa RNGD
-    // 정밀도/양자화.
+    push(
+        "batch",
+        arg_val("--max-num-batched-tokens")
+            .or_else(|| env_val(&["BATCH_SIZE", "MAX_BATCH_SIZE", "RBLN_BATCH_SIZE"])),
+    );
+    push(
+        "bucket",
+        arg_val("--bucket-config")
+            .or_else(|| arg_val("--prefill-buckets"))
+            .or_else(|| arg_val("--decode-buckets")),
+    ); // Furiosa RNGD
+       // 정밀도/양자화.
     push("dtype", arg_val("--dtype").or_else(|| env_val(&["DTYPE"])));
-    push("quant", arg_val("--quantization").or_else(|| env_val(&["QUANTIZATION", "RBLN_QUANTIZATION"])));
+    push(
+        "quant",
+        arg_val("--quantization").or_else(|| env_val(&["QUANTIZATION", "RBLN_QUANTIZATION"])),
+    );
     push("kv-dtype", arg_val("--kv-cache-dtype"));
     push("block", arg_val("--block-size"));
     // 디바이스/타깃 NPU.
@@ -577,12 +726,20 @@ fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtif
     // NPU 특화 env / args (RBLN·Furiosa·compile).
     for (n, v) in &env {
         let nu = n.to_uppercase();
-        if (nu.starts_with("RBLN_") || nu.starts_with("FURIOSA_") || nu.contains("COMPILE") || nu.contains("NPU")) && opts.len() < 14 && !v.is_empty() {
+        if (nu.starts_with("RBLN_")
+            || nu.starts_with("FURIOSA_")
+            || nu.contains("COMPILE")
+            || nu.contains("NPU"))
+            && opts.len() < 14
+            && !v.is_empty()
+        {
             opts.push((n.clone(), v.clone()));
         }
     }
     for t in &toks {
-        if (t.starts_with("--rbln") || t.starts_with("--furiosa") || t.starts_with("--compile")) && opts.len() < 14 {
+        if (t.starts_with("--rbln") || t.starts_with("--furiosa") || t.starts_with("--compile"))
+            && opts.len() < 14
+        {
             let (k, v) = match t.split_once('=') {
                 Some((a, b)) => (a.to_string(), b.to_string()),
                 None => (t.clone(), "✓".into()),
@@ -592,7 +749,16 @@ fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtif
     }
 
     let family = model_family(&source, name);
-    ModelArtifact { model: name.to_string(), family, engine: engine.to_string(), node: String::new(), image, source, mount, opts }
+    ModelArtifact {
+        model: name.to_string(),
+        family,
+        engine: engine.to_string(),
+        node: String::new(),
+        image,
+        source,
+        mount,
+        opts,
+    }
 }
 
 /// 변형(양자화/정밀도/HW/엔진) 태그를 벗겨 모델 "베이스" 이름만 남김.
@@ -604,25 +770,59 @@ fn strip_variant_tags(s: &str) -> String {
         }
     }
     for suf in [
-        "-instruct", "-chat", "-awq", "-gptq", "-fp8", "-bf16", "-fp16", "-int8", "-int4", "-w4a16", "-w8a8",
-        "-nvfp4a16", "-nvfp4", "-mxfp4", "-rbln", "-gb10", "-npu", "-cpu", "-gpu", "-llm-d", "-modelservice",
-        "-decode", "-prefill", "-proxy", "-server", "-n2", "-n3", "-v2", "-hf",
+        "-instruct",
+        "-chat",
+        "-awq",
+        "-gptq",
+        "-fp8",
+        "-bf16",
+        "-fp16",
+        "-int8",
+        "-int4",
+        "-w4a16",
+        "-w8a8",
+        "-nvfp4a16",
+        "-nvfp4",
+        "-mxfp4",
+        "-rbln",
+        "-gb10",
+        "-npu",
+        "-cpu",
+        "-gpu",
+        "-llm-d",
+        "-modelservice",
+        "-decode",
+        "-prefill",
+        "-proxy",
+        "-server",
+        "-n2",
+        "-n3",
+        "-v2",
+        "-hf",
     ] {
         b = b.replace(suf, "");
     }
-    b.trim_matches(|c| c == '-' || c == '_' || c == '.').to_string()
+    b.trim_matches(|c| c == '-' || c == '_' || c == '.')
+        .to_string()
 }
 
 /// 트리 그룹 키(모델 계열) — 표준 정체성. 우선순위: HF repo id(org/name) > 경로 leaf > deploy 이름.
 /// 같은 모델의 여러 배포/컴파일본(다른 TP·양자화·노드)이 한 계열로 묶이도록 정규화.
 fn model_family(source: &str, name: &str) -> String {
     // 1) HF id: "org/Name" — org 유지(중복 방지) + name 부분 변형태그 제거.
-    if source.contains('/') && !source.starts_with('/') && !source.chars().any(|c| c.is_whitespace()) {
+    if source.contains('/')
+        && !source.starts_with('/')
+        && !source.chars().any(|c| c.is_whitespace())
+    {
         let mut it = source.rsplitn(2, '/');
         let leaf = it.next().unwrap_or(source);
         let org = it.next();
         let base = strip_variant_tags(leaf);
-        let base = if base.is_empty() { leaf.to_lowercase() } else { base };
+        let base = if base.is_empty() {
+            leaf.to_lowercase()
+        } else {
+            base
+        };
         return match org {
             Some(o) if !o.is_empty() => format!("{}/{}", o.to_lowercase(), base),
             _ => base,
@@ -677,7 +877,10 @@ fn map_by(series: Vec<Series>, key: &str) -> BTreeMap<String, Series> {
 /// 소스별 가속기 수집기 — 각자 자기 메트릭만 join! → 메트릭 추가 시 해당 함수만 수정(위치 튜플 결합 제거).
 async fn collect_furiosa(p: &str) -> Vec<Accel> {
     let (util, temp, pow, du, dt, alive, thr) = tokio::join!(
-        prom::query(p, "avg by (uuid,device,hostname) (furiosa_npu_core_utilization)"),
+        prom::query(
+            p,
+            "avg by (uuid,device,hostname) (furiosa_npu_core_utilization)"
+        ),
         prom::query(p, "max by (uuid) (furiosa_npu_hw_temperature)"),
         prom::query(p, "max by (uuid) (furiosa_npu_hw_power)"),
         prom::query(p, "max by (uuid) (furiosa_npu_dram_usage)"),
@@ -692,22 +895,30 @@ async fn collect_furiosa(p: &str) -> Vec<Accel> {
     let dt = map_by(dt.unwrap_or_default(), "uuid");
     let alive = map_by(alive.unwrap_or_default(), "uuid");
     let thr = map_by(thr.unwrap_or_default(), "uuid");
-    util.iter().map(|s| {
-        let uuid = s.l("uuid");
-        Accel {
-            kind: AccelKind::Rngd, model: String::new(),
-            id: s.l("device").to_string(), node: s.l("hostname").to_string(),
-            util: norm_pct(s.value),
-            mem_used_gb: du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
-            mem_total_gb: dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
-            temp: temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
-            power: pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
-            busy_model: String::new(),
-            alive: alive.get(uuid).map(|x| x.value > 0.0).unwrap_or(true),
-            throttle: thr.get(uuid).map(|x| x.value).unwrap_or(0.0),
-            unified_mem: false, mem_bw: f64::NAN, clock_mhz: f64::NAN, mem_temp: f64::NAN, energy_mj: f64::NAN,
-        }
-    }).collect()
+    util.iter()
+        .map(|s| {
+            let uuid = s.l("uuid");
+            Accel {
+                kind: AccelKind::Rngd,
+                model: String::new(),
+                id: s.l("device").to_string(),
+                node: s.l("hostname").to_string(),
+                util: norm_pct(s.value),
+                mem_used_gb: du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
+                mem_total_gb: dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
+                temp: temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
+                power: pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
+                busy_model: String::new(),
+                alive: alive.get(uuid).map(|x| x.value > 0.0).unwrap_or(true),
+                throttle: thr.get(uuid).map(|x| x.value).unwrap_or(0.0),
+                unified_mem: false,
+                mem_bw: f64::NAN,
+                clock_mhz: f64::NAN,
+                mem_temp: f64::NAN,
+                energy_mj: f64::NAN,
+            }
+        })
+        .collect()
 }
 
 async fn collect_rbln(p: &str) -> Vec<Accel> {
@@ -725,22 +936,30 @@ async fn collect_rbln(p: &str) -> Vec<Accel> {
     let du = map_by(du.unwrap_or_default(), "uuid");
     let dt = map_by(dt.unwrap_or_default(), "uuid");
     let health = map_by(health.unwrap_or_default(), "uuid");
-    util.iter().map(|s| {
-        let uuid = s.l("uuid");
-        Accel {
-            kind: AccelKind::Rbln, model: String::new(),
-            id: s.l("name").to_string(), node: s.l("node").to_string(),
-            util: norm_pct(s.value),
-            mem_used_gb: du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
-            mem_total_gb: dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
-            temp: temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
-            power: pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
-            busy_model: s.l("exported_pod").to_string(),
-            alive: health.get(uuid).map(|x| x.value == 0.0).unwrap_or(true),
-            throttle: 0.0,
-            unified_mem: false, mem_bw: f64::NAN, clock_mhz: f64::NAN, mem_temp: f64::NAN, energy_mj: f64::NAN,
-        }
-    }).collect()
+    util.iter()
+        .map(|s| {
+            let uuid = s.l("uuid");
+            Accel {
+                kind: AccelKind::Rbln,
+                model: String::new(),
+                id: s.l("name").to_string(),
+                node: s.l("node").to_string(),
+                util: norm_pct(s.value),
+                mem_used_gb: du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
+                mem_total_gb: dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
+                temp: temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
+                power: pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
+                busy_model: s.l("exported_pod").to_string(),
+                alive: health.get(uuid).map(|x| x.value == 0.0).unwrap_or(true),
+                throttle: 0.0,
+                unified_mem: false,
+                mem_bw: f64::NAN,
+                clock_mhz: f64::NAN,
+                mem_temp: f64::NAN,
+                energy_mj: f64::NAN,
+            }
+        })
+        .collect()
 }
 
 /// NVIDIA DCGM — 모델명/총메모리/대역폭/클럭/에너지 자동 감지.
@@ -765,26 +984,32 @@ async fn collect_gpu(p: &str) -> Vec<Accel> {
     let clk = map_by(clk.unwrap_or_default(), "gpu");
     let mtemp = map_by(mtemp.unwrap_or_default(), "gpu");
     let energy = map_by(energy.unwrap_or_default(), "gpu");
-    util.iter().map(|s| {
-        let gpu = s.l("gpu");
-        let model = gpu_model(s.l("modelName"));
-        let unified = is_unified(&model);
-        Accel {
-            kind: AccelKind::Gpu, model,
-            id: format!("gpu{}", gpu), node: s.l("Hostname").to_string(),
-            util: norm_pct(s.value),
-            mem_used_gb: mu.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
-            mem_total_gb: mt.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
-            temp: temp.get(gpu).map(|x| x.value).unwrap_or(0.0),
-            power: pow.get(gpu).map(|x| x.value).unwrap_or(0.0),
-            busy_model: s.l("exported_pod").to_string(),
-            alive: true, throttle: 0.0, unified_mem: unified,
-            mem_bw: bw.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
-            clock_mhz: clk.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
-            mem_temp: mtemp.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
-            energy_mj: energy.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
-        }
-    }).collect()
+    util.iter()
+        .map(|s| {
+            let gpu = s.l("gpu");
+            let model = gpu_model(s.l("modelName"));
+            let unified = is_unified(&model);
+            Accel {
+                kind: AccelKind::Gpu,
+                model,
+                id: format!("gpu{}", gpu),
+                node: s.l("Hostname").to_string(),
+                util: norm_pct(s.value),
+                mem_used_gb: mu.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
+                mem_total_gb: mt.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
+                temp: temp.get(gpu).map(|x| x.value).unwrap_or(0.0),
+                power: pow.get(gpu).map(|x| x.value).unwrap_or(0.0),
+                busy_model: s.l("exported_pod").to_string(),
+                alive: true,
+                throttle: 0.0,
+                unified_mem: unified,
+                mem_bw: bw.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
+                clock_mhz: clk.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
+                mem_temp: mtemp.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
+                energy_mj: energy.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
+            }
+        })
+        .collect()
 }
 
 async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
@@ -794,7 +1019,10 @@ async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
         prom::query(p, metrics::NODE_LOAD1),
         prom::query(p, "node_memory_MemTotal_bytes"),
         prom::query(p, "node_memory_MemAvailable_bytes"),
-        prom::query(p, "100 - (avg by (instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)"),
+        prom::query(
+            p,
+            "100 - (avg by (instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)"
+        ),
         prom::query(p, &fs_size_q),
         prom::query(p, &fs_avail_q),
         node_kube(),
@@ -831,10 +1059,19 @@ async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
         let meta = node_meta.get(&name).cloned().unwrap_or_default();
         nodes.push(NodeInfo {
             load1: load_by.get(&name).copied().unwrap_or(f64::NAN),
-            mem_used_gb: to_gb(mt - ma), mem_total_gb: to_gb(mt),
-            cpu_pct: n_cpu.get(inst.as_str()).map(|x| x.value).unwrap_or(f64::NAN),
-            disk_used_gb: to_gb(dsz - dav), disk_total_gb: to_gb(dsz),
-            ready: meta.0, cordoned: meta.1, pressure: meta.2, version: meta.3, name,
+            mem_used_gb: to_gb(mt - ma),
+            mem_total_gb: to_gb(mt),
+            cpu_pct: n_cpu
+                .get(inst.as_str())
+                .map(|x| x.value)
+                .unwrap_or(f64::NAN),
+            disk_used_gb: to_gb(dsz - dav),
+            disk_total_gb: to_gb(dsz),
+            ready: meta.0,
+            cordoned: meta.1,
+            pressure: meta.2,
+            version: meta.3,
+            name,
             npu: String::new(), // collect_node_npu 가 라벨에서 채움(full tier)
         });
     }
@@ -845,13 +1082,21 @@ async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
 /// fast tier: 소스별 수집기 4개를 병렬 실행 후 합침. util/mem 반응성을 위해 collect()에서 분리.
 pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
     let p = &cfg.prom;
-    let (fu, rb, gpu, nodes) = tokio::join!(collect_furiosa(p), collect_rbln(p), collect_gpu(p), collect_nodes(p));
+    let (fu, rb, gpu, nodes) = tokio::join!(
+        collect_furiosa(p),
+        collect_rbln(p),
+        collect_gpu(p),
+        collect_nodes(p)
+    );
     let mut accel = fu;
     accel.extend(rb);
     accel.extend(gpu);
     accel.sort_by(|a, b| (a.kind as u8, &a.node, &a.id).cmp(&(b.kind as u8, &b.node, &b.id)));
     // 통합 메모리(GB10 등): 별도 VRAM 없음 → 노드(호스트) 메모리 풀로 backfill.
-    for a in accel.iter_mut().filter(|a| a.unified_mem && a.mem_total_gb <= 0.0) {
+    for a in accel
+        .iter_mut()
+        .filter(|a| a.unified_mem && a.mem_total_gb <= 0.0)
+    {
         if let Some(n) = nodes.iter().find(|n| n.name == a.node) {
             a.mem_used_gb = n.mem_used_gb;
             a.mem_total_gb = n.mem_total_gb;
@@ -901,7 +1146,8 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             snap.decisions.push((pod.to_string(), s.value));
         }
     }
-    snap.decisions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    snap.decisions
+        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let pidx = resolve(r_pidx, pidx_q, &mut warn);
     snap.prefix_idx = pidx.first().map(|s| s.value).unwrap_or(f64::NAN);
 
@@ -912,7 +1158,8 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             snap.pod_queues.push((pod.to_string(), s.value));
         }
     }
-    snap.pod_queues.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    snap.pod_queues
+        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // Perf: 구간별 지연 percentile·토큰분포·처리량 (EPP 정책용). 전부 graceful(NaN).
     let pp = &cfg.prom;
@@ -929,7 +1176,13 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(furiosa_llm_time_to_first_token_seconds_bucket[1m])))"),
     );
     // throughput 는 가산(NaN=0 취급, 둘 다 NaN 이면 NaN); TTFT 는 존재하는 값 우선(엔진 혼합 p95 는 근사).
-    let nadd = |a: f64, b: f64| if a.is_nan() && b.is_nan() { f64::NAN } else { (if a.is_nan() { 0.0 } else { a }) + (if b.is_nan() { 0.0 } else { b }) };
+    let nadd = |a: f64, b: f64| {
+        if a.is_nan() && b.is_nan() {
+            f64::NAN
+        } else {
+            (if a.is_nan() { 0.0 } else { a }) + (if b.is_nan() { 0.0 } else { b })
+        }
+    };
     let nor = |a: f64, b: f64| if a.is_nan() { b } else { a };
     snap.perf = Perf {
         req_rate: nadd(req_v, req_f),
@@ -972,7 +1225,10 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         for s in &resolve(r, promql, &mut warn) {
             let m = s.l("service");
             if !m.is_empty() {
-                set(pm.entry(m.to_string()).or_insert_with(|| PerfRow::new(m)), s.value);
+                set(
+                    pm.entry(m.to_string()).or_insert_with(|| PerfRow::new(m)),
+                    s.value,
+                );
             }
         }
     }
@@ -1010,10 +1266,42 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         ),
     };
     // Furiosa-LLM(K-EXAONE): furiosa_llm_* 를 같은 service 키로 병합(한 service 는 둘 중 하나만 노출 → 충돌 없음).
-    vllm.run.extend(map_by(q(cfg, "sum by (service) (furiosa_llm_num_requests_running)", &mut warn).await, "service"));
-    vllm.wait.extend(map_by(q(cfg, "sum by (service) (furiosa_llm_num_requests_waiting)", &mut warn).await, "service"));
-    vllm.tps.extend(map_by(q(cfg, "sum by (service) (rate(furiosa_llm_generation_tokens_total[1m]))", &mut warn).await, "service"));
-    vllm.kv.extend(map_by(q(cfg, "max by (service) (furiosa_llm_kv_cache_usage_percent)", &mut warn).await, "service"));
+    vllm.run.extend(map_by(
+        q(
+            cfg,
+            "sum by (service) (furiosa_llm_num_requests_running)",
+            &mut warn,
+        )
+        .await,
+        "service",
+    ));
+    vllm.wait.extend(map_by(
+        q(
+            cfg,
+            "sum by (service) (furiosa_llm_num_requests_waiting)",
+            &mut warn,
+        )
+        .await,
+        "service",
+    ));
+    vllm.tps.extend(map_by(
+        q(
+            cfg,
+            "sum by (service) (rate(furiosa_llm_generation_tokens_total[1m]))",
+            &mut warn,
+        )
+        .await,
+        "service",
+    ));
+    vllm.kv.extend(map_by(
+        q(
+            cfg,
+            "max by (service) (furiosa_llm_kv_cache_usage_percent)",
+            &mut warn,
+        )
+        .await,
+        "service",
+    ));
     vllm.ttft.extend(map_by(q(cfg, "histogram_quantile(0.95, sum by (service,le) (rate(furiosa_llm_time_to_first_token_seconds_bucket[1m])))", &mut warn).await, "service"));
 
     // ---------- kube: deployments / pods / routes / gateway / epp ----------
@@ -1025,7 +1313,9 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         let mut rows: Vec<PerfRow> = Vec::new();
         for m in &snap.models {
             let key = match_model(&m.name, &vllm.run);
-            let mut row = key.and_then(|k| pm.remove(&k)).unwrap_or_else(|| PerfRow::new(&m.name));
+            let mut row = key
+                .and_then(|k| pm.remove(&k))
+                .unwrap_or_else(|| PerfRow::new(&m.name));
             row.model = m.name.clone(); // 표시명을 배포명으로 통일(Models 와 일관)
             rows.push(row);
         }
@@ -1078,7 +1368,11 @@ async fn collect_inventory(inv: &mut Vec<(String, i64, i64)>, warn: &mut Vec<Str
                 for n in items {
                     if let Some(a) = n["status"]["allocatable"].as_object() {
                         for r in ACCEL_RESOURCES {
-                            if let Some(q) = a.get(r).and_then(|x| x.as_str()).and_then(|s| s.parse::<i64>().ok()) {
+                            if let Some(q) = a
+                                .get(r)
+                                .and_then(|x| x.as_str())
+                                .and_then(|s| s.parse::<i64>().ok())
+                            {
                                 *total.get_mut(r).unwrap() += q;
                             }
                         }
@@ -1100,7 +1394,11 @@ async fn collect_inventory(inv: &mut Vec<(String, i64, i64)>, warn: &mut Vec<Str
                     for c in cs {
                         if let Some(req) = c["resources"]["requests"].as_object() {
                             for r in ACCEL_RESOURCES {
-                                if let Some(q) = req.get(r).and_then(|x| x.as_str()).and_then(|s| s.parse::<i64>().ok()) {
+                                if let Some(q) = req
+                                    .get(r)
+                                    .and_then(|x| x.as_str())
+                                    .and_then(|s| s.parse::<i64>().ok())
+                                {
                                     *used.get_mut(r).unwrap() += q;
                                 }
                             }
@@ -1143,7 +1441,10 @@ async fn node_kube() -> (BTreeMap<String, String>, BTreeMap<String, NodeMeta>) {
                         }
                     }
                 }
-                let ver = it["status"]["nodeInfo"]["kubeletVersion"].as_str().unwrap_or("").to_string();
+                let ver = it["status"]["nodeInfo"]["kubeletVersion"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
                 let cordoned = it["spec"]["unschedulable"].as_bool().unwrap_or(false);
                 let (mut ready, mut pressure) = (false, false);
                 if let Some(cs) = it["status"]["conditions"].as_array() {
@@ -1152,10 +1453,9 @@ async fn node_kube() -> (BTreeMap<String, String>, BTreeMap<String, NodeMeta>) {
                         let st = c["status"] == "True";
                         match t {
                             "Ready" => ready = st,
-                            "MemoryPressure" | "DiskPressure" | "PIDPressure"
-                                if st => {
-                                    pressure = true
-                                }
+                            "MemoryPressure" | "DiskPressure" | "PIDPressure" if st => {
+                                pressure = true
+                            }
                             _ => {}
                         }
                     }
@@ -1175,8 +1475,14 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                 let route_name = r["metadata"]["name"].as_str().unwrap_or("").to_string();
                 if let Some(rules) = r["spec"]["rules"].as_array() {
                     for rule in rules {
-                        let backend = rule["backendRefs"][0]["name"].as_str().unwrap_or("").to_string();
-                        let kind = rule["backendRefs"][0]["kind"].as_str().unwrap_or("Service").to_string();
+                        let backend = rule["backendRefs"][0]["name"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        let kind = rule["backendRefs"][0]["kind"]
+                            .as_str()
+                            .unwrap_or("Service")
+                            .to_string();
                         if kind == "InferencePool" {
                             snap.epp_in_path = true;
                         }
@@ -1290,7 +1596,8 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     collect_gateway(cfg, snap).await;
 
     // EPP config (ConfigMap)
-    if let Ok(v) = kube::get_json(&["get", "cm", "llmd-router-epp", "-n", &cfg.ns, "-o", "json"]).await
+    if let Ok(v) =
+        kube::get_json(&["get", "cm", "llmd-router-epp", "-n", &cfg.ns, "-o", "json"]).await
     {
         if let Some(text) = kube::cm_data(&v, "default-plugins.yaml") {
             snap.epp = parse_epp(text);
@@ -1302,7 +1609,10 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
         if let Some(items) = v["items"].as_array() {
             for ip in items {
                 let name = ip["metadata"]["name"].as_str().unwrap_or("").to_string();
-                let epp = ip["spec"]["endpointPickerRef"]["name"].as_str().unwrap_or("").to_string();
+                let epp = ip["spec"]["endpointPickerRef"]["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
                 let mut sel = Vec::new();
                 if let Some(ml) = ip["spec"]["selector"]["matchLabels"].as_object() {
                     for (k, val) in ml {
@@ -1314,15 +1624,22 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                 let selector = sel.join(",");
                 let (mut ep_total, mut ep_ready) = (0i64, 0i64);
                 if !selector.is_empty() {
-                    if let Ok(pj) =
-                        kube::get_json(&["get", "pods", "-n", &cfg.ns, "-l", &selector, "-o", "json"]).await
+                    if let Ok(pj) = kube::get_json(&[
+                        "get", "pods", "-n", &cfg.ns, "-l", &selector, "-o", "json",
+                    ])
+                    .await
                     {
                         if let Some(ps) = pj["items"].as_array() {
                             ep_total = ps.len() as i64;
                             for p in ps {
                                 let ready = p["status"]["containerStatuses"]
                                     .as_array()
-                                    .map(|cs| !cs.is_empty() && cs.iter().all(|c| c["ready"].as_bool().unwrap_or(false)))
+                                    .map(|cs| {
+                                        !cs.is_empty()
+                                            && cs
+                                                .iter()
+                                                .all(|c| c["ready"].as_bool().unwrap_or(false))
+                                    })
                                     .unwrap_or(false);
                                 if ready {
                                     ep_ready += 1;
@@ -1354,24 +1671,32 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     }
 
     // InferenceObjective (SLO priority)
-    if let Ok(v) = kube::get_json(&["get", "inferenceobjective", "-n", &cfg.ns, "-o", "json"]).await {
+    if let Ok(v) = kube::get_json(&["get", "inferenceobjective", "-n", &cfg.ns, "-o", "json"]).await
+    {
         if let Some(items) = v["items"].as_array() {
             for o in items {
                 snap.objectives.push(Objective {
                     name: o["metadata"]["name"].as_str().unwrap_or("").to_string(),
                     priority: o["spec"]["priority"].as_i64().unwrap_or(0),
-                    pool: o["spec"]["poolRef"]["name"].as_str().unwrap_or("").to_string(),
+                    pool: o["spec"]["poolRef"]["name"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
                 });
             }
         }
     }
-    snap.objectives.sort_by_key(|o| std::cmp::Reverse(o.priority));
+    snap.objectives
+        .sort_by_key(|o| std::cmp::Reverse(o.priority));
 
     // 오토스케일링 (KEDA ScaledObject + 상태)
     if let Ok(v) = kube::get_json(&["get", "scaledobject", "-n", &cfg.ns, "-o", "json"]).await {
         if let Some(items) = v["items"].as_array() {
             for so in items {
-                let target = so["spec"]["scaleTargetRef"]["name"].as_str().unwrap_or("").to_string();
+                let target = so["spec"]["scaleTargetRef"]["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
                 let min = so["spec"]["minReplicaCount"].as_i64().unwrap_or(0);
                 let max = so["spec"]["maxReplicaCount"].as_i64().unwrap_or(0);
                 let conds = so["status"]["conditions"].as_array();
@@ -1383,9 +1708,19 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                 };
                 let triggers = so["spec"]["triggers"]
                     .as_array()
-                    .map(|ts| ts.iter().filter_map(|t| t["type"].as_str()).collect::<Vec<_>>().join(","))
+                    .map(|ts| {
+                        ts.iter()
+                            .filter_map(|t| t["type"].as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
                     .unwrap_or_default();
-                let replicas = snap.models.iter().find(|m| m.name == target).map(|m| m.ready).unwrap_or(0);
+                let replicas = snap
+                    .models
+                    .iter()
+                    .find(|m| m.name == target)
+                    .map(|m| m.ready)
+                    .unwrap_or(0);
                 snap.autoscalers.push(Autoscale {
                     target,
                     min,
@@ -1400,6 +1735,7 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     }
 
     collect_stored(cfg, snap).await;
+    collect_compiles(cfg, snap).await;
 
     // artifact 저장/구동 노드 — 가속기 busy_model 우선, 없으면 파드 스케줄 노드(분리 차용으로 먼저 계산).
     let nodes: Vec<String> = snap
@@ -1410,7 +1746,12 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                 .iter()
                 .find(|x| !x.busy_model.is_empty() && x.busy_model.starts_with(&a.model))
                 .map(|x| x.node.clone())
-                .or_else(|| snap.pods.iter().find(|p| p.name.starts_with(&a.model)).map(|p| p.node.clone()))
+                .or_else(|| {
+                    snap.pods
+                        .iter()
+                        .find(|p| p.name.starts_with(&a.model))
+                        .map(|p| p.node.clone())
+                })
                 .unwrap_or_default()
         })
         .collect();
@@ -1422,22 +1763,37 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
 /// 노드 라벨에서 NPU 드라이버/SDK 존재·버전을 읽어 NodeInfo.npu 채움.
 /// 컴파일은 해당 NPU 드라이버가 설치된 노드에서만 가능 → 타깃 선택·경고에 사용.
 async fn collect_node_npu(nodes: &mut [NodeInfo]) {
-    let Ok(v) = kube::get_json(&["get", "nodes", "-o", "json"]).await else { return };
-    let Some(items) = v["items"].as_array() else { return };
+    let Ok(v) = kube::get_json(&["get", "nodes", "-o", "json"]).await else {
+        return;
+    };
+    let Some(items) = v["items"].as_array() else {
+        return;
+    };
     for n in items {
         let name = n["metadata"]["name"].as_str().unwrap_or("");
-        let Some(node) = nodes.iter_mut().find(|x| x.name == name) else { continue };
+        let Some(node) = nodes.iter_mut().find(|x| x.name == name) else {
+            continue;
+        };
         let l = &n["metadata"]["labels"];
         let mut parts = Vec::new();
         if let Some(prod) = l["furiosa.ai/npu.product"].as_str() {
             let drv = l["furiosa.ai/driver.version"].as_str().unwrap_or("?");
             parts.push(format!("{} drv{}", prod.to_uppercase(), drv));
         }
-        if l["rebellions.ai/npu.present"].as_str() == Some("true") || l.get("rebellions.ai/npu.product").is_some() {
+        if l["rebellions.ai/npu.present"].as_str() == Some("true")
+            || l.get("rebellions.ai/npu.product").is_some()
+        {
             let prod = l["rebellions.ai/npu.product"].as_str().unwrap_or("RBLN");
-            let drv = l["rebellions.ai/driver-version.full"].as_str().unwrap_or("?");
+            let drv = l["rebellions.ai/driver-version.full"]
+                .as_str()
+                .unwrap_or("?");
             let installed = l["rebellions.ai/npu.driver.status"].as_str() == Some("installed");
-            parts.push(format!("{} drv{}{}", prod, drv, if installed { "" } else { "(!drv)" }));
+            parts.push(format!(
+                "{} drv{}{}",
+                prod,
+                drv,
+                if installed { "" } else { "(!drv)" }
+            ));
         }
         node.npu = parts.join(" · ");
     }
@@ -1445,7 +1801,17 @@ async fn collect_node_npu(nodes: &mut [NodeInfo]) {
 
 /// k8s/llm-d 이벤트(최근 40) → snap.events. collect_kube 에서 분리된 leaf 파서.
 async fn collect_events(cfg: &Config, snap: &mut Snapshot) {
-    if let Ok(v) = kube::get_json(&["get", "events", "-n", &cfg.ns, "--sort-by=.lastTimestamp", "-o", "json"]).await {
+    if let Ok(v) = kube::get_json(&[
+        "get",
+        "events",
+        "-n",
+        &cfg.ns,
+        "--sort-by=.lastTimestamp",
+        "-o",
+        "json",
+    ])
+    .await
+    {
         if let Some(items) = v["items"].as_array() {
             for e in items.iter().rev().take(40) {
                 let obj = format!(
@@ -1469,9 +1835,14 @@ async fn collect_events(cfg: &Config, snap: &mut Snapshot) {
 async fn collect_gateway(cfg: &Config, snap: &mut Snapshot) {
     if let Ok(v) = kube::get_json(&["get", "gateway", "-n", &cfg.ns, "-o", "json"]).await {
         if let Some(g) = v["items"].as_array().and_then(|a| a.first()) {
-            snap.gw_addr = g["status"]["addresses"][0]["value"].as_str().unwrap_or("").to_string();
+            snap.gw_addr = g["status"]["addresses"][0]["value"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
             if let Some(conds) = g["status"]["conditions"].as_array() {
-                snap.gw_ok = conds.iter().any(|c| c["type"] == "Programmed" && c["status"] == "True");
+                snap.gw_ok = conds
+                    .iter()
+                    .any(|c| c["type"] == "Programmed" && c["status"] == "True");
             }
         }
     }
@@ -1479,7 +1850,9 @@ async fn collect_gateway(cfg: &Config, snap: &mut Snapshot) {
 
 /// 공유 스토어 인벤토리(model-inventory ConfigMap) → snap.stored. 없으면(미배포) 조용히 빈 값.
 async fn collect_stored(cfg: &Config, snap: &mut Snapshot) {
-    if let Ok(v) = kube::get_json(&["get", "cm", "model-inventory", "-n", &cfg.ns, "-o", "json"]).await {
+    if let Ok(v) =
+        kube::get_json(&["get", "cm", "model-inventory", "-n", &cfg.ns, "-o", "json"]).await
+    {
         if let Some(txt) = v["data"]["inventory"].as_str() {
             for line in txt.lines() {
                 let l = line.trim();
@@ -1503,8 +1876,250 @@ async fn collect_stored(cfg: &Config, snap: &mut Snapshot) {
     }
 }
 
+/// k8s RFC3339 타임스탬프("2026-07-03T12:34:56Z")를 epoch 초로. 실패 시 None.
+/// chrono 의존 없이 고정 포맷만 파싱(k8s 는 항상 UTC 'Z').
+fn parse_k8s_ts(s: &str) -> Option<u64> {
+    let s = s.trim_end_matches('Z');
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.split('-');
+    let (y, mo, da): (i64, i64, i64) = (
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+    );
+    let mut t = time.split(':');
+    let (h, mi, se): (i64, i64, i64) = (
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+        t.next()?.split('.').next()?.parse().ok()?,
+    );
+    // days-from-civil (Howard Hinnant) — 1970-01-01 기준 일수.
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + da - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let secs = days * 86400 + h * 3600 + mi * 60 + se;
+    if secs < 0 {
+        None
+    } else {
+        Some(secs as u64)
+    }
+}
+
+/// 진행/최근 컴파일 Job(`compile-*`) → snap.compiles. Job 없으면 조용히 빈 값.
+/// 상태·경과·(완료 시)소요 + 활성 Job 은 파드 로그 마지막 줄을 진행 힌트로.
+async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
+    let Ok(v) = kube::get_json(&["get", "jobs", "-n", &cfg.ns, "-o", "json"]).await else {
+        return;
+    };
+    let Some(items) = v["items"].as_array() else {
+        return;
+    };
+    let now = now_secs();
+    for j in items {
+        let name = j["metadata"]["name"].as_str().unwrap_or("");
+        if !name.starts_with("compile-") {
+            continue;
+        }
+        // 이름 = compile-{model}-{target}. target 은 "-rbln-" 또는 "-rngd-" 부터.
+        let rest = &name["compile-".len()..];
+        let (model, target, vendor) = if let Some(i) = rest.find("-rbln-") {
+            (
+                rest[..i].to_string(),
+                rest[i + 1..].to_string(),
+                "RBLN".to_string(),
+            )
+        } else if let Some(i) = rest.find("-rngd-") {
+            (
+                rest[..i].to_string(),
+                rest[i + 1..].to_string(),
+                "RNGD".to_string(),
+            )
+        } else {
+            (rest.to_string(), String::new(), "-".to_string())
+        };
+        let st = &j["status"];
+        let succeeded = st["succeeded"].as_i64().unwrap_or(0) >= 1;
+        let active = st["active"].as_i64().unwrap_or(0) >= 1;
+        let failed_cond = st["conditions"]
+            .as_array()
+            .map(|c| {
+                c.iter()
+                    .any(|x| x["type"] == "Failed" && x["status"] == "True")
+            })
+            .unwrap_or(false);
+        let status = if succeeded {
+            "Complete"
+        } else if failed_cond {
+            "Failed"
+        } else if active {
+            "Running"
+        } else {
+            "Pending"
+        }
+        .to_string();
+        let start = st["startTime"].as_str().and_then(parse_k8s_ts).or_else(|| {
+            j["metadata"]["creationTimestamp"]
+                .as_str()
+                .and_then(parse_k8s_ts)
+        });
+        let completion = st["completionTime"]
+            .as_str()
+            .and_then(parse_k8s_ts)
+            .or_else(|| {
+                st["conditions"]
+                    .as_array()
+                    .and_then(|c| {
+                        c.iter()
+                            .find(|x| x["type"] == "Failed")
+                            .and_then(|x| x["lastTransitionTime"].as_str())
+                    })
+                    .and_then(parse_k8s_ts)
+            });
+        let age_secs = start.map(|s| now.saturating_sub(s)).unwrap_or(0);
+        let duration_secs = match (start, completion) {
+            (Some(s), Some(c)) if c >= s => Some(c - s),
+            _ => None,
+        };
+        // 진행 힌트: 활성 Job 은 파드 로그 마지막 비어있지 않은 줄. 완료/실패는 상태로 대체.
+        let phase = if active {
+            let pod = snap
+                .pods
+                .iter()
+                .find(|p| p.name.starts_with(name))
+                .map(|p| p.name.clone());
+            match pod {
+                Some(p) => kube::last_log_line(&cfg.ns, &p)
+                    .await
+                    .unwrap_or_else(|| "starting…".to_string()),
+                None => "starting…".to_string(),
+            }
+        } else if status == "Complete" {
+            "COMPILE_DONE".to_string()
+        } else if status == "Failed" {
+            "failed — see logs".to_string()
+        } else {
+            "pending…".to_string()
+        };
+        // 진행률: 완료=1.0, 실행 중이면 로그 줄에서 %/스텝 파싱(있으면), 없으면 None(indeterminate).
+        let progress = if status == "Complete" {
+            Some(1.0)
+        } else if active {
+            parse_progress(&phase)
+        } else {
+            None
+        };
+        snap.compiles.push(CompileJob {
+            name: name.to_string(),
+            model,
+            vendor,
+            target,
+            status,
+            age_secs,
+            duration_secs,
+            phase,
+            progress,
+        });
+    }
+    // 진행 중 → 최근 순: Running 먼저, 그다음 나이 어린 것.
+    snap.compiles.sort_by(|a, b| {
+        let rank = |s: &str| match s {
+            "Running" => 0,
+            "Pending" => 1,
+            "Failed" => 2,
+            _ => 3,
+        };
+        rank(&a.status)
+            .cmp(&rank(&b.status))
+            .then(a.age_secs.cmp(&b.age_secs))
+    });
+}
+
+/// 컴파일 로그 한 줄에서 진행률(0.0~1.0)을 best-effort 파싱. 정규식 없이 순수 스캔.
+/// 우선순위: (1) "NN%" / "NN.N%"  (2) "N/M" 스텝(양쪽 모두 숫자일 때만). 없으면 None(indeterminate).
+/// tqdm("45%|██| 45/100")·"[3/8]"·"step 3 of 8"(→ "3/8" 아님, %/슬래시만) 등을 커버.
+fn parse_progress(line: &str) -> Option<f32> {
+    let b = line.as_bytes();
+    // 1) '%' 앞의 숫자(공백 건너뜀).
+    for (i, &c) in b.iter().enumerate() {
+        if c == b'%' {
+            // i-1 부터 역방향으로 숫자/'.' 수집.
+            let mut j = i;
+            while j > 0 && (b[j - 1].is_ascii_digit() || b[j - 1] == b'.') {
+                j -= 1;
+            }
+            if j < i {
+                if let Ok(v) = line[j..i].parse::<f32>() {
+                    if (0.0..=100.0).contains(&v) {
+                        return Some((v / 100.0).clamp(0.0, 1.0));
+                    }
+                }
+            }
+        }
+    }
+    // 2) "N/M" — '/' 양쪽이 모두 연속 숫자일 때만(경로/날짜 오검출 방지).
+    for (i, &c) in b.iter().enumerate() {
+        if c == b'/' {
+            let mut l = i;
+            while l > 0 && b[l - 1].is_ascii_digit() {
+                l -= 1;
+            }
+            let mut r = i + 1;
+            while r < b.len() && b[r].is_ascii_digit() {
+                r += 1;
+            }
+            if l < i && r > i + 1 {
+                let n: f32 = line[l..i].parse().unwrap_or(0.0);
+                let m: f32 = line[i + 1..r].parse().unwrap_or(0.0);
+                if m > 0.0 && n <= m {
+                    return Some((n / m).clamp(0.0, 1.0));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod compile_progress_tests {
+    use super::parse_progress;
+
+    #[test]
+    fn parses_percent() {
+        assert_eq!(parse_progress("Compiling model... 45%"), Some(0.45));
+        assert_eq!(parse_progress("progress 7.5% done"), Some(0.075));
+        assert_eq!(parse_progress("100%|████████| complete"), Some(1.0));
+    }
+
+    #[test]
+    fn parses_step_ratio() {
+        assert_eq!(parse_progress("[3/8] lowering graph"), Some(0.375));
+        assert_eq!(parse_progress("layer 5/5"), Some(1.0));
+    }
+
+    #[test]
+    fn ignores_paths_and_plain_text() {
+        assert_eq!(parse_progress("writing to /hf-cache/model"), None);
+        assert_eq!(parse_progress("starting compilation…"), None);
+        assert_eq!(parse_progress("loading weights"), None);
+    }
+
+    #[test]
+    fn percent_wins_over_ratio() {
+        // tqdm 형태: 퍼센트를 우선.
+        assert_eq!(parse_progress("42%|███ | 42/100 [00:10<00:14]"), Some(0.42));
+    }
+}
+
 fn match_model(deploy: &str, v_run: &BTreeMap<String, Series>) -> Option<String> {
-    let norm = |s: &str| s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+    let norm = |s: &str| {
+        s.to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+    };
     let dn = norm(deploy);
     for k in v_run.keys() {
         let kn = norm(k);
@@ -1550,8 +2165,14 @@ mod tests {
     #[test]
     fn family_normalizes_hf_and_paths() {
         // HF id: org 유지 + 변형태그(quant/instruct) 제거, 소문자.
-        assert_eq!(model_family("Qwen/Qwen2.5-0.5B-Instruct", "vllm-qwen05b-gb10"), "qwen/qwen2.5-0.5b");
-        assert_eq!(model_family("furiosa-ai/K-EXAONE-236B-A23B-NVFP4A16", "k-exaone-236b"), "furiosa-ai/exaone-236b-a23b");
+        assert_eq!(
+            model_family("Qwen/Qwen2.5-0.5B-Instruct", "vllm-qwen05b-gb10"),
+            "qwen/qwen2.5-0.5b"
+        );
+        assert_eq!(
+            model_family("furiosa-ai/K-EXAONE-236B-A23B-NVFP4A16", "k-exaone-236b"),
+            "furiosa-ai/exaone-236b-a23b"
+        );
         // 로컬 경로: leaf 디렉터리.
         assert_eq!(model_family("/models/exaone35", "vllm-exaone"), "exaone35");
         // 소스 없음(셸 래퍼 등): deploy 이름에서 엔진/HW 접사 제거.
@@ -1586,9 +2207,18 @@ mod tests {
     #[test]
     fn match_model_fuzzy() {
         let mut m: BTreeMap<String, Series> = BTreeMap::new();
-        m.insert("koni-llama3.1-8b".into(), Series { labels: BTreeMap::new(), value: 1.0 });
+        m.insert(
+            "koni-llama3.1-8b".into(),
+            Series {
+                labels: BTreeMap::new(),
+                value: 1.0,
+            },
+        );
         // 비영숫자 무시 매칭: "koni-llama31-8b-rbln" ⊃ "konillama318b"
-        assert_eq!(match_model("koni-llama31-8b-rbln", &m).as_deref(), Some("koni-llama3.1-8b"));
+        assert_eq!(
+            match_model("koni-llama31-8b-rbln", &m).as_deref(),
+            Some("koni-llama3.1-8b")
+        );
         assert_eq!(match_model("totally-different", &m), None);
     }
 

@@ -14,13 +14,19 @@ fn help_prints_usage_and_exits_zero() {
         assert!(out.status.success(), "{flag} should exit 0");
         let s = String::from_utf8_lossy(&out.stdout);
         assert!(s.contains("USAGE"), "{flag} prints usage");
-        assert!(s.contains("--mode") && s.contains("--json"), "{flag} lists options");
+        assert!(
+            s.contains("--mode") && s.contains("--json"),
+            "{flag} lists options"
+        );
     }
 }
 
 #[test]
 fn unknown_flag_exits_2_with_help() {
-    let out = Command::new(bin()).arg("--totally-bogus").output().expect("run");
+    let out = Command::new(bin())
+        .arg("--totally-bogus")
+        .output()
+        .expect("run");
     assert_eq!(out.status.code(), Some(2), "unknown flag → exit 2");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("unknown argument"), "names the bad flag");
@@ -29,7 +35,10 @@ fn unknown_flag_exits_2_with_help() {
 
 #[test]
 fn bad_mode_exits_2() {
-    let out = Command::new(bin()).args(["--mode", "wizard"]).output().expect("run");
+    let out = Command::new(bin())
+        .args(["--mode", "wizard"])
+        .output()
+        .expect("run");
     assert_eq!(out.status.code(), Some(2), "invalid --mode → exit 2");
     assert!(String::from_utf8_lossy(&out.stderr).contains("invalid --mode"));
 }
