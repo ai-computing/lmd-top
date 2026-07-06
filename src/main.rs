@@ -846,6 +846,16 @@ async fn run_tui(cfg: Config, mode: Mode) -> Result<()> {
                         g.accel = accel;
                     }
                     if !nodes.is_empty() || g.nodes.is_empty() {
+                        // fast tier 는 node.npu(드라이버, 노드 라벨 기반)를 full tier 에서만 채운다.
+                        // 새 노드에 npu 가 비었으면 직전 값을 이어받아 "미싱↔존재" 깜빡임을 막는다.
+                        let mut nodes = nodes;
+                        for n in &mut nodes {
+                            if n.npu.is_empty() {
+                                if let Some(prev) = g.nodes.iter().find(|o| o.name == n.name) {
+                                    n.npu = prev.npu.clone();
+                                }
+                            }
+                        }
                         g.nodes = nodes;
                     }
                     g.ts = ts;
