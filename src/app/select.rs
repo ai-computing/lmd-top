@@ -13,7 +13,7 @@ impl App {
                 .get(i)
                 .map(|a| format!("{} {}", a.kind.label(), a.id))
                 .unwrap_or_default(),
-            View::Models | View::Overview => self
+            View::Overview => self
                 .snap
                 .models
                 .get(i)
@@ -49,7 +49,7 @@ impl App {
 
     pub fn selected_model(&self) -> Option<&crate::collect::ModelRow> {
         match self.view {
-            View::Models | View::Overview => self.sel_orig().and_then(|i| self.snap.models.get(i)),
+            View::Overview => self.sel_orig().and_then(|i| self.snap.models.get(i)),
             _ => None,
         }
     }
@@ -80,7 +80,7 @@ impl App {
     /// `y` — 현재 선택의 live YAML 조회 대상 (kind, namespaced?, name). 없으면 None.
     pub fn yaml_target(&self) -> Option<(&'static str, bool, String)> {
         match self.view {
-            View::Models | View::Overview => self
+            View::Overview => self
                 .selected_model()
                 .map(|m| ("deployment", true, m.name.clone())),
             View::Pods => self.selected_pod().map(|p| ("pod", true, p.name.clone())),
@@ -107,7 +107,7 @@ impl App {
     pub fn logs_target_pod(&self) -> Option<String> {
         match self.view {
             View::Pods => self.selected_pod().map(|p| p.name.clone()),
-            View::Models | View::Overview => self.selected_model().and_then(|m| {
+            View::Overview => self.selected_model().and_then(|m| {
                 self.snap
                     .pods
                     .iter()
@@ -118,17 +118,8 @@ impl App {
                 .selected_accel()
                 .filter(|a| !a.busy_model.is_empty())
                 .map(|a| a.busy_model.clone()),
-            // Deploy▸Library '진행 중 컴파일' 패널 — 선택 Job 의 파드 로그.
-            View::Library if self.panel_focus == 1 => self
-                .sel_orig()
-                .and_then(|i| self.snap.compiles.get(i))
-                .and_then(|c| {
-                    self.snap
-                        .pods
-                        .iter()
-                        .find(|p| p.name.starts_with(&c.name))
-                        .map(|p| p.name.clone())
-                }),
+            // Deploy▸Activity — 선택 작업(compile Job / deploy rollout)의 파드 로그.
+            View::Activity => self.selected_activity().and_then(|r| r.pod),
             _ => None,
         }
     }

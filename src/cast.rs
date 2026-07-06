@@ -49,10 +49,11 @@ pub async fn run(cfg: &Config, out: &str) {
         (View::Nodes, false, 20, Extra::None), // Nodes hub: nodes + disk (switch with w)
         (View::Accel, false, 18, Extra::None), // hub: device pressure
         (View::Topo, false, 26, Extra::None),  // hub: topology / pressure map (Canvas)
-        (View::Serving, false, 20, Extra::None), // Deploy▸Serving: 라이브 배포 트리
-        (View::Library, false, 24, Extra::ActionMenu), // Deploy▸Library: 카탈로그 + Enter 액션 메뉴
+        (View::Serving, false, 20, Extra::None), // Serving: 라이브 배포 트리(라이프사이클)
+        (View::Library, false, 24, Extra::ActionMenu), // Deploy▸Model List: 배포 가능 + Enter 액션 메뉴
+        (View::Activity, false, 18, Extra::None), // Deploy▸Activity: compile+deploy 통합 작업 피드
         (View::Perf, false, 26, Extra::Slo),   // serving perf + SLO advisor
-        (View::Models, true, 24, Extra::None), // model detail
+        (View::Serving, true, 24, Extra::None), // 배포 상세(상태·타깃·옵션)
     ];
 
     let mut events = String::new();

@@ -17,10 +17,14 @@ impl App {
 
     /// Models 액션 메뉴 → Objective: 목표 편집 폼(기존 값 프리필).
     pub fn open_objective_form(&mut self) {
-        let Some(m) = self.selected_model() else {
+        // Overview 는 flat 모델 선택, Serving 은 배포 아티팩트 선택 — 둘 다 배포 이름을 준다.
+        let Some(name) = self
+            .selected_model()
+            .map(|m| m.name.clone())
+            .or_else(|| self.selected_artifact().map(|a| a.model.clone()))
+        else {
             return;
         };
-        let name = m.name.clone();
         let cur = self.objectives.get(&name).cloned().unwrap_or_default();
         let numf =
             |key: &str, label: &str, cur: Option<f64>, choices: &[&str], help: &str| CompileField {

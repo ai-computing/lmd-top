@@ -11,6 +11,7 @@ impl App {
     pub fn pivot(&mut self, key: char) {
         // Avoid mutable-borrow conflicts — extract the selected entity's values first.
         let model = self.selected_model().map(|m| m.name.clone());
+        let serving_model = self.selected_artifact().map(|a| a.model.clone());
         let accel = self
             .selected_accel()
             .map(|a| (a.busy_model.clone(), a.node.clone()));
@@ -22,7 +23,7 @@ impl App {
             View::Routing => route_backend.and_then(|b| match key {
                 'p' => Some((View::Pods, b)),
                 'i' => Some((View::Accel, b)),
-                'm' => Some((View::Models, b)),
+                'm' => Some((View::Serving, b)),
                 'e' => Some((View::Epp, String::new())),
                 _ => None,
             }),
@@ -32,7 +33,14 @@ impl App {
                 'e' => Some((View::Epp, String::new())),
                 _ => None,
             }),
-            View::Models | View::Overview => model.and_then(|name| match key {
+            View::Overview => model.and_then(|name| match key {
+                'p' => Some((View::Pods, name)),
+                'i' => Some((View::Accel, name)),
+                'e' => Some((View::Epp, String::new())),
+                'r' => Some((View::Routing, String::new())),
+                _ => None,
+            }),
+            View::Serving => serving_model.and_then(|name| match key {
                 'p' => Some((View::Pods, name)),
                 'i' => Some((View::Accel, name)),
                 'e' => Some((View::Epp, String::new())),
@@ -43,13 +51,13 @@ impl App {
                 .filter(|(b, _)| !b.is_empty())
                 .and_then(|(bm, nd)| match key {
                     'p' => Some((View::Pods, bm)),
-                    'm' => Some((View::Models, self.model_of_pod(&bm))),
+                    'm' => Some((View::Serving, self.model_of_pod(&bm))),
                     'n' => Some((View::Nodes, nd)),
                     _ => None,
                 }),
             View::Pods => pod.and_then(|pn| match key {
                 'i' => Some((View::Accel, pn.clone())),
-                'm' => Some((View::Models, self.model_of_pod(&pn))),
+                'm' => Some((View::Serving, self.model_of_pod(&pn))),
                 _ => None,
             }),
             View::Nodes => node.and_then(|nn| match key {
@@ -82,7 +90,7 @@ impl App {
                 // Unsupported pivot key in a pivot-source view → a hint instead of a dead keypress.
                 if "piremn".contains(key) {
                     let hint = match self.view {
-                        View::Models | View::Overview => Some("p/i/r/e"),
+                        View::Overview | View::Serving => Some("p/i/r/e"),
                         View::Accel => Some("p/m/n"),
                         View::Pods => Some("i/m"),
                         View::Nodes => Some("i"),
@@ -155,7 +163,6 @@ impl App {
         matches!(
             self.view,
             View::Accel
-                | View::Models
                 | View::Overview
                 | View::Pods
                 | View::Nodes
@@ -177,8 +184,8 @@ impl App {
         if self.view != View::Routing {
             return;
         }
-        self.pivot('m'); // → Models, filter=backend (매칭 0건이면 pivot 이 되짚음)
-        if self.view == View::Models && self.list_len() > 0 {
+        self.pivot('m'); // → Serving, filter=backend (매칭 0건이면 pivot 이 되짚음)
+        if self.view == View::Serving && self.list_len() > 0 {
             self.detail = true;
         }
     }
@@ -223,8 +230,8 @@ impl App {
     /// 현재 뷰의 포커스 가능한 패널 수(멀티패널 뷰만 >1).
     pub fn panel_count(&self) -> usize {
         match self.view {
-            View::Library => 2, // Deploy▸Library: 통합 배포 트리(카탈로그+스토어) / 진행 중 컴파일
-            View::Serving => 1, // Deploy▸Serving: 라이브 배포 트리(단일 패널)
+            View::Library => 1, // Deploy▸Model List: 배포 가능 트리(단일 패널)
+            View::Serving => 1, // Serving: 라이브 배포 트리(단일 패널)
             View::Epp => 2,     // scorers / InferencePool
             View::Routing => 2, // routes / InferencePool
             _ => 1,

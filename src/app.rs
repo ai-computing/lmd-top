@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 // impl App is split across submodules (see each file's header for scope).
 mod action;
+mod activity;
 mod compile;
 mod deploy;
 mod filter;
@@ -255,13 +256,13 @@ pub fn theme_name(i: usize) -> &'static str {
 pub enum View {
     Overview,
     Accel,
-    Models,
     Epp,
     Routing,
     Pods,
     Perf,
-    Library, // Deploy 섹션 ①: 배포 가능한 모델 라이브러리(카탈로그 · 컴파일 Job) — family›version›target
-    Serving, // Deploy 섹션 ②: 현재 서빙 중인 배포(라이브 아티팩트) — family›version›running-target
+    Serving,  // Serving 섹션 랜딩: 현재 서빙 중인 배포(라이브 아티팩트 트리) + 라이프사이클
+    Library,  // Deploy 섹션 ①: 배포 가능한 모델(카탈로그 · 스토어 빌드) — "Model List"
+    Activity, // Deploy 섹션 ②: 통합 작업 피드(compile Job + deploy rollout 상태)
     Events,
     Nodes,
     Topo, // Nodes hub's topology / device pressure map (Canvas)
@@ -273,14 +274,14 @@ impl View {
         View::Overview,
         View::Routing,
         View::Epp,
-        View::Models,
+        View::Serving,
         View::Perf,
         View::Pods,
         View::Nodes,
         View::Accel,
         View::Topo,
-        View::Serving,
         View::Library,
+        View::Activity,
         View::Events,
     ];
     /// Which top-level section this view belongs to (a view is one sub-tab of its section).
@@ -288,9 +289,9 @@ impl View {
         match self {
             View::Overview => Section::Overview,
             View::Routing | View::Epp => Section::Traffic,
-            View::Models | View::Perf | View::Pods => Section::Models,
+            View::Serving | View::Perf | View::Pods => Section::Serving,
             View::Nodes | View::Accel | View::Topo => Section::Infra,
-            View::Library | View::Serving => Section::Deploy,
+            View::Library | View::Activity => Section::Deploy,
             View::Events => Section::Events,
         }
     }
@@ -299,13 +300,13 @@ impl View {
         match self {
             View::Overview => "Overview",
             View::Accel => "Devices",
-            View::Models => "Models",
             View::Epp => "EPP",
             View::Routing => "Flow",
             View::Pods => "Pods",
             View::Perf => "Perf",
-            View::Serving => "Serving", // 현재 서빙 중(라이프사이클 렌즈)
-            View::Library => "Library", // 배포 가능 모델 라이브러리(배포 렌즈)
+            View::Serving => "Serving",     // 현재 서빙 중인 배포(라이프사이클)
+            View::Library => "Model List",  // 배포 가능한 모델(프로비저닝)
+            View::Activity => "Activity",   // 통합 작업 피드(compile + deploy)
             View::Events => "Events",
             View::Nodes => "Nodes",
             View::Topo => "Topology",
@@ -319,9 +320,9 @@ impl View {
 pub enum Section {
     Overview, // cluster at-a-glance
     Traffic,  // Flow · EPP  (gateway → route → pool → picker)
-    Models,   // Models · Perf · Pods  (the serving workloads)
+    Serving,  // Serving · Perf · Pods  (running deployments — manage & observe)
     Infra,    // Nodes · Devices · Topology  (heterogeneous accelerators)
-    Deploy,   // compile / deploy lifecycle
+    Deploy,   // Model List · Activity  (provision: deployable models + compile/deploy jobs)
     Events,   // events + alerts
 }
 impl Section {
@@ -329,7 +330,7 @@ impl Section {
     pub const ALL: [Section; 6] = [
         Section::Overview,
         Section::Traffic,
-        Section::Models,
+        Section::Serving,
         Section::Infra,
         Section::Deploy,
         Section::Events,
@@ -341,7 +342,7 @@ impl Section {
         match self {
             Section::Overview => "Overview",
             Section::Traffic => "Traffic",
-            Section::Models => "Models",
+            Section::Serving => "Serving",
             Section::Infra => "Infra",
             Section::Deploy => "Deploy",
             Section::Events => "Events",
@@ -352,10 +353,11 @@ impl Section {
         match self {
             Section::Overview => &[View::Overview],
             Section::Traffic => &[View::Routing, View::Epp],
-            Section::Models => &[View::Models, View::Perf, View::Pods],
+            // Serving: 현재 서빙 중인 배포(랜딩) → Perf → Pods.
+            Section::Serving => &[View::Serving, View::Perf, View::Pods],
             Section::Infra => &[View::Nodes, View::Accel, View::Topo],
-            // Deploy: Serving(현재 서빙 중, 랜딩) → Tab → Library(배포 가능 라이브러리).
-            Section::Deploy => &[View::Serving, View::Library],
+            // Deploy: Model List(배포 가능, 랜딩) → Tab → Activity(통합 작업 피드).
+            Section::Deploy => &[View::Library, View::Activity],
             Section::Events => &[View::Events],
         }
     }
@@ -843,7 +845,7 @@ mod tests {
             pods,
             ..Default::default()
         };
-        a.view = View::Models;
+        a.view = View::Overview; // flat model list + pivots live on Overview now
         a
     }
 
@@ -861,11 +863,11 @@ mod tests {
     #[test]
     fn pivot_roundtrip_restores_state() {
         let mut a = app_with(vec![model("m1")], vec![pod("m1-abc")]);
-        a.pivot('p'); // Models → Pods filtered by m1
+        a.pivot('p'); // Overview → Pods filtered by m1
         assert_eq!(a.view, View::Pods);
         assert_eq!(a.filter, "m1");
         assert!(a.nav_back());
-        assert_eq!(a.view, View::Models);
+        assert_eq!(a.view, View::Overview);
         assert_eq!(a.filter, "");
         assert_eq!(a.selected, 0);
         assert!(a.nav_stack.is_empty());
@@ -876,7 +878,7 @@ mod tests {
         // 매칭되는 pod 없음 → 막다른 빈 화면 대신 되짚어야 함
         let mut a = app_with(vec![model("lonely")], vec![]);
         a.pivot('p');
-        assert_eq!(a.view, View::Models);
+        assert_eq!(a.view, View::Overview);
         assert_eq!(a.filter, "");
         assert!(a.nav_stack.is_empty());
     }
@@ -885,7 +887,7 @@ mod tests {
     fn panel_cycle_and_reverse_tab() {
         use crate::app::Section;
         let mut a = App::new();
-        a.goto_view(View::Library); // Deploy▸Library: 2 패널(통합 배포 트리 / 진행 중 컴파일)
+        a.goto_view(View::Epp); // Traffic▸EPP: 2 패널(scorers / InferencePool)
         assert_eq!(a.panel_count(), 2);
         a.selected = 2;
         a.cycle_panel_dir(1); // Ctrl-w — 패널 포커스만 이동(서브탭과 직교)
@@ -893,7 +895,9 @@ mod tests {
         assert_eq!(a.selected, 0, "패널 전환 시 선택 리셋");
         a.cycle_panel_dir(1);
         assert_eq!(a.panel_focus, 0, "2패널 순환");
-        // Serving 서브탭은 단일 패널.
+        // Deploy▸Model List 와 Serving 은 단일 패널.
+        a.goto_view(View::Library);
+        assert_eq!(a.panel_count(), 1);
         a.goto_view(View::Serving);
         assert_eq!(a.panel_count(), 1);
         // 단일 패널 뷰는 순환 무시.
@@ -914,13 +918,13 @@ mod tests {
     #[test]
     fn subtab_cycles_within_section() {
         let mut a = App::new();
-        a.goto_view(View::Models); // Models 섹션: Models→Perf→Pods
+        a.goto_view(View::Serving); // Serving 섹션: Serving→Perf→Pods
         a.cycle_subtab(1);
         assert_eq!(a.view, View::Perf);
         a.cycle_subtab(1);
         assert_eq!(a.view, View::Pods);
         a.cycle_subtab(1);
-        assert_eq!(a.view, View::Models, "서브탭 순환");
+        assert_eq!(a.view, View::Serving, "서브탭 순환");
         // 단일 멤버 섹션(Overview)은 서브탭 순환 무시.
         a.goto_view(View::Overview);
         a.cycle_subtab(1);
@@ -1378,26 +1382,32 @@ mod tests {
         a.view = View::Serving;
         a.panel_focus = 0;
         a.selected = 0;
-        // NPU(RBLN) 빌드 → Info + Compile→RBLN + Deploy(배포 안 된 상태라 Stop 없음).
+        // Serving = 운영 렌즈: Info/Logs/YAML/Scale/Restart/Objective. 컴파일·신규 배포는 Model List 로 이동.
         a.open_action_menu();
-        let m = a.action_menu.clone().expect("menu opens on Launch panel 0");
+        let m = a.action_menu.clone().expect("menu opens on Serving panel 0");
         let acts: Vec<Action> = m.items.iter().map(|i| i.action).collect();
         assert!(acts.contains(&Action::Info));
-        assert!(acts.contains(&Action::Compile("rbln")));
-        assert!(acts.contains(&Action::Deploy));
-        assert!(!acts.contains(&Action::Stop)); // 미배포
-        assert_eq!(m.by_key('c'), Some(Action::Compile("rbln")));
+        assert!(acts.contains(&Action::Scale));
+        assert!(acts.contains(&Action::Restart));
+        assert!(acts.contains(&Action::Objective));
+        assert!(acts.contains(&Action::Logs));
+        assert!(
+            !acts.iter().any(|x| matches!(x, Action::Compile(_))),
+            "compile 은 Model List 로 이동"
+        );
+        assert!(!acts.contains(&Action::Deploy), "deploy 는 Model List 로 이동");
+        assert!(!acts.contains(&Action::Stop), "미배포(models 없음)면 Stop 없음");
+        assert_eq!(m.by_key('s'), Some(Action::Scale));
         assert_eq!(m.by_key('z'), None);
-        // GPU vLLM 이지만 모델이 Llama 계열 → 지원 목록으로 Compile→RBLN·Furiosa 노출(GPU→NPU 경로).
-        a.snap.artifacts[0].engine = "vLLM".into();
+        // 같은 이름의 배포가 desired>0 이면 Stop 노출.
+        a.snap.models = vec![model("koni-rbln")]; // model(): desired=1
         a.action_menu = None;
         a.open_action_menu();
-        let g = a.action_menu.clone().unwrap();
-        assert!(g.items.iter().any(|i| i.action == Action::Compile("rbln")));
-        assert!(g
-            .items
-            .iter()
-            .any(|i| i.action == Action::Compile("furiosa")));
+        let d = a.action_menu.clone().unwrap();
+        assert!(
+            d.items.iter().any(|i| i.action == Action::Stop),
+            "배포 상태면 Stop 노출"
+        );
     }
 
     #[test]
@@ -1493,7 +1503,7 @@ mod tests {
     fn unsupported_pivot_key_is_noop() {
         let mut a = app_with(vec![model("m1")], vec![pod("m1-abc")]);
         a.pivot('x'); // pivot 키 아님
-        assert_eq!(a.view, View::Models);
+        assert_eq!(a.view, View::Overview);
         assert!(a.nav_stack.is_empty());
     }
 
@@ -1506,6 +1516,16 @@ mod tests {
         a.snap = Snapshot {
             models: vec![model("m1")],
             pods: vec![pod("m1-abc")],
+            artifacts: vec![crate::collect::ModelArtifact {
+                model: "m1".into(),
+                family: "m1".into(),
+                engine: "vLLM".into(),
+                node: String::new(),
+                image: String::new(),
+                source: "org/m1".into(),
+                mount: String::new(),
+                opts: vec![],
+            }],
             routes: vec![Route {
                 path: "/v1".into(),
                 backend: "m1".into(),
@@ -1522,9 +1542,9 @@ mod tests {
             !a.detail,
             "Routing has no detail panel; detail must stay off so nav is not trapped"
         );
-        // Enter 의 실제 동작: 백엔드 모델 상세로 드릴.
+        // Enter 의 실제 동작: 백엔드 배포 상세로 드릴(Serving).
         a.drill_route();
-        assert_eq!(a.view, View::Models);
+        assert_eq!(a.view, View::Serving);
         assert_eq!(a.filter, "m1");
         assert!(a.detail);
         // esc: 상세 닫기 → nav_back 으로 Flow 복귀.
@@ -1571,8 +1591,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        a.view = View::Library;
-        a.panel_focus = 2; // Deploy▸Library 진행 중 컴파일 패널(0 스토어·1 카탈로그·2 컴파일 Job)
+        a.view = View::Activity; // Deploy▸Activity 통합 작업 피드 — compile 진행바 표시
         let mut fx = crate::ui::FxState::disabled();
         let mut t = Terminal::new(TestBackend::new(140, 30)).unwrap();
         t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
@@ -1632,7 +1651,7 @@ mod tests {
             models: vec![mk("aaa", 10.0), mk("bbb", 30.0), mk("ccc", 20.0)],
             ..Default::default()
         };
-        a.goto_view(View::Models);
+        a.goto_view(View::Overview);
         // 기본: col0=name, 오름차순.
         assert_eq!(a.sort_label(), "name");
         assert!(!a.sort_desc, "name column defaults ascending");
@@ -1877,16 +1896,19 @@ mod tests {
             text.contains("Instruct-FP8"),
             "version 이 둘 이상이면 version 티어 노출"
         );
-        assert!(text.contains("2/2 rep"), "모델 replica 상태 반영");
+        assert!(
+            text.contains("Serving 2/2"),
+            "배포 상태·replica 반영(Serving 2/2)\n{text}"
+        );
 
-        // Library 렌즈 — 카탈로그 트리(임베드 카탈로그) + 패닉 없음.
+        // Model List 렌즈 — 카탈로그 트리(임베드 카탈로그) + 패닉 없음.
         a.view = View::Library;
         a.panel_focus = 0;
         a.selected = 0;
         let mut t2 = Terminal::new(TestBackend::new(120, 30)).unwrap();
         t2.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
         let ltext = buf_text(t2.backend().buffer());
-        assert!(ltext.contains("Library"), "Library 타이틀\n{ltext}");
+        assert!(ltext.contains("Model List"), "Model List 타이틀\n{ltext}");
         assert!(!a.library_items().is_empty(), "임베드 카탈로그 로드됨");
     }
 
