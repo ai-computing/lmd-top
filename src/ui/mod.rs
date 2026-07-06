@@ -1165,13 +1165,23 @@ fn view_pods(f: &mut Frame, area: Rect, app: &App) {
                 "Failed" => C_BAD(),
                 _ => C_DIM(),
             };
+            let glyph = match p.phase.as_str() {
+                "Running" => "●",
+                "Pending" => "◐",
+                "Failed" => "✗",
+                "Succeeded" => "✓",
+                _ => "○",
+            };
             let name = if pos == app.selected {
                 marquee(&p.name, 40, app.tick)
             } else {
                 truncw(&p.name, 40)
             };
             Row::new(vec![
-                Cell::from(name),
+                Cell::from(Line::from(vec![
+                    Span::styled(format!("{} ", glyph), Style::default().fg(color)),
+                    Span::raw(name),
+                ])),
                 cellw(p.ready.clone(), 6),
                 Cell::from(Span::styled(p.phase.clone(), Style::default().fg(color))),
                 cellw(p.node.clone(), 18),
@@ -3711,47 +3721,52 @@ fn view_serving(f: &mut Frame, area: Rect, app: &App) {
 // ── Deploy▸Activity — compile Job + deploy rollout 을 한 목록으로(통합 작업 피드). ──
 // compile(빌드 진행률)과 deploy rollout(시도/실패)을 상태와 함께 최신순으로. ⏎ actions · l logs · D delete.
 fn view_activity(f: &mut Frame, area: Rect, app: &App) {
-    let rows = app.activity_rows();
-    let sel = app.sel_orig();
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled("compile", Style::default().fg(C_ACC())),
-        Span::styled(" 빌드 + ", Style::default().fg(C_DIM())),
-        Span::styled("deploy", Style::default().fg(C_OK())),
-        Span::styled(" rollout · ⏎ actions · l logs · D delete", Style::default().fg(C_DIM())),
-    ]));
-    if rows.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "(진행 중이거나 시도/실패 중인 작업 없음 — 컴파일하거나 배포하면 여기 표시)",
-            Style::default().fg(C_DIM()),
-        )));
-    }
-    for (i, r) in rows.iter().enumerate() {
-        // 상태 키워드로 라인 색을 정함(실패=빨강, 완료/서빙=초록, 진행/시도=노랑).
-        let base = if r.label.contains("Failed") || r.label.contains("✗") {
-            C_BAD()
-        } else if r.label.contains("Complete") || r.label.contains("Serving") {
-            C_OK()
-        } else {
-            C_WARN()
-        };
-        let selected = Some(i) == sel;
-        let marker = if selected { "› " } else { "  " };
-        let mut spans =
-            vec![Span::styled(format!("{}{}  ", marker, r.label), Style::default().fg(base))];
-        if r.running_compile {
-            spans.extend(compile_progress_bar(r.progress, app.tick, 12));
-        }
-        let mut line = Line::from(spans);
-        if selected {
-            line.style = Style::default().add_modifier(Modifier::REVERSED);
-        }
-        lines.push(line);
-    }
-    let title = format!("Activity · {} 작업 (compile + deploy)", rows.len());
-    let p = Paragraph::new(lines).block(block(&title));
-    f.render_widget(p, area);
-    list_scrollbar(f, area, rows.len(), app.selected, 1);
+    let data = app.activity_rows();
+    let rows: Vec<Row> = data
+        .iter()
+        .map(|r| {
+            let color = match r.sev {
+                2 => C_BAD(),
+                0 => C_OK(),
+                _ => C_WARN(),
+            };
+            let kind = if r.kind == "compile" {
+                Span::styled("compile", Style::default().fg(C_ACC()))
+            } else {
+                Span::styled("deploy", Style::default().fg(C_OK()))
+            };
+            // STATUS 셀: 상태 텍스트 + (진행 중 compile 이면) 진행바.
+            let mut status_spans = vec![Span::styled(
+                format!("{:<11}", truncw(&r.status, 11)),
+                Style::default().fg(color),
+            )];
+            if r.running_compile {
+                status_spans.extend(compile_progress_bar(r.progress, app.tick, 10));
+            }
+            Row::new(vec![
+                Cell::from(kind),
+                Cell::from(truncw(&r.target, 44)),
+                Cell::from(Line::from(status_spans)),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(8),  // KIND
+        Constraint::Min(20),    // TARGET
+        Constraint::Length(28), // STATUS (+bar)
+    ];
+    render_list_table(
+        f,
+        area,
+        rows,
+        &widths,
+        &["KIND", "TARGET", "STATUS"],
+        "Activity · compile + deploy · ⏎ actions · l logs · D delete",
+        app.selected,
+        data.len(),
+        app.sort_header_label(),
+        app.sort_arrow(),
+    );
 }
 
 // ── Deploy▸Model List — 배포 가능한 모델(카탈로그 조직정의 + 스토어 컴파일본, family 로 묶음). ──

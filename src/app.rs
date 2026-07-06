@@ -2272,15 +2272,16 @@ mod tests {
         };
         let rows = a.activity_rows();
         assert!(
-            rows.iter().any(|r| r.label.starts_with("compile ·")),
+            rows.iter().any(|r| r.kind == "compile" && r.target.contains('x')),
             "compile Job 이 피드에 있어야"
         );
         assert!(
-            rows.iter().any(|r| r.label.contains("deploy · starting")),
+            rows.iter()
+                .any(|r| r.kind == "deploy" && r.target.contains("starting")),
             "시도 중(Starting) 배포는 노출"
         );
         assert!(
-            !rows.iter().any(|r| r.label.contains("steady")),
+            !rows.iter().any(|r| r.target.contains("steady")),
             "정상 서빙(Serving) 배포는 피드에서 제외"
         );
         assert!(
