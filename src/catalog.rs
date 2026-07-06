@@ -64,6 +64,8 @@ pub struct ZooModel {
     #[serde(default)]
     pub role: String,
     #[serde(default)]
+    pub vendor: String, // 출처 벤더 힌트(furiosa=사전양자화 / rbln=지원패밀리). 컴파일 벤더는 compat 로 별도 판정.
+    #[serde(default)]
     pub note: String,
 }
 
@@ -84,6 +86,66 @@ pub fn load_zoo() -> Vec<ZooModel> {
     serde_yaml::from_str::<ZooRoot>(&txt)
         .map(|r| r.models)
         .unwrap_or_default()
+}
+
+/// Live-refresh the Furiosa zoo via `curl` (lmd-top ships no in-binary TLS; curl has it, same
+/// shell-out ethos as kubectl). Queries the HF Hub API for the furiosa-ai org. Best-effort:
+/// returns `[]` if curl/network/jq-less-parse fails — caller keeps the bundled list.
+pub async fn fetch_zoo_live() -> Vec<ZooModel> {
+    let out = match tokio::process::Command::new("curl")
+        .args([
+            "-fsSL",
+            "--max-time",
+            "6",
+            "https://huggingface.co/api/models?author=furiosa-ai&limit=500",
+        ])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
+    let mut zoo = Vec::new();
+    for m in arr {
+        let id = m["id"].as_str().unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+        let role = match m["pipeline_tag"].as_str().unwrap_or("") {
+            "text-generation" => "chat",
+            "sentence-similarity" => "embedding",
+            "text-classification" => "reranker",
+            _ => continue,
+        };
+        let disp = id.rsplit('/').next().unwrap_or(id);
+        zoo.push(ZooModel {
+            display: format!("{} (Furiosa)", disp),
+            source: id.to_string(),
+            role: role.to_string(),
+            vendor: "furiosa".to_string(),
+            note: "Furiosa 사전 양자화".to_string(),
+        });
+    }
+    zoo
+}
+
+/// Merge live entries into a base list, deduped by `source` (base kept; genuinely new appended).
+pub fn merge_zoo(mut base: Vec<ZooModel>, extra: Vec<ZooModel>) -> Vec<ZooModel> {
+    let have: std::collections::HashSet<String> =
+        base.iter().map(|z| z.source.to_lowercase()).collect();
+    for z in extra {
+        if !have.contains(&z.source.to_lowercase()) {
+            base.push(z);
+        }
+    }
+    base
 }
 
 /// 배치 준비 상태.

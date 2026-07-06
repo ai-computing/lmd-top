@@ -169,6 +169,20 @@ impl App {
                     desc: true,
                 },
             ],
+            Zoo => &[
+                SortCol {
+                    label: "name",
+                    desc: false,
+                },
+                SortCol {
+                    label: "role",
+                    desc: false,
+                },
+                SortCol {
+                    label: "status",
+                    desc: false,
+                },
+            ],
             _ => &[],
         }
     }
@@ -223,6 +237,9 @@ impl App {
             (Pods, 2) => "RESTARTS",
             (Pods, 3) => "NODE",
             (Pods, _) => "READY",
+            (Zoo, 0) => "MODEL",
+            (Zoo, 1) => "ROLE",
+            (Zoo, 2) => "STATUS",
             (Events, 1) => "TYPE",
             (Events, 2) => "REASON",
             (Events, 3) => "CNT",

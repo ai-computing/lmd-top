@@ -3735,10 +3735,10 @@ fn activity_panel(f: &mut Frame, area: Rect, app: &App, active: bool) {
                 0 => C_OK(),
                 _ => C_WARN(),
             };
-            let kind = if r.kind == "compile" {
-                Span::styled("compile", Style::default().fg(C_ACC()))
-            } else {
-                Span::styled("deploy", Style::default().fg(C_OK()))
+            let kind = match r.kind {
+                "compile" => Span::styled("compile", Style::default().fg(C_ACC())),
+                "prefetch" => Span::styled("prefetch", Style::default().fg(C_WARN())),
+                _ => Span::styled("deploy", Style::default().fg(C_OK())),
             };
             // STATUS 셀: 상태 텍스트(% 포함) + (진행 중 compile 이면) 진행바.
             let mut status_spans = vec![Span::styled(
@@ -4408,8 +4408,23 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
 }
 
 // ── Deploy▸Zoo — 벤더(Furiosa/Rebellions) 모델 zoo: prefetch/compile ──────────
+// 2패널: 위=모델 목록(정렬/필터·⏎ 액션) · 아래=Activity(compile/prefetch/deploy 피드).
 fn view_zoo(f: &mut Frame, area: Rect, app: &App) {
-    let order = app.order();
+    let focus = app.panel_focus;
+    let panes = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(6), Constraint::Length(9)])
+        .split(area);
+
+    // 위 패널이 포커스일 때만 정렬이 목록에 적용됨(order()가 panel_focus 를 봄).
+    let order = if focus == 0 {
+        app.order()
+    } else {
+        // 목록 정렬은 유지하되 선택 하이라이트는 활성 패널로만.
+        let mut idx: Vec<usize> = (0..app.zoo.len()).collect();
+        idx.sort_by(|&a, &b| app.zoo[a].display.to_lowercase().cmp(&app.zoo[b].display.to_lowercase()));
+        idx
+    };
     let rows: Vec<Row> = order
         .iter()
         .map(|&i| {
@@ -4429,10 +4444,12 @@ fn view_zoo(f: &mut Frame, area: Rect, app: &App) {
                     .join("+")
             };
             let vcolor = if vendors.is_empty() { C_DIM() } else { C_WARN() };
-            let (store_s, store_c) = if app.zoo_in_store(&z.source) {
-                ("● built", C_OK())
-            } else {
-                ("○ –", C_DIM())
+            let (state_s, sev) = app.zoo_state(z);
+            let state_c = match sev {
+                0 => C_OK(),
+                1 => C_WARN(),
+                2 => C_BAD(),
+                _ => C_DIM(),
             };
             Row::new(vec![
                 Cell::from(truncw(&z.display, 30)).style(
@@ -4442,38 +4459,54 @@ fn view_zoo(f: &mut Frame, area: Rect, app: &App) {
                 ),
                 Cell::from(truncw(&z.source, 34)).style(Style::default().fg(Color::Gray)),
                 Cell::from(vlabel).style(Style::default().fg(vcolor)),
-                Cell::from(truncw(&z.role, 10)).style(Style::default().fg(C_DIM())),
-                Cell::from(store_s).style(Style::default().fg(store_c)),
-                Cell::from(truncw(&z.note, 24)).style(Style::default().fg(C_DIM())),
+                Cell::from(truncw(&z.role, 9)).style(Style::default().fg(C_DIM())),
+                Cell::from(state_s).style(Style::default().fg(state_c)),
+                Cell::from(truncw(&z.note, 22)).style(Style::default().fg(C_DIM())),
             ])
         })
         .collect();
     let widths = [
         Constraint::Length(30), // MODEL
-        Constraint::Min(20),    // SOURCE (HF)
+        Constraint::Min(18),    // SOURCE (HF)
         Constraint::Length(14), // COMPILE
-        Constraint::Length(10), // ROLE
-        Constraint::Length(8),  // STORE
-        Constraint::Length(24), // NOTE
+        Constraint::Length(9),  // ROLE
+        Constraint::Length(12), // STATUS
+        Constraint::Length(22), // NOTE
     ];
-    let header = ["MODEL", "SOURCE (HF)", "COMPILE", "ROLE", "STORE", "NOTE"];
+    let header = ["MODEL", "SOURCE (HF)", "COMPILE", "ROLE", "STATUS", "NOTE"];
     let title = format!(
-        "Deploy▸Zoo · vendor model zoo · ⏎ Prefetch / Compile→vendor · then deploy from Library{}",
-        count_suffix(app.selected, order.len())
+        "Deploy▸Zoo · vendor model zoo ({}) · ⏎ Prefetch/Compile · r refresh · o sort{}",
+        app.zoo.len(),
+        if focus == 0 {
+            count_suffix(app.selected, order.len())
+        } else {
+            String::new()
+        }
     );
+    let blk = if focus == 0 {
+        block_active(&title)
+    } else {
+        block(&title)
+    };
     let mut st = TableState::default();
-    st.select(Some(app.selected));
+    if focus == 0 {
+        st.select(Some(app.selected));
+    }
     f.render_stateful_widget(
         Table::new(rows, widths)
-            .header(hrow(&header))
+            .header(hrow_sorted(&header, app.sort_header_label(), app.sort_arrow()))
             .column_spacing(1)
             .row_highlight_style(hl_style())
             .highlight_symbol("▎")
-            .block(block_active(&title)),
-        area,
+            .block(blk),
+        panes[0],
         &mut st,
     );
-    list_scrollbar(f, area, order.len(), app.selected, 1);
+    if focus == 0 {
+        list_scrollbar(f, panes[0], order.len(), app.selected, 1);
+    }
+    // 아래: 통합 Activity 피드(compile/prefetch/deploy) — Library 와 동일.
+    activity_panel(f, panes[1], app, focus == 1);
 }
 
 // ── Setup(Doctor) — 새 환경 부트스트랩 전제조건 점검 + 가이드된 조치 ──────────

@@ -231,6 +231,7 @@ impl App {
     pub fn panel_count(&self) -> usize {
         match self.view {
             View::Library => 2, // Deploy: 위 Model List · 아래 Activity
+            View::Zoo => 2,     // Zoo: 위 모델 목록 · 아래 Activity
             View::Serving => 1, // Serving: 라이브 배포 트리(단일 패널)
             View::Epp => 2,     // scorers / InferencePool
             View::Routing => 2, // routes / InferencePool

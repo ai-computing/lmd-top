@@ -119,7 +119,9 @@ impl App {
                 .filter(|a| !a.busy_model.is_empty())
                 .map(|a| a.busy_model.clone()),
             // Deploy 하단 Activity 패널 — 선택 작업(compile Job / deploy rollout)의 파드 로그.
-            View::Library if self.panel_focus == 1 => self.selected_activity().and_then(|r| r.pod),
+            View::Library | View::Zoo if self.panel_focus == 1 => {
+                self.selected_activity().and_then(|r| r.pod)
+            }
             _ => None,
         }
     }

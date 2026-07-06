@@ -1313,6 +1313,18 @@ fn ui_loop(
                                 app.zoom = false;
                             }
                         }
+                        // Zoo: r → furiosa-ai HF org 라이브 새로고침(curl shell-out; pivot 보다 우선).
+                        KeyCode::Char('r') if app.view == View::Zoo => {
+                            let live = rt.block_on(crate::catalog::fetch_zoo_live());
+                            let n0 = app.zoo.len();
+                            app.zoo = crate::catalog::merge_zoo(std::mem::take(&mut app.zoo), live);
+                            let added = app.zoo.len().saturating_sub(n0);
+                            app.notify(if added > 0 {
+                                format!("zoo refreshed — +{} new from furiosa-ai", added)
+                            } else {
+                                "zoo refreshed — up to date (or offline)".to_string()
+                            });
+                        }
                         // 크로스레이어 드릴 pivot — 선택 엔티티에서 관련 레이어로 점프
                         KeyCode::Char(c @ ('p' | 'i' | 'r' | 'e' | 'm' | 'n')) => app.pivot(c),
                         // EPP scorer 가중치 what-if(로컬 시뮬) — EPP 뷰에서만 반응
