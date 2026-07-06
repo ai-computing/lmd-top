@@ -155,6 +155,58 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines).block(block(&title)), area);
 }
 
+/// Prefetch(zoo 다운로드) 대상 저장소 선택 폼 오버레이.
+pub(super) fn prefetch_form_overlay(f: &mut Frame, app: &App) {
+    let Some(form) = &app.prefetch_form else {
+        return;
+    };
+    let full = f.area();
+    let h = (form.fields.len() as u16) + 10;
+    let area = centered(full, 84, h.min(full.height.saturating_sub(2)));
+    f.render_widget(Clear, area);
+    let get = |k: &str| {
+        form.fields
+            .iter()
+            .find(|x| x.key == k)
+            .map(|x| x.value.clone())
+            .unwrap_or_default()
+    };
+    let pvc = get("pvc");
+    let dir = get("dir");
+    let dest = format!("{}:/mnt/store/{}", pvc, dir.trim_matches('/'));
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("  model  ", Style::default().fg(C_DIM())),
+        Span::styled(
+            form.model_id.clone(),
+            Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  saves to ", Style::default().fg(C_DIM())),
+        Span::styled(dest, Style::default().fg(C_ACC())),
+        Span::styled("  (HF cache; reused by compile/serve)", Style::default().fg(C_DIM())),
+    ]));
+    lines.push(Line::from(""));
+    for (i, fld) in form.fields.iter().enumerate() {
+        let active = i == form.cursor;
+        lines.push(choice_row(fld, active, active && form.editing));
+    }
+    lines.push(Line::from(""));
+    if let Some(fld) = form.fields.get(form.cursor) {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", fld.help),
+            Style::default().fg(C_DIM()),
+        )));
+    }
+    let title = if form.editing {
+        "prefetch · TYPING custom — Enter/Esc confirm · Backspace del".to_string()
+    } else {
+        "prefetch (download) · ↑↓ field · ←→ value · e edit · Enter→confirm · q cancel".to_string()
+    };
+    f.render_widget(Paragraph::new(lines).block(block(&title)), area);
+}
+
 /// Deploy options form overlay.
 pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
     let Some(form) = &app.deploy_form else { return };

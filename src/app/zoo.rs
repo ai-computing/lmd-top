@@ -62,22 +62,103 @@ impl App {
         Some(Self::synthetic_artifact_for(&z.source, vendor, String::new(), &[]))
     }
 
-    /// Prefetch — HF 가중치를 공유 스토어 캐시(/mnt/store/hub)로 사전 다운로드하는 Job.
-    /// 컴파일 전에 받아두면 컴파일이 오프라인·빠르게 진행되고, 노드 간 공유된다.
-    pub fn prefetch_selected_zoo(&mut self) {
+    /// Prefetch 폼 — 다운로드 대상(저장소 PVC·경로·리비전)을 고른 뒤 Job 을 만든다.
+    /// 사용자가 "어디에 저장할지"를 명시적으로 정하도록(기본 model-store PVC 의 hub/ 캐시).
+    pub fn open_prefetch_form(&mut self) {
         let Some(z) = self.selected_zoo() else {
             return;
         };
-        let source = z.source.clone();
+        // 후보 PVC — 스토어 PVC 는 항상, 그 외 관측된 PVC 이름이 있으면 추가(없으면 model-store 만).
+        let mut pvcs = vec!["model-store".to_string()];
+        for extra in ["rbln-artifacts", "furiosa-artifacts", "model-pvc"] {
+            if !pvcs.iter().any(|p| p == extra) {
+                pvcs.push(extra.to_string());
+            }
+        }
+        let field = |key: &str, label: &str, value: &str, choices: Vec<String>, help: &str| {
+            CompileField {
+                key: key.into(),
+                label: label.into(),
+                value: value.into(),
+                choices,
+                numeric: false,
+                help: help.into(),
+            }
+        };
+        let fields = vec![
+            field(
+                "pvc",
+                "store PVC",
+                "model-store",
+                pvcs,
+                "Destination PVC (RWX). Weights land here and are reused by compile/serve. e to type another.",
+            ),
+            field(
+                "dir",
+                "cache dir",
+                "hub",
+                ["hub", "models", "prefetch"].iter().map(|s| s.to_string()).collect(),
+                "Sub-path under the PVC for the HF cache (HF_HOME=/mnt/store/<dir>). e to edit.",
+            ),
+            field(
+                "revision",
+                "revision",
+                "main",
+                vec!["main".to_string()],
+                "HF revision/branch/tag to download. e to edit.",
+            ),
+        ];
+        self.prefetch_form = Some(CompileForm {
+            model: z.display.clone(),
+            model_id: z.source.clone(),
+            vendor: "prefetch",
+            engine: String::new(),
+            fields,
+            cursor: 0,
+            editing: false,
+        });
+    }
+
+    /// Prefetch 폼 확정 → 선택 PVC/경로로 HF 가중치를 받는 Job 생성(확인 팝업).
+    pub fn prefetch_form_submit(&mut self) {
+        let Some(form) = self.prefetch_form.take() else {
+            return;
+        };
+        let source = form.model_id.clone();
+        let pvc = {
+            let p = form.get("pvc");
+            if p.trim().is_empty() {
+                "model-store".to_string()
+            } else {
+                p
+            }
+        };
+        let dir = {
+            let d = form.get("dir");
+            if d.trim().is_empty() {
+                "hub".to_string()
+            } else {
+                d
+            }
+        };
+        let revision = form.get("revision");
+        let rev_arg = if revision.trim().is_empty() || revision == "main" {
+            String::new()
+        } else {
+            format!(", revision='{}'", revision)
+        };
         let repo_dir = source.replace('/', "--");
         let name = job_name("prefetch", &repo_dir, "");
         let ns = &self.ns;
+        let hf_home = format!("/mnt/store/{}", dir.trim_matches('/'));
         let yaml = format!(
-            "# Prefetch Job — download HF weights for {source} into the shared store cache.\n\
-             # Reused by compile (HF_HOME=/mnt/store/hub). Review, then apply.\n\
+            "# Prefetch Job — download HF weights for {source}\n\
+             #   destination: PVC '{pvc}' at {hf_home}  (reused by compile/serve as HF_HOME)\n\
+             #   revision:    {rev}\n\
+             # Review, then apply. Progress shows in Deploy▸Zoo/Library Activity.\n\
              apiVersion: batch/v1\n\
              kind: Job\n\
-             metadata: {{ name: {name}, namespace: {ns} }}\n\
+             metadata: {{ name: {name}, namespace: {ns}, labels: {{ app.kubernetes.io/component: prefetch }} }}\n\
              spec:\n\
              \x20 backoffLimit: 0\n\
              \x20 ttlSecondsAfterFinished: 3600\n\
@@ -85,13 +166,13 @@ impl App {
              \x20   spec:\n\
              \x20     restartPolicy: Never\n\
              \x20     volumes:\n\
-             \x20       - {{ name: store, persistentVolumeClaim: {{ claimName: model-store }} }}\n\
+             \x20       - {{ name: store, persistentVolumeClaim: {{ claimName: {pvc} }} }}\n\
              \x20     containers:\n\
              \x20       - name: prefetch\n\
              \x20         image: python:3.10-slim\n\
              \x20         resources: {{ requests: {{ cpu: \"2\", memory: \"4Gi\" }} }}\n\
              \x20         env:\n\
-             \x20           - {{ name: HF_HOME, value: /mnt/store/hub }}\n\
+             \x20           - {{ name: HF_HOME, value: {hf_home} }}\n\
              \x20           - {{ name: HF_HUB_ENABLE_HF_TRANSFER, value: \"0\" }}\n\
              \x20           - {{ name: HF_TOKEN, valueFrom: {{ secretKeyRef: {{ name: hf-token, key: HF_TOKEN, optional: true }} }} }}\n\
              \x20         command: [\"bash\", \"-c\"]\n\
@@ -99,16 +180,20 @@ impl App {
              \x20           - |-\n\
              \x20             set -e\n\
              \x20             pip install -q --no-cache-dir huggingface_hub\n\
-             \x20             python -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id='{source}')\"\n\
-             \x20             echo PREFETCH_DONE {source}\n\
+             \x20             python -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id='{source}'{rev_arg})\"\n\
+             \x20             echo PREFETCH_DONE {source} -> {hf_home}\n\
              \x20         volumeMounts:\n\
              \x20           - {{ name: store, mountPath: /mnt/store }}\n",
             source = source,
             name = name,
-            ns = ns
+            ns = ns,
+            pvc = pvc,
+            hf_home = hf_home,
+            rev = if revision.trim().is_empty() { "main" } else { &revision },
+            rev_arg = rev_arg,
         );
         self.confirm = Some(Pending::Apply {
-            title: format!("prefetch {} → store", source),
+            title: format!("prefetch {} → {}:{}", source, pvc, hf_home),
             yaml,
         });
         self.confirm_yes = false;
@@ -137,17 +222,26 @@ mod zoo_tests {
     }
 
     #[test]
-    fn prefetch_builds_snapshot_download_job() {
+    fn prefetch_form_builds_snapshot_download_job_with_chosen_dest() {
         let mut a = App::new();
         a.view = View::Zoo;
         a.selected = 0;
-        a.prefetch_selected_zoo();
+        a.open_prefetch_form();
+        assert!(a.prefetch_form.is_some(), "prefetch opens a destination form");
+        // 대상 경로를 사용자가 바꿔도 반영되는지: dir=models 로 변경.
+        if let Some(f) = a.prefetch_form.as_mut() {
+            if let Some(d) = f.fields.iter_mut().find(|x| x.key == "dir") {
+                d.value = "models".into();
+            }
+        }
+        a.prefetch_form_submit();
         match a.confirm {
-            Some(Pending::Apply { ref yaml, .. }) => {
+            Some(Pending::Apply { ref yaml, ref title }) => {
                 assert!(yaml.contains("kind: Job"));
                 assert!(yaml.contains("snapshot_download"));
-                assert!(yaml.contains("/mnt/store/hub"), "cache into shared store");
+                assert!(yaml.contains("/mnt/store/models"), "chosen dir reflected in HF_HOME");
                 assert!(yaml.contains("claimName: model-store"));
+                assert!(title.contains("/mnt/store/models"), "destination shown in title");
             }
             _ => panic!("prefetch should stage a Pending::Apply Job"),
         }

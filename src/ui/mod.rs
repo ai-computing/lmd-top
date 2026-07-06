@@ -36,13 +36,14 @@ pub enum Overlay {
     PlacePicker,
     DeployForm,
     CompileForm,
+    PrefetchForm,
     ActionMenu,
     Logs,
 }
 
 impl Overlay {
     /// topmost 우선. 입력 소비·z-order 공용. (Help 가 가장 위, Logs 가 가장 아래)
-    pub const PRECEDENCE: [Overlay; 13] = [
+    pub const PRECEDENCE: [Overlay; 14] = [
         Overlay::Help,
         Overlay::ExitConfirm,
         Overlay::Confirm,
@@ -54,6 +55,7 @@ impl Overlay {
         Overlay::PlacePicker,
         Overlay::DeployForm,
         Overlay::CompileForm,
+        Overlay::PrefetchForm,
         Overlay::ActionMenu,
         Overlay::Logs,
     ];
@@ -72,6 +74,7 @@ impl Overlay {
             Overlay::PlacePicker => app.place_picker.is_some(),
             Overlay::DeployForm => app.deploy_form.is_some(),
             Overlay::CompileForm => app.compile_form.is_some(),
+            Overlay::PrefetchForm => app.prefetch_form.is_some(),
             Overlay::ActionMenu => app.action_menu.is_some(),
             Overlay::Logs => app.logs_mode,
         }
@@ -98,6 +101,7 @@ impl Overlay {
             Overlay::PlacePicker => place_picker_overlay(f, app),
             Overlay::DeployForm => deploy_form_overlay(f, app),
             Overlay::CompileForm => compile_form_overlay(f, app),
+            Overlay::PrefetchForm => prefetch_form_overlay(f, app),
             Overlay::ActionMenu => action_menu_overlay(f, app),
             Overlay::Logs => logs_overlay(f, app),
         }
