@@ -2244,15 +2244,19 @@ mod tests {
     }
 
     #[test]
-    fn activity_rows_unify_compile_and_troubled_deploys() {
+    fn activity_rows_unify_compile_and_deploys() {
         use crate::collect::CompileJob;
         let mut a = App::new();
         let mut steady = model("steady");
         steady.ready = 1;
-        steady.desired = 1; // Serving → 조용한 정상, Activity 에서 제외
+        steady.desired = 1; // Serving → 노출(서빙 중)
         let mut starting = model("starting");
         starting.ready = 0;
-        starting.desired = 2; // Starting → Activity 에 노출
+        starting.desired = 2; // Starting → 노출(시도 중), 서빙 중보다 위
+        let scaled = model("scaled0-x"); // desired 기본 1 → 0 으로 낮춤
+        let mut scaled = scaled;
+        scaled.desired = 0;
+        scaled.ready = 0; // Scaled-0 → 제외
         a.snap = Snapshot {
             compiles: vec![CompileJob {
                 name: "compile-x".into(),
@@ -2265,7 +2269,7 @@ mod tests {
                 phase: "compiling".into(),
                 progress: Some(0.5),
             }],
-            models: vec![steady, starting],
+            models: vec![steady, starting, scaled],
             ..Default::default()
         };
         let rows = a.activity_rows();
@@ -2274,14 +2278,22 @@ mod tests {
             "compile Job 이 피드에 있어야"
         );
         assert!(
-            rows.iter()
-                .any(|r| r.kind == "deploy" && r.target.contains("starting")),
-            "시도 중(Starting) 배포는 노출"
+            rows.iter().any(|r| r.kind == "deploy" && r.target.contains("starting")),
+            "시도 중(Starting) 배포 노출"
         );
         assert!(
-            !rows.iter().any(|r| r.target.contains("steady")),
-            "정상 서빙(Serving) 배포는 피드에서 제외"
+            rows.iter().any(|r| r.kind == "deploy" && r.target.contains("steady")),
+            "서빙 중(Serving) 배포도 노출(어디서 도는지)"
         );
+        assert!(
+            !rows.iter().any(|r| r.target.contains("scaled0")),
+            "Scaled-0 은 작업이 아니므로 제외"
+        );
+        // 문제 있는 배포가 서빙 중보다 위.
+        let dep: Vec<&_> = rows.iter().filter(|r| r.kind == "deploy").collect();
+        let ps = dep.iter().position(|r| r.target.contains("starting"));
+        let pv = dep.iter().position(|r| r.target.contains("steady"));
+        assert!(ps < pv, "Starting 이 Serving 보다 먼저");
         assert!(
             rows.iter().any(|r| r.running_compile && r.progress == Some(0.5)),
             "진행 중 compile 은 진행률을 싣는다"
