@@ -2003,7 +2003,7 @@ fn parse_k8s_ts(s: &str) -> Option<u64> {
     }
 }
 
-/// 진행/최근 컴파일 Job(`compile-*`) → snap.compiles. Job 없으면 조용히 빈 값.
+/// 진행/최근 컴파일 Job(`compile-*`)과 프리페치 Job(`prefetch-*`) → snap.compiles. 없으면 빈 값.
 /// 상태·경과·(완료 시)소요 + 활성 Job 은 파드 로그 마지막 줄을 진행 힌트로.
 async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
     let Ok(v) = kube::get_json(&["get", "jobs", "-n", &cfg.ns, "-o", "json"]).await else {
@@ -2015,25 +2015,32 @@ async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
     let now = now_secs();
     for j in items {
         let name = j["metadata"]["name"].as_str().unwrap_or("");
-        if !name.starts_with("compile-") {
+        let is_prefetch = name.starts_with("prefetch-");
+        if !name.starts_with("compile-") && !is_prefetch {
             continue;
         }
-        // 이름 = compile-{model}-{target}. target 은 "-rbln-" 또는 "-rngd-" 부터.
-        let rest = &name["compile-".len()..];
-        let (model, target, vendor) = if let Some(i) = rest.find("-rbln-") {
-            (
-                rest[..i].to_string(),
-                rest[i + 1..].to_string(),
-                "RBLN".to_string(),
-            )
-        } else if let Some(i) = rest.find("-rngd-") {
-            (
-                rest[..i].to_string(),
-                rest[i + 1..].to_string(),
-                "RNGD".to_string(),
-            )
+        // 이름 = compile-{model}-{target}(target 은 "-rbln-"/"-rngd-" 부터) 또는 prefetch-{model}-hf.
+        let (model, target, vendor) = if is_prefetch {
+            let rest = name.strip_prefix("prefetch-").unwrap_or(name);
+            let rest = rest.strip_suffix("-hf").unwrap_or(rest);
+            (rest.to_string(), "download".to_string(), "prefetch".to_string())
         } else {
-            (rest.to_string(), String::new(), "-".to_string())
+            let rest = &name["compile-".len()..];
+            if let Some(i) = rest.find("-rbln-") {
+                (
+                    rest[..i].to_string(),
+                    rest[i + 1..].to_string(),
+                    "RBLN".to_string(),
+                )
+            } else if let Some(i) = rest.find("-rngd-") {
+                (
+                    rest[..i].to_string(),
+                    rest[i + 1..].to_string(),
+                    "RNGD".to_string(),
+                )
+            } else {
+                (rest.to_string(), String::new(), "-".to_string())
+            }
         };
         let st = &j["status"];
         let succeeded = st["succeeded"].as_i64().unwrap_or(0) >= 1;

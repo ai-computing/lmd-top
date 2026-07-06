@@ -6,9 +6,9 @@
 use super::*;
 
 impl App {
-    /// 현재 Zoo 뷰에서 선택된 모델(정렬·필터 반영).
+    /// 현재 Zoo 뷰(상단 패널)에서 선택된 모델(정렬·필터 반영). 하단 Activity 패널이면 None.
     pub(super) fn selected_zoo(&self) -> Option<&crate::catalog::ZooModel> {
-        if self.view != View::Zoo {
+        if self.view != View::Zoo || self.panel_focus != 0 {
             return None;
         }
         self.sel_orig().and_then(|i| self.zoo.get(i))
@@ -27,6 +27,32 @@ impl App {
             .stored
             .iter()
             .any(|s| s.repo.to_lowercase() == repo || s.repo.to_lowercase().contains(short))
+    }
+
+    /// 모델의 상황별 상태(Zoo STATUS 열) — 스토어/컴파일중/프리페치중/게이트/미확보.
+    /// 반환 `(label, sev)`: sev 0=built, 1=진행중, 2=게이트(토큰필요), 3=available.
+    pub fn zoo_state(&self, z: &crate::catalog::ZooModel) -> (&'static str, u8) {
+        if self.zoo_in_store(&z.source) {
+            return ("● built", 0);
+        }
+        let repo = z.source.to_lowercase().replace('/', "--");
+        let active = |prefetch: bool| {
+            self.snap.compiles.iter().any(|c| {
+                (c.vendor == "prefetch") == prefetch
+                    && (c.status == "Running" || c.status == "Pending")
+                    && c.name.to_lowercase().contains(&repo)
+            })
+        };
+        if active(false) {
+            return ("◐ compiling", 1);
+        }
+        if active(true) {
+            return ("⇊ prefetch", 1);
+        }
+        if z.note.to_lowercase().contains("gated") {
+            return ("⇩ gated", 2);
+        }
+        ("○ available", 3)
     }
 
     /// 선택 zoo 모델 → 컴파일 흐름이 쓰는 합성 아티팩트(첫 컴파일 벤더 기준).
@@ -125,6 +151,23 @@ mod zoo_tests {
             }
             _ => panic!("prefetch should stage a Pending::Apply Job"),
         }
+    }
+
+    #[test]
+    fn merge_zoo_dedups_by_source() {
+        use crate::catalog::{merge_zoo, ZooModel};
+        let z = |s: &str| ZooModel {
+            display: s.into(),
+            source: s.into(),
+            role: "chat".into(),
+            vendor: "furiosa".into(),
+            note: String::new(),
+        };
+        let base = vec![z("furiosa-ai/A"), z("furiosa-ai/B")];
+        let live = vec![z("furiosa-ai/B"), z("furiosa-ai/C")]; // B dup, C new
+        let merged = merge_zoo(base, live);
+        let ids: Vec<_> = merged.iter().map(|m| m.source.clone()).collect();
+        assert_eq!(ids, vec!["furiosa-ai/A", "furiosa-ai/B", "furiosa-ai/C"]);
     }
 
     #[test]

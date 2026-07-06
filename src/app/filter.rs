@@ -114,10 +114,15 @@ impl App {
                 .map(|r| r.model.clone())
                 .unwrap_or_default(),
             View::Topo => String::new(), // 맵 뷰 — 리스트 선택 없음
+            View::Zoo if self.panel_focus == 1 => self
+                .activity_rows()
+                .get(i)
+                .map(|r| r.label.clone())
+                .unwrap_or_default(),
             View::Zoo => self
                 .zoo
                 .get(i)
-                .map(|z| format!("{} {} {}", z.display, z.source, z.role))
+                .map(|z| format!("{} {} {} {}", z.display, z.source, z.role, z.vendor))
                 .unwrap_or_default(),
             View::Setup => self
                 .setup_checks()

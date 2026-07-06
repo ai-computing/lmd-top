@@ -185,7 +185,7 @@ impl App {
                 }
                 (format!("catalog · {}", m.id), m.id.clone())
             }
-            View::Zoo => {
+            View::Zoo if self.panel_focus == 0 => {
                 // 벤더 모델 zoo — prefetch(가중치 다운로드) + 컴파일 가능한 각 벤더.
                 let Some(z) = self.selected_zoo() else {
                     return;
@@ -227,7 +227,7 @@ impl App {
                 };
                 (format!("zoo · {} ({})", source, note), source)
             }
-            View::Library if self.panel_focus == 1 => {
+            View::Library | View::Zoo if self.panel_focus == 1 => {
                 // Deploy 하단 Activity 패널 — compile Job / deploy rollout. 로그 · (Job 이면) 삭제.
                 let Some(row) = self.selected_activity() else {
                     return;

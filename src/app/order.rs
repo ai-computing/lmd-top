@@ -169,7 +169,23 @@ impl App {
             View::Routing if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
             View::Routing => (0..self.snap.routes.len()).collect(),
             View::Topo => Vec::new(), // 맵 뷰 — 리스트 선택 없음
-            View::Zoo => (0..self.zoo.len()).collect(),
+            View::Zoo if self.panel_focus == 1 => (0..self.activity_rows().len()).collect(),
+            View::Zoo => {
+                let v = &self.zoo;
+                let desc = self.sort_desc;
+                let mut idx: Vec<usize> = (0..v.len()).collect();
+                idx.sort_by(|&a, &b| {
+                    let (x, y) = (&v[a], &v[b]);
+                    let asc = match self.sort {
+                        1 => x.role.cmp(&y.role),
+                        2 => self.zoo_state(x).1.cmp(&self.zoo_state(y).1),
+                        _ => x.display.to_lowercase().cmp(&y.display.to_lowercase()),
+                    };
+                    let asc = if desc { asc.reverse() } else { asc };
+                    asc.then_with(|| x.display.to_lowercase().cmp(&y.display.to_lowercase()))
+                });
+                idx
+            }
             View::Setup => (0..self.setup_checks().len()).collect(),
         };
         if !self.filter.is_empty() {

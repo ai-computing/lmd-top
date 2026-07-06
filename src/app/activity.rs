@@ -149,11 +149,17 @@ impl App {
                 format!("{} {}", c.vendor, c.target)
             };
             let running = c.status == "Running";
+            let is_prefetch = c.vendor == "prefetch";
+            let kind = if is_prefetch { "prefetch" } else { "compile" };
             let pct = match c.progress {
                 Some(p) => format!(" {:.0}%", (p * 100.0).clamp(0.0, 100.0)),
                 None => String::new(),
             };
-            let target = format!("{} → {}", c.model, vt);
+            let target = if is_prefetch {
+                format!("{} ⇊ weights", c.model)
+            } else {
+                format!("{} → {}", c.model, vt)
+            };
             // 상태 텍스트에 진행률(%)을 항상 함께 — 진행바와 별개로 숫자로도 보이게.
             let status = format!("{}{}", c.status, pct);
             let sev = match c.status.as_str() {
@@ -162,8 +168,8 @@ impl App {
                 _ => 1,
             };
             out.push(ActivityRow {
-                kind: "compile",
-                label: format!("compile {} {}", target, status),
+                kind,
+                label: format!("{} {} {}", kind, target, status),
                 target,
                 status,
                 sev,
