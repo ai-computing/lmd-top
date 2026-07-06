@@ -3748,7 +3748,8 @@ fn activity_panel(f: &mut Frame, area: Rect, app: &App, active: bool) {
             }
             Row::new(vec![
                 Cell::from(kind),
-                Cell::from(truncw(&r.target, 44)),
+                Cell::from(truncw(&r.target, 40)),
+                Cell::from(r.started()).style(Style::default().fg(C_DIM())),
                 Cell::from(Line::from(status_spans)),
             ])
         })
@@ -3756,6 +3757,7 @@ fn activity_panel(f: &mut Frame, area: Rect, app: &App, active: bool) {
     let widths = [
         Constraint::Length(8),  // KIND
         Constraint::Min(20),    // TARGET
+        Constraint::Length(8),  // STARTED
         Constraint::Length(32), // STATUS (%+bar)
     ];
     let title = format!(
@@ -3772,7 +3774,7 @@ fn activity_panel(f: &mut Frame, area: Rect, app: &App, active: bool) {
         block(&title)
     };
     let table = Table::new(rows, widths)
-        .header(hrow_sorted(&["KIND", "TARGET", "STATUS"], "", ""))
+        .header(hrow_sorted(&["KIND", "TARGET", "STARTED", "STATUS"], "", ""))
         .column_spacing(1)
         .block(blk);
     if active {

@@ -4,6 +4,25 @@
 
 use super::*;
 
+/// 완료(Complete)/실패(Failed) compile 작업을 피드에서 유지하는 시간(초). 이 시간이 지나면
+/// "끝난 일"로 보고 자동으로 감춘다(진행 중/Pending·배포는 영향 없음). k8s Job TTL 과 별개의 뷰 정리.
+const ACTIVITY_KEEP_DONE_SECS: u64 = 1800; // 30분
+
+/// 경과 초 → 짧은 상대 시간(예: 12s · 5m · 3h · 2d). Activity STARTED 컬럼용.
+pub fn fmt_age(secs: u64) -> String {
+    if secs == 0 {
+        "–".into()
+    } else if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
 /// A running/serving deployment's lifecycle phase, inferred from replicas + pods.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DeployPhase {
@@ -54,11 +73,19 @@ pub struct ActivityRow {
     pub target: String,        // "model → vendor target" / "model ×N"
     pub status: String,        // "Running" / "Starting 0/2" / "Failed" / "Complete"
     pub sev: u8,               // 0 ok · 1 warn/active · 2 bad  (view maps to color)
+    pub age_secs: u64,         // 시작 후 경과(STARTED 컬럼) — compile Job / 배포 파드 나이
     pub label: String,         // searchable one-line (kind + target + status)
     pub pod: Option<String>,   // pod to tail logs from (Logs action)
     pub job: Option<String>,   // compile Job name to delete (Delete action); None for deploys
     pub running_compile: bool, // a compile Job still in progress → show a progress bar
     pub progress: Option<f32>, // compile progress 0.0..1.0 (None = indeterminate)
+}
+
+impl ActivityRow {
+    /// STARTED 컬럼 표시용 상대 시간(예: 5m · 3h · 2d).
+    pub fn started(&self) -> String {
+        fmt_age(self.age_secs)
+    }
 }
 
 impl App {
@@ -106,8 +133,16 @@ impl App {
     pub fn activity_rows(&self) -> Vec<ActivityRow> {
         let mut out: Vec<ActivityRow> = Vec::new();
 
-        // Compile Jobs — always shown (Running/Pending/Complete/Failed).
+        // Compile Jobs — 진행/대기 중은 항상, 완료/실패는 끝난 지 오래되면 자동으로 감춤.
         for c in &self.snap.compiles {
+            let done = c.status == "Complete" || c.status == "Failed";
+            if done {
+                // 끝난 뒤 경과 = 전체 나이 − 소요시간. keep 창을 넘으면 피드에서 제외.
+                let finished_ago = c.age_secs.saturating_sub(c.duration_secs.unwrap_or(0));
+                if finished_ago > ACTIVITY_KEEP_DONE_SECS {
+                    continue;
+                }
+            }
             let vt = if c.target.is_empty() {
                 c.vendor.clone()
             } else {
@@ -132,6 +167,7 @@ impl App {
                 target,
                 status,
                 sev,
+                age_secs: c.age_secs,
                 pod: self.pod_for(&c.name),
                 job: Some(c.name.clone()),
                 running_compile: running,
@@ -163,6 +199,15 @@ impl App {
                 DeployPhase::Serving => 0,
                 _ => 1,
             };
+            // 시작 시각 — 이 배포의 파드 중 가장 오래된 것(롤아웃 시작).
+            let age_secs = self
+                .snap
+                .pods
+                .iter()
+                .filter(|p| p.name.starts_with(&m.name))
+                .map(|p| p.age_secs)
+                .max()
+                .unwrap_or(0);
             deploys.push((
                 phase,
                 ActivityRow {
@@ -171,6 +216,7 @@ impl App {
                     target,
                     status,
                     sev,
+                    age_secs,
                     pod: self.pod_for(&m.name),
                     job: None,
                     running_compile: false,
