@@ -34,21 +34,18 @@ spec:
   platforms:
     - selector: { matchLabels: { os: linux, arch: amd64 } }
       uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.35.0/lmd-top-v0.35.0-x86_64-linux.tar.gz
-      sha256: "REPLACE_WITH_x86_64_linux_SHA256"
+      sha256: "45b943e3e4299086cb2bc94fd88b36bcfdb712d64f5f58ec9616e7dd6b98c3b0"
       bin: lmd-top
       files: [{ from: "*/lmd-top", to: "." }]
     - selector: { matchLabels: { os: linux, arch: arm64 } }
       uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.35.0/lmd-top-v0.35.0-aarch64-linux.tar.gz
-      sha256: "REPLACE_WITH_aarch64_linux_SHA256"
+      sha256: "7a370c54d647448d2eb7fa4dd895f4871474e2562d8df777cfa7b21ed120f524"
       bin: lmd-top
       files: [{ from: "*/lmd-top", to: "." }]
     - selector: { matchLabels: { os: darwin, arch: arm64 } }
       uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.35.0/lmd-top-v0.35.0-aarch64-darwin.tar.gz
-      sha256: "REPLACE_WITH_aarch64_darwin_SHA256"
+      sha256: "3037a2f03fd29e86ec5ef980b1e9089c47892b776422f2a89826af04b994656c"
       bin: lmd-top
       files: [{ from: "*/lmd-top", to: "." }]
-    - selector: { matchLabels: { os: darwin, arch: amd64 } }
-      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.35.0/lmd-top-v0.35.0-x86_64-darwin.tar.gz
-      sha256: "REPLACE_WITH_x86_64_darwin_SHA256"
-      bin: lmd-top
-      files: [{ from: "*/lmd-top", to: "." }]
+    # Intel macOS (darwin/amd64): the macos-13 release runner did not produce an asset for
+    # v0.35.0 — use `install.sh --from-source`. Re-add here once that build lands a tarball.
