@@ -675,7 +675,7 @@ impl App {
              \x20 replicas: {replicas}\n\
              \x20 selector: {{ matchLabels: {{ app: {name} }} }}\n\
              \x20 template:\n\
-             \x20   metadata: {{ labels: {{ app: {name} }} }}\n\
+             \x20   metadata: {{ labels: {{ app: {name}, llm-d.ai/inferenceServing: \"true\", llm-d.ai/model: {name} }} }}\n\
              \x20   spec:\n\
              {placement}\
              {volumes_block}\
@@ -728,6 +728,22 @@ impl App {
             .replace(['.', '_'], "-");
         let path = format!("/{}/{}", accel, slug);
         let ns = &self.ns;
+        // EPP core-metrics-extractor 파라미터 — 실동작 EPP(manifests/epp/*)와 동일한 표준 정합.
+        // Furiosa 는 furiosa_llm_* 메트릭명을 명시해야 scorer 가 큐/KV 신호를 읽는다.
+        // vLLM/RBLN(vllm:*)은 파라미터 없이 기본값(defaultEngine=vllm)이면 충분.
+        let metrics_extractor = if vendor == "furiosa" {
+            "\x20\x20\x20\x20\x20 parameters:\n\
+             \x20\x20\x20\x20\x20\x20\x20 defaultEngine: vllm\n\
+             \x20\x20\x20\x20\x20\x20\x20 engineConfigs:\n\
+             \x20\x20\x20\x20\x20\x20\x20 - name: vllm\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20 queuedRequestsSpec: furiosa_llm_num_requests_waiting\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20 runningRequestsSpec: furiosa_llm_num_requests_running\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20 kvUsageSpec: furiosa_llm_kv_cache_usage_percent\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20 loraSpec: \"\"\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20\x20 cacheInfoSpec: furiosa_llm_cache_config_info\n"
+        } else {
+            ""
+        };
         format!(
             "---\n\
              # ── llm-d 라우팅: 게이트웨이 {path} → InferencePool({name}-pool) → EPP → 이 서빙 ──\n\
@@ -750,6 +766,14 @@ impl App {
              subjects:\n\
              \x20 - {{ kind: ServiceAccount, name: {name}-epp, namespace: {ns} }}\n\
              ---\n\
+             # EPP 는 InferencePool 멤버십 검증 위해 TokenReview(auth 위임) 권한 필요 — 실동작 EPP 와 동일.\n\
+             apiVersion: rbac.authorization.k8s.io/v1\n\
+             kind: ClusterRoleBinding\n\
+             metadata: {{ name: {name}-epp-auth-delegator }}\n\
+             roleRef: {{ apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: system:auth-delegator }}\n\
+             subjects:\n\
+             \x20 - {{ kind: ServiceAccount, name: {name}-epp, namespace: {ns} }}\n\
+             ---\n\
              apiVersion: v1\n\
              kind: ConfigMap\n\
              metadata: {{ name: {name}-epp, namespace: {ns} }}\n\
@@ -761,12 +785,21 @@ impl App {
              \x20\x20\x20 - type: queue-scorer\n\
              \x20\x20\x20 - type: kv-cache-utilization-scorer\n\
              \x20\x20\x20 - type: prefix-cache-scorer\n\
+             \x20\x20\x20 - type: no-hit-lru-scorer\n\
+             \x20\x20\x20 - type: metrics-data-source\n\
+             \x20\x20\x20\x20\x20 parameters:\n\
+             \x20\x20\x20\x20\x20\x20\x20 scheme: http\n\
+             \x20\x20\x20\x20\x20\x20\x20 path: /metrics\n\
+             \x20\x20\x20\x20\x20\x20\x20 insecureSkipVerify: true\n\
+             \x20\x20\x20 - type: core-metrics-extractor\n\
+             {metrics_extractor}\
              \x20\x20\x20 schedulingProfiles:\n\
              \x20\x20\x20 - name: default\n\
              \x20\x20\x20\x20\x20 plugins:\n\
              \x20\x20\x20\x20\x20 - {{ pluginRef: queue-scorer, weight: 2 }}\n\
              \x20\x20\x20\x20\x20 - {{ pluginRef: kv-cache-utilization-scorer, weight: 2 }}\n\
              \x20\x20\x20\x20\x20 - {{ pluginRef: prefix-cache-scorer, weight: 3 }}\n\
+             \x20\x20\x20\x20\x20 - {{ pluginRef: no-hit-lru-scorer, weight: 2 }}\n\
              ---\n\
              apiVersion: apps/v1\n\
              kind: Deployment\n\
@@ -786,6 +819,8 @@ impl App {
              \x20           - {{ name: grpc, containerPort: 9002 }}\n\
              \x20           - {{ name: grpc-health, containerPort: 9003 }}\n\
              \x20           - {{ name: metrics, containerPort: 9090 }}\n\
+             \x20         livenessProbe: {{ grpc: {{ port: 9003, service: inference-extension }}, initialDelaySeconds: 5, periodSeconds: 10 }}\n\
+             \x20         readinessProbe: {{ grpc: {{ port: 9003, service: inference-extension }}, periodSeconds: 2 }}\n\
              \x20         env:\n\
              \x20           - {{ name: NAMESPACE, valueFrom: {{ fieldRef: {{ fieldPath: metadata.namespace }} }} }}\n\
              \x20           - {{ name: POD_NAME, valueFrom: {{ fieldRef: {{ fieldPath: metadata.name }} }} }}\n\
@@ -825,7 +860,43 @@ impl App {
              \x20       - {{ type: URLRewrite, urlRewrite: {{ path: {{ type: ReplacePrefixMatch, replacePrefixMatch: /v1 }} }} }}\n\
              \x20     backendRefs:\n\
              \x20       - {{ group: inference.networking.k8s.io, kind: InferencePool, name: {name}-pool }}\n",
-            name = name, ns = ns, path = path
+            name = name, ns = ns, path = path, metrics_extractor = metrics_extractor
         )
+    }
+}
+
+#[cfg(test)]
+mod deploy_routing_tests {
+    use super::*;
+
+    // 표준 정합: 실동작 EPP(manifests/epp/*)와 동일한 플러그인·RBAC·probe 를 생성해야 한다.
+    #[test]
+    fn routing_docs_has_metric_source_plugins_and_auth() {
+        let a = App::new();
+        let doc = a.routing_docs("myserve", "rbln", "meta-llama/Llama-3.1-8B-Instruct");
+        // scorer 가 실제 메트릭을 읽으려면 이 두 플러그인이 필수(이전엔 누락 → EPP 스코어링 무력).
+        assert!(doc.contains("type: metrics-data-source"), "metrics source plugin");
+        assert!(doc.contains("type: core-metrics-extractor"), "metrics extractor plugin");
+        assert!(doc.contains("type: no-hit-lru-scorer"));
+        // EPP 는 TokenReview 위임 권한 필요.
+        assert!(doc.contains("kind: ClusterRoleBinding"));
+        assert!(doc.contains("name: system:auth-delegator"));
+        // 헬스 probe.
+        assert!(doc.contains("livenessProbe"));
+        assert!(doc.contains("readinessProbe"));
+        // (llm-d.ai/* 표준 라벨은 서빙 Deployment 쪽에 붙음 — routing_docs 아님)
+    }
+
+    // 벤더별 메트릭명: Furiosa 는 furiosa_llm_* 를 명시, vLLM/RBLN 은 기본값(파라미터 없음).
+    #[test]
+    fn furiosa_extractor_specifies_furiosa_metric_names() {
+        let a = App::new();
+        let furiosa = a.routing_docs("qwen-embed", "furiosa", "Qwen/Qwen3-Embedding-8B");
+        assert!(furiosa.contains("furiosa_llm_num_requests_waiting"));
+        assert!(furiosa.contains("furiosa_llm_kv_cache_usage_percent"));
+        assert!(furiosa.contains("furiosa_llm_cache_config_info"));
+
+        let rbln = a.routing_docs("koni", "rbln", "koni/x");
+        assert!(!rbln.contains("furiosa_llm_"), "vLLM/RBLN uses vllm:* defaults, no furiosa specs");
     }
 }
