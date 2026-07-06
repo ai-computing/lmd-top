@@ -1,0 +1,54 @@
+# kubectl krew plugin manifest for lmd-top.
+#
+# Install (self-hosted, before krew-index submission):
+#   kubectl krew install --manifest-url https://raw.githubusercontent.com/gspark-etri/lmd-top/main/plugins/lmd-top.yaml
+# After it lands in the central index:
+#   kubectl krew install lmd-top
+# Then run the full TUI as a kubectl subcommand (all features intact):
+#   kubectl lmd-top                 # or:  kubectl lmd-top --mode admin
+#
+# The plugin is the same static binary — deploy/compile still work because they
+# shell out to `kubectl apply`, and running under kubectl guarantees kubectl is present.
+#
+# Per release: update `version`, the four `uri`s, and each `sha256`
+# (the release job publishes <tarball>.sha256 alongside each asset).
+apiVersion: krew.googlecontainertools.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: lmd-top
+spec:
+  version: v0.34.0
+  homepage: https://github.com/gspark-etri/lmd-top
+  shortDescription: Terminal observability & ops for llm-d clusters
+  description: |
+    lmd-top correlates the four layers of an llm-d serving stack — Gateway,
+    EPP/InferencePool, model servers, and heterogeneous accelerators (NVIDIA,
+    Rebellions, Furiosa) — in one terminal UI. It reads your existing
+    Prometheus and Kubernetes and stores no data of its own; scale/restart/
+    stop plus RBLN/Furiosa compile & deploy are gated by a permission mode.
+    Point at a cluster with LMD_PROM (Prometheus) and LMD_NS (namespace).
+  caveats: |
+    * Needs cluster access via your kubeconfig, and Prometheus reachable at
+      $LMD_PROM (e.g. a NodePort or `kubectl port-forward`).
+    * A truecolor terminal with braille/box-drawing glyphs is recommended.
+  platforms:
+    - selector: { matchLabels: { os: linux, arch: amd64 } }
+      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.34.0/lmd-top-v0.34.0-x86_64-linux.tar.gz
+      sha256: "REPLACE_WITH_x86_64_linux_SHA256"
+      bin: lmd-top
+      files: [{ from: "*/lmd-top", to: "." }]
+    - selector: { matchLabels: { os: linux, arch: arm64 } }
+      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.34.0/lmd-top-v0.34.0-aarch64-linux.tar.gz
+      sha256: "REPLACE_WITH_aarch64_linux_SHA256"
+      bin: lmd-top
+      files: [{ from: "*/lmd-top", to: "." }]
+    - selector: { matchLabels: { os: darwin, arch: arm64 } }
+      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.34.0/lmd-top-v0.34.0-aarch64-darwin.tar.gz
+      sha256: "REPLACE_WITH_aarch64_darwin_SHA256"
+      bin: lmd-top
+      files: [{ from: "*/lmd-top", to: "." }]
+    - selector: { matchLabels: { os: darwin, arch: amd64 } }
+      uri: https://github.com/gspark-etri/lmd-top/releases/download/v0.34.0/lmd-top-v0.34.0-x86_64-darwin.tar.gz
+      sha256: "REPLACE_WITH_x86_64_darwin_SHA256"
+      bin: lmd-top
+      files: [{ from: "*/lmd-top", to: "." }]

@@ -1,0 +1,49 @@
+name: release
+
+# 태그(v*)를 밀면 플랫폼별 사전 빌드 바이너리 tarball + sha256 을 GitHub Release 로 올린다.
+# 설치 용이성용: krew 매니페스트 · install.sh · cargo-binstall 이 이 자산을 가리킨다.
+# 기능은 그대로(동일 바이너리) — 배포 방식만 쉬워질 뿐.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.arch }}-${{ matrix.os_name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,     target: x86_64-unknown-linux-gnu,  arch: x86_64,  os_name: linux }
+          - { runner: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu, arch: aarch64, os_name: linux }
+          - { runner: macos-latest,      target: aarch64-apple-darwin,      arch: aarch64, os_name: darwin }
+          - { runner: macos-13,          target: x86_64-apple-darwin,       arch: x86_64,  os_name: darwin }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update stable && rustup default stable && rustup target add ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          ver="${GITHUB_REF_NAME}"
+          name="lmd-top-${ver}-${{ matrix.arch }}-${{ matrix.os_name }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/lmd-top" "dist/$name/lmd-top"
+          cp README.md LICENSE "dist/$name/" 2>/dev/null || true
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
+          echo "tarball=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.pkg.outputs.tarball }}
+            ${{ steps.pkg.outputs.tarball }}.sha256

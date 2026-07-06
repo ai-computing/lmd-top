@@ -46,24 +46,40 @@
 
 ## 설치
 
-**빌드된 바이너리** (Linux x86_64):
+단일 정적 바이너리(glibc만)가 `kubectl`을 구동하는 구조라, 설치는 "바이너리를 PATH에 얹기"가 전부입니다. 아래 중 편한 걸 고르세요 — **모든 기능(컴파일/배포 포함)은 방식과 무관하게 동일**합니다.
+
+**kubectl 플러그인** (클러스터 운영자 권장) — 풀 TUI 를 `kubectl lmd-top` 으로 실행:
 
 ```bash
-VER=v0.34.0   # 최신 버전: https://github.com/gspark-etri/lmd-top/releases/latest
-curl -fsSL "https://github.com/gspark-etri/lmd-top/releases/download/$VER/lmd-top-$VER-x86_64-linux.tar.gz" | tar xz
-sudo install -m 0755 lmd-top /usr/local/bin/
+# 중앙 krew-index 등록 전까지는 자체 매니페스트로:
+kubectl krew install --manifest-url https://raw.githubusercontent.com/gspark-etri/lmd-top/main/plugins/lmd-top.yaml
+kubectl lmd-top                      # 또는: kubectl lmd-top --mode admin
 ```
 
-릴리스마다 `.sha256` 체크섬이 함께 게시됩니다.
+`kubectl` 아래서 돌므로 kubectl 존재가 보장되고, scale/stop/restart 와 RBLN/Furiosa 컴파일·배포(생성한 매니페스트를 `kubectl apply`)가 사용자 kubeconfig 권한으로 바로 동작합니다.
 
-**소스 빌드** (Rust 툴체인과 C 링커 `cc`/`gcc` 만 있으면 됩니다):
+**원라이너 설치** (사전 빌드 바이너리 → `~/.local/bin`, Rust 툴체인 불필요):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gspark-etri/lmd-top/main/install.sh | sh
+#   ... | sh -s -- --version v0.34.0            # 버전 고정
+#   ... | sh -s -- --bin-dir /usr/local/bin     # 시스템 전역(쓰기 권한 필요)
+```
+
+OS/arch(Linux/macOS · x86_64/aarch64) 자동 감지 → 릴리스 tarball 다운로드 → `.sha256` 검증 → 설치. 수동 등가:
+
+```bash
+VER=v0.34.0   # 최신: https://github.com/gspark-etri/lmd-top/releases/latest
+curl -fsSL "https://github.com/gspark-etri/lmd-top/releases/download/$VER/lmd-top-$VER-x86_64-linux.tar.gz" | tar xz
+sudo install -m 0755 "lmd-top-$VER-x86_64-linux/lmd-top" /usr/local/bin/
+```
+
+**소스 빌드** (개발자용; Rust 툴체인 + C 링커 필요):
 
 ```bash
 git clone https://github.com/gspark-etri/lmd-top.git && cd lmd-top
-./install.sh                 # 누락된 사전 요구사항을 설치한 뒤 `cargo install` 실행
-#   ./install.sh --check     # 무엇이 있고 없는지만 확인(설치는 안 함)
-#   ./install.sh --with-demo # agg 도 설치하고 데모 GIF 까지 생성
-# 수동 설치: cargo install --path .
+./install.sh --from-source        # cargo install(+사전요구); --with-demo 는 GIF 까지 재생성
+# 수동: cargo install --path .
 ```
 
 **실행 요구사항:**
