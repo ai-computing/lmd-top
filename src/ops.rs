@@ -132,6 +132,26 @@ impl CompileForm {
 }
 
 /// 배포(서빙) 옵션 편집 폼 — `d` → 편집 → Enter → Deployment 매니페스트 미리보기.
+/// 배치(placement) 선택 화면 — deploy 폼에서 place 필드를 고를 때, 후보 노드/디바이스의
+/// 현재 상태(유휴/전체/util/mem/스케줄가능)를 컬럼으로 나열해 근거를 보고 고르게 한다.
+#[derive(Clone)]
+pub struct PlacePick {
+    pub cursor: usize,
+    pub rows: Vec<PlaceRow>,
+}
+#[derive(Clone)]
+pub struct PlaceRow {
+    pub value: String, // place 필드에 넣을 값("any" · "spread" · 노드 hostname)
+    pub label: String, // 표시 이름("any"/"spread"/hostname)
+    pub free: i64,     // 유휴(살아있고 미점유) 동종 디바이스 수
+    pub total: i64,    // 노드의 동종 디바이스 총수
+    pub util: f64,     // 평균 util %
+    pub mem_used: f64,
+    pub mem_total: f64,
+    pub schedulable: bool, // ready & !cordoned & 드라이버 존재
+    pub note: String,      // "any"/"spread" 설명 또는 스케줄 불가 사유
+}
+
 /// replicas·replica당 디바이스·노드 배치를 고른다(컴파일 폼과 대칭).
 #[derive(Clone)]
 pub struct DeployForm {

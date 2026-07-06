@@ -1157,8 +1157,29 @@ fn ui_loop(
                         handle_edit_form!(app, compile_form, compile_form_submit, k.code);
                         continue;
                     }
+                    // Placement picker (deploy 폼의 place 필드에서 드릴) — 후보 노드 상태 목록.
+                    if app.place_picker.is_some() {
+                        match k.code {
+                            KeyCode::Up | KeyCode::Char('k') => app.place_pick_move(-1),
+                            KeyCode::Down | KeyCode::Char('j') => app.place_pick_move(1),
+                            KeyCode::Enter => app.place_pick_apply(),
+                            KeyCode::Esc | KeyCode::Char('q') => app.place_picker = None,
+                            _ => {}
+                        }
+                        continue;
+                    }
                     // Deploy/serving options form overlay.
                     if app.deploy_form.is_some() {
+                        // place 필드에서 Enter → 노드 상태 목록에서 배치 선택(다음 화면).
+                        let on_place = {
+                            let f = app.deploy_form.as_ref().unwrap();
+                            !f.editing
+                                && f.fields.get(f.cursor).map(|x| x.key == "place").unwrap_or(false)
+                        };
+                        if on_place && matches!(k.code, KeyCode::Enter) {
+                            app.open_place_picker();
+                            continue;
+                        }
                         handle_edit_form!(app, deploy_form, deploy_form_submit, k.code);
                         continue;
                     }

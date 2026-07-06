@@ -663,3 +663,92 @@ pub(super) fn preview_overlay(f: &mut Frame, app: &App) {
         area,
     );
 }
+
+/// Placement 선택 화면 — deploy 폼의 place 필드에서 열리는 후보 노드 상태 목록(컬럼).
+/// 유휴/전체 디바이스·평균 util·메모리·스케줄 가능 여부를 보고 배치를 고른다.
+pub(super) fn place_picker_overlay(f: &mut Frame, app: &App) {
+    let Some(p) = &app.place_picker else { return };
+    let full = f.area();
+    let h = (p.rows.len() as u16) + 5;
+    let w = full.width.saturating_sub(6).clamp(74, 110);
+    let area = centered(full, w, h.min(full.height.saturating_sub(2)));
+    f.render_widget(Clear, area);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  {:<20} {:>7}  {:>5}  {:>13}  {}",
+            "NODE", "FREE", "UTIL", "MEM(GB)", "STATUS"
+        ),
+        Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+    )));
+    for (i, r) in p.rows.iter().enumerate() {
+        let sel = i == p.cursor;
+        let pseudo = r.value == "any" || r.value == "spread";
+        let name_c = if !r.schedulable {
+            C_BAD()
+        } else if pseudo {
+            C_ACC()
+        } else {
+            Color::White
+        };
+        let (free_s, util_s, mem_s, status_s, status_c) = if pseudo {
+            (
+                String::new(),
+                String::new(),
+                String::new(),
+                r.note.clone(),
+                C_DIM(),
+            )
+        } else if r.schedulable {
+            (
+                format!("{}/{}", r.free, r.total),
+                if r.util.is_nan() {
+                    "–".into()
+                } else {
+                    format!("{:.0}%", r.util)
+                },
+                format!("{:.0}/{:.0}", r.mem_used, r.mem_total),
+                format!("✓ {} free", r.free),
+                if r.free > 0 { C_OK() } else { C_WARN() },
+            )
+        } else {
+            (
+                format!("{}/{}", r.free, r.total),
+                if r.util.is_nan() {
+                    "–".into()
+                } else {
+                    format!("{:.0}%", r.util)
+                },
+                format!("{:.0}/{:.0}", r.mem_used, r.mem_total),
+                format!("✗ {}", r.note),
+                C_BAD(),
+            )
+        };
+        let mut line = Line::from(vec![
+            Span::styled(
+                format!("{} {:<20} ", if sel { "▎" } else { " " }, truncw(&r.label, 20)),
+                Style::default().fg(name_c).add_modifier(if sel {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+            ),
+            Span::styled(
+                format!("{:>7}  ", free_s),
+                Style::default().fg(if r.free > 0 { C_OK() } else { C_DIM() }),
+            ),
+            Span::styled(format!("{:>5}  ", util_s), Style::default().fg(C_DIM())),
+            Span::styled(format!("{:>13}  ", mem_s), Style::default().fg(C_DIM())),
+            Span::styled(status_s, Style::default().fg(status_c)),
+        ]);
+        if sel {
+            line.style = Style::default().bg(C_HL());
+        }
+        lines.push(line);
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block_active("placement · ↑↓ 노드 선택 · Enter 적용 · Esc 취소")),
+        area,
+    );
+}
