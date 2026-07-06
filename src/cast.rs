@@ -273,3 +273,21 @@ fn json_escape(s: &str) -> String {
     }
     o
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_escape_specials_controls_and_unicode() {
+        assert_eq!(json_escape("plain text"), "plain text");
+        // 따옴표·역슬래시.
+        assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
+        // 개행·탭·캐리지리턴.
+        assert_eq!(json_escape("l1\nl2\tx\r"), "l1\\nl2\\tx\\r");
+        // 기타 제어문자(NUL, ESC)는 \uXXXX.
+        assert_eq!(json_escape("\u{0}\u{1b}"), "\\u0000\\u001b");
+        // 비제어 유니코드는 그대로 유지.
+        assert_eq!(json_escape("한글✓"), "한글✓");
+    }
+}

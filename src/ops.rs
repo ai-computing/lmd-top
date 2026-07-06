@@ -371,3 +371,46 @@ pub struct FitEstimate {
     pub verdict: FitVerdict,
     pub tips: Vec<String>, // 구체적 조정 제안
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::Mode;
+
+    #[test]
+    fn action_required_mode_and_risk_label() {
+        // 읽기 전용은 observe, 로그는 debug, 변경은 admin, 파괴적은 danger.
+        assert_eq!(Action::Info.required_mode(), Mode::Observe);
+        assert_eq!(Action::Yaml.required_mode(), Mode::Observe);
+        assert_eq!(Action::Pivot('p').required_mode(), Mode::Observe);
+        assert_eq!(Action::Logs.required_mode(), Mode::Debug);
+        assert_eq!(Action::Deploy.required_mode(), Mode::Admin);
+        assert_eq!(Action::Cordon.required_mode(), Mode::Admin);
+        assert_eq!(Action::Delete.required_mode(), Mode::Danger);
+        assert_eq!(Action::RouteDelete.required_mode(), Mode::Danger);
+        // risk_label 은 required_mode 의 이름과 일치.
+        assert_eq!(Action::Info.risk_label(), "observe");
+        assert_eq!(Action::Delete.risk_label(), "danger");
+    }
+
+    #[test]
+    fn action_verb_maps_every_variant() {
+        assert_eq!(Action::Info.verb(), "info");
+        assert_eq!(Action::Compile("rbln").verb(), "compile");
+        assert_eq!(Action::Deploy.verb(), "deploy");
+        assert_eq!(Action::Stop.verb(), "stop");
+        assert_eq!(Action::Logs.verb(), "logs");
+        assert_eq!(Action::Scale.verb(), "scale");
+        assert_eq!(Action::Restart.verb(), "restart");
+        assert_eq!(Action::Cordon.verb(), "cordon");
+        assert_eq!(Action::Uncordon.verb(), "cordon");
+        assert_eq!(Action::Yaml.verb(), "yaml");
+        assert_eq!(Action::Delete.verb(), "delete");
+        assert_eq!(Action::DeleteJob.verb(), "delete");
+        assert_eq!(Action::Objective.verb(), "objective");
+        assert_eq!(Action::RouteRename.verb(), "route edit");
+        assert_eq!(Action::RouteRetarget.verb(), "route edit");
+        assert_eq!(Action::RouteDelete.verb(), "route edit");
+        assert_eq!(Action::Pivot('m').verb(), "go");
+    }
+}
