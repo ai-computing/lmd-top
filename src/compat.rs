@@ -1,6 +1,6 @@
-//! NPU 컴파일 지원 모델 판별 — 벤더 공식 지원 목록(src/npu-compat.json, 바이너리에 임베드)에서
-//! HF/GPU 모델이 RBLN·Furiosa 로 컴파일 가능한지 계열 키워드로 매칭.
-//! 목록 갱신은 npu-compat.json 만 고치면 됨(코드 무관).
+//! NPU compile-support detection — matches HF/GPU models against family keywords in the vendors' official
+//! support list (src/npu-compat.json, embedded in the binary) to see if they compile for RBLN / Furiosa.
+//! To update the list, edit only npu-compat.json (no code changes needed).
 
 use serde::Deserialize;
 use std::sync::OnceLock;
@@ -29,16 +29,21 @@ const RAW: &str = include_str!("npu-compat.json");
 
 fn db() -> &'static Vec<Family> {
     static DB: OnceLock<Vec<Family>> = OnceLock::new();
-    DB.get_or_init(|| serde_json::from_str::<Db>(RAW).map(|d| d.families).unwrap_or_default())
+    DB.get_or_init(|| {
+        serde_json::from_str::<Db>(RAW)
+            .map(|d| d.families)
+            .unwrap_or_default()
+    })
 }
 
-/// 모델 id/이름에 매칭되는 지원 계열(가장 먼저 매칭되는 것). 대소문자 무시.
+/// Supported family matching the model id/name (the first match). Case-insensitive.
 pub fn family_of(model_id: &str) -> Option<&'static Family> {
     let lc = model_id.to_lowercase();
-    db().iter().find(|f| f.matches.iter().any(|m| lc.contains(m.as_str())))
+    db().iter()
+        .find(|f| f.matches.iter().any(|m| lc.contains(m.as_str())))
 }
 
-/// 이 모델을 컴파일할 수 있는 벤더 목록("rbln"/"furiosa"). 없으면 빈 벡터.
+/// Vendors that can compile this model ("rbln" / "furiosa"). Empty vector if none.
 pub fn compilable_vendors(model_id: &str) -> Vec<&'static str> {
     let mut v = Vec::new();
     if let Some(f) = family_of(model_id) {
@@ -63,7 +68,10 @@ mod tests {
 
     #[test]
     fn matches_known_families() {
-        assert_eq!(family_of("meta-llama/Llama-3.1-8B-Instruct").map(|f| f.name.as_str()), Some("Llama"));
+        assert_eq!(
+            family_of("meta-llama/Llama-3.1-8B-Instruct").map(|f| f.name.as_str()),
+            Some("Llama")
+        );
         assert!(compilable_vendors("meta-llama/Llama-3.1-8B").contains(&"rbln"));
         assert!(compilable_vendors("meta-llama/Llama-3.1-8B").contains(&"furiosa"));
         // Gemma → RBLN only.
@@ -71,7 +79,7 @@ mod tests {
         assert!(g.contains(&"rbln") && !g.contains(&"furiosa"));
         // Qwen3.
         assert!(compilable_vendors("Qwen/Qwen3-4B").contains(&"furiosa"));
-        // 미지원 모델 → 빈 목록.
+        // Unsupported model → empty list.
         assert!(compilable_vendors("some-org/totally-unknown-arch").is_empty());
     }
 }

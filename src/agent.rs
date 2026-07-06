@@ -1,13 +1,13 @@
 //! Agent-facing machine-readable state (`--snapshot --json`).
-//! 화면 파싱 없이 AI agent 가 상태·가능 액션을 이해하도록 큐레이트된 안정 스키마를 내보낸다.
-//! 내부 Snapshot 과 분리된 스키마 → 내부 리팩터가 계약을 깨지 않음. schema 버전으로 관리.
+//! Exports a curated, stable schema so an AI agent can understand state and available actions without screen scraping.
+//! Schema decoupled from the internal Snapshot → internal refactors don't break the contract. Managed via schema version.
 
-use crate::app::{diagnose, snapshot_alerts, Sev};
+use crate::app::{diagnose, snapshot_alerts, Action, Sev};
 use crate::collect::Snapshot;
 use crate::config::Config;
 use serde::Serialize;
 
-/// NaN → null(None) 로 정규화(agent 가 "값 없음"을 명확히 구분).
+/// Normalize NaN → null (None) so the agent clearly distinguishes "no value".
 fn opt(v: f64) -> Option<f64> {
     if v.is_nan() {
         None
@@ -37,6 +37,7 @@ struct AgentState {
     models: Vec<Mdl>,
     artifacts: Vec<Artifact>,
     stored: Vec<Stored>,
+    compiles: Vec<Compile>,
     pools: Vec<Pl>,
     per_model_perf: Vec<Pm>,
     diagnosis: Diag,
@@ -76,7 +77,7 @@ struct Acc {
     util_pct: f64,
     mem_used_gb: f64,
     mem_total_gb: f64,
-    unified_mem: bool, // true → mem is the host-shared unified pool (GB10 등)
+    unified_mem: bool, // true → mem is the host-shared unified pool (GB10, etc.)
     mem_bw_pct: Option<f64>, // DCGM MEM_COPY_UTIL — memory bandwidth pressure
     clock_mhz: Option<f64>,
     mem_temp_c: Option<f64>,
@@ -139,10 +140,10 @@ struct Node {
     disk_used_gb: Option<f64>,
     disk_total_gb: Option<f64>,
     load1: Option<f64>,
-    npu: Option<String>, // NPU 드라이버/SDK 요약(라벨 기반) — 컴파일 가능 노드 판별
+    npu: Option<String>, // NPU driver/SDK summary (label-based) — identifies compile-capable nodes
 }
 
-/// Deploy 컴파일 변형(아티팩트) — 모델 소스·저장 위치·컴파일/서빙 옵션.
+/// Deploy compile variant (artifact) — model source, storage location, compile/serving options.
 #[derive(Serialize)]
 struct Artifact {
     model: String,
@@ -154,7 +155,7 @@ struct Artifact {
     compile_opts: std::collections::BTreeMap<String, String>,
 }
 
-/// 공유 스토어 인벤토리(배포 무관) — HF 원본/NPU 컴파일본.
+/// Shared store inventory (deployment-agnostic) — HF originals / NPU-compiled builds.
 #[derive(Serialize)]
 struct Stored {
     repo: String,
@@ -164,6 +165,19 @@ struct Stored {
     revision: Option<String>,
     size: String,
     path: String,
+}
+
+/// In-progress/recent compile Jobs (compile-*) — status, elapsed time, progress hints.
+#[derive(Serialize)]
+struct Compile {
+    name: String,
+    model: String,
+    vendor: String,
+    target: String,
+    status: String,
+    age_s: u64,
+    duration_s: Option<u64>,
+    phase: String,
 }
 
 #[derive(Serialize)]
@@ -184,11 +198,11 @@ struct Act {
     id: String,
     label: String,
     risk: &'static str,          // permission mode required
-    requires_confirmation: bool, // UI 에서 y/n 확인
+    requires_confirmation: bool, // y/n confirmation in the UI
 }
 
 fn build(s: &Snapshot, cfg: &Config) -> AgentState {
-    // 클러스터 요약(summary_bar 와 동일 집계).
+    // Cluster summary (same aggregation as summary_bar).
     let (mut busy, mut util_sum, mut mu, mut mt, mut pw) = (0usize, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for a in &s.accel {
         if a.util > 5.0 {
@@ -200,8 +214,10 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
         pw += a.power;
     }
     let n = s.accel.len().max(1);
-    let serving = s.models.iter().filter(|m| m.ready > 0).count();
-    let (disk_u, disk_t): (f64, f64) = s.nodes.iter().fold((0.0, 0.0), |(u, t), nd| (u + nd.disk_used_gb, t + nd.disk_total_gb));
+    let serving = s.serving_count();
+    let (disk_u, disk_t): (f64, f64) = s.nodes.iter().fold((0.0, 0.0), |(u, t), nd| {
+        (u + nd.disk_used_gb, t + nd.disk_total_gb)
+    });
 
     let nodes = s
         .nodes
@@ -213,10 +229,22 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             cpu_pct: opt(nd.cpu_pct),
             mem_used_gb: nd.mem_used_gb,
             mem_total_gb: nd.mem_total_gb,
-            disk_used_gb: if nd.disk_total_gb > 0.0 { Some(nd.disk_used_gb) } else { None },
-            disk_total_gb: if nd.disk_total_gb > 0.0 { Some(nd.disk_total_gb) } else { None },
+            disk_used_gb: if nd.disk_total_gb > 0.0 {
+                Some(nd.disk_used_gb)
+            } else {
+                None
+            },
+            disk_total_gb: if nd.disk_total_gb > 0.0 {
+                Some(nd.disk_total_gb)
+            } else {
+                None
+            },
             load1: opt(nd.load1),
-            npu: if nd.npu.is_empty() { None } else { Some(nd.npu.clone()) },
+            npu: if nd.npu.is_empty() {
+                None
+            } else {
+                Some(nd.npu.clone())
+            },
         })
         .collect();
 
@@ -227,14 +255,32 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             model: a.model.clone(),
             family: a.family.clone(),
             engine: a.engine.clone(),
-            node: if a.node.is_empty() { None } else { Some(a.node.clone()) },
-            source: if a.source.is_empty() { None } else { Some(a.source.clone()) },
-            storage: if a.mount.is_empty() { None } else { Some(a.mount.clone()) },
+            node: if a.node.is_empty() {
+                None
+            } else {
+                Some(a.node.clone())
+            },
+            source: if a.source.is_empty() {
+                None
+            } else {
+                Some(a.source.clone())
+            },
+            storage: if a.mount.is_empty() {
+                None
+            } else {
+                Some(a.mount.clone())
+            },
             compile_opts: a.opts.iter().cloned().collect(),
         })
         .collect();
 
-    let noneify = |v: &str| if v.is_empty() || v == "-" { None } else { Some(v.to_string()) };
+    let noneify = |v: &str| {
+        if v.is_empty() || v == "-" {
+            None
+        } else {
+            Some(v.to_string())
+        }
+    };
     let stored = s
         .stored
         .iter()
@@ -246,6 +292,21 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             revision: noneify(&m.revision),
             size: m.size.clone(),
             path: m.path.clone(),
+        })
+        .collect();
+
+    let compiles = s
+        .compiles
+        .iter()
+        .map(|c| Compile {
+            name: c.name.clone(),
+            model: c.model.clone(),
+            vendor: c.vendor.clone(),
+            target: c.target.clone(),
+            status: c.status.clone(),
+            age_s: c.age_secs,
+            duration_s: c.duration_secs,
+            phase: c.phase.clone(),
         })
         .collect();
 
@@ -268,7 +329,11 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             power_w: a.power,
             alive: a.alive,
             throttling: a.throttle > 0.0,
-            busy_model: if a.busy_model.is_empty() { None } else { Some(a.busy_model.clone()) },
+            busy_model: if a.busy_model.is_empty() {
+                None
+            } else {
+                Some(a.busy_model.clone())
+            },
         })
         .collect();
 
@@ -286,7 +351,11 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             kv_pct: m.kv.map(|x| x * 100.0),
             tps: m.tps,
             ttft_p95_s: m.ttft,
-            route: if m.route.is_empty() { None } else { Some(m.route.clone()) },
+            route: if m.route.is_empty() {
+                None
+            } else {
+                Some(m.route.clone())
+            },
             status: m.status.clone(),
         })
         .collect();
@@ -301,7 +370,11 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             queue: opt(p.queue),
             kv: opt(p.kv),
             saturation: opt(p.sat),
-            epp: if p.epp.is_empty() { None } else { Some(p.epp.clone()) },
+            epp: if p.epp.is_empty() {
+                None
+            } else {
+                Some(p.epp.clone())
+            },
         })
         .collect();
 
@@ -334,30 +407,103 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
 
     let alerts = snapshot_alerts(s)
         .into_iter()
-        .map(|a| Alrt { severity: sev_str(a.sev), key: a.key, message: a.msg })
-        .collect();
-
-    // 가능한 액션: 모델별 scale 토글(권한 admin, 확인 필요) — UI 의 `s` 와 동일.
-    let actions = s
-        .models
-        .iter()
-        .map(|m| {
-            let target = if m.desired == 0 { 1 } else { 0 };
-            Act {
-                id: format!("scale:{}:{}", m.name, target),
-                label: format!("scale {} → {} replica(s)", m.name, target),
-                risk: "admin",
-                requires_confirmation: true,
-            }
+        .map(|a| Alrt {
+            severity: sev_str(a.sev),
+            key: a.key,
+            message: a.msg,
         })
         .collect();
+
+    let mut actions: Vec<Act> = Vec::new();
+    let mut push_action = |id: String, label: String, action: Action, confirm: bool| {
+        actions.push(Act {
+            id,
+            label,
+            risk: action.risk_label(),
+            requires_confirmation: confirm,
+        });
+    };
+    for m in &s.models {
+        push_action(
+            format!("yaml:model:{}", m.name),
+            format!("show live YAML for {}", m.name),
+            Action::Yaml,
+            false,
+        );
+        push_action(
+            format!("logs:model:{}", m.name),
+            format!("tail logs for {}", m.name),
+            Action::Logs,
+            false,
+        );
+        push_action(
+            format!("restart:{}", m.name),
+            format!("rollout restart {}", m.name),
+            Action::Restart,
+            true,
+        );
+        if m.desired > 0 {
+            push_action(
+                format!("stop:{}", m.name),
+                format!("stop {} (scale to 0)", m.name),
+                Action::Stop,
+                true,
+            );
+        }
+        {
+            let target = if m.desired == 0 { 1 } else { 0 };
+            push_action(
+                format!("scale:{}:{}", m.name, target),
+                format!("scale {} → {} replica(s)", m.name, target),
+                Action::Scale,
+                true,
+            );
+        }
+    }
+    for r in &s.routes {
+        push_action(
+            format!("route-rename:{}:{}", r.route, r.path),
+            format!("rename route {} in {}", r.path, r.route),
+            Action::RouteRename,
+            true,
+        );
+        push_action(
+            format!("route-retarget:{}:{}", r.route, r.path),
+            format!("retarget route {} in {}", r.path, r.route),
+            Action::RouteRetarget,
+            true,
+        );
+        push_action(
+            format!("route-delete:{}:{}", r.route, r.path),
+            format!("delete route {} from {}", r.path, r.route),
+            Action::RouteDelete,
+            true,
+        );
+    }
+    for c in &s.compiles {
+        push_action(
+            format!("logs:compile:{}", c.name),
+            format!("tail logs for compile job {}", c.name),
+            Action::Logs,
+            false,
+        );
+        push_action(
+            format!("delete-job:{}", c.name),
+            format!("delete compile job {}", c.name),
+            Action::DeleteJob,
+            true,
+        );
+    }
 
     AgentState {
         schema: "lmd-top/agent-state/v2",
         ts: s.ts,
         namespace: cfg.ns.clone(),
         prometheus: cfg.prom.clone(),
-        gateway: Gw { addr: s.gw_addr.clone(), ok: s.gw_ok },
+        gateway: Gw {
+            addr: s.gw_addr.clone(),
+            ok: s.gw_ok,
+        },
         epp_in_path: s.epp_in_path,
         cluster: Cluster {
             nodes: s.nodes.len(),
@@ -379,6 +525,7 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
         models,
         artifacts,
         stored,
+        compiles,
         pools,
         per_model_perf,
         diagnosis,
@@ -387,8 +534,8 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
     }
 }
 
-/// stdout 으로 pretty JSON 상태 트리 출력.
-/// agent 상태를 JSON 문자열로(테스트·계약 검증용 시임). emit_json 이 이걸 출력.
+/// Print the pretty JSON state tree to stdout.
+/// Agent state as a JSON string (a seam for tests/contract verification). emit_json prints this.
 pub fn to_json(snap: &Snapshot, cfg: &Config) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&build(snap, cfg))
 }
@@ -406,10 +553,10 @@ mod tests {
 
     #[test]
     fn json_contract_schema_and_keys() {
-        // 합성 스냅샷 → agent JSON → 계약(스키마 버전·핵심 키) 검증. 클러스터 무관.
+        // Synthetic snapshot → agent JSON → verify the contract (schema version, core keys). Cluster-agnostic.
         let mut snap = Snapshot::default();
         snap.nodes.push(crate::collect::NodeInfo {
-            name: "etri-001".into(),
+            name: "node-a".into(),
             load1: 0.5,
             mem_used_gb: 10.0,
             mem_total_gb: 100.0,
@@ -425,12 +572,12 @@ mod tests {
         let cfg = Config::default();
         let s = to_json(&snap, &cfg).expect("serialize");
         let v: serde_json::Value = serde_json::from_str(&s).expect("valid json");
-        // 계약: schema 버전 v2, 최상위 키, node.npu 필드 노출.
+        // Contract: schema version v2, top-level keys, node.npu field exposed.
         assert_eq!(v["schema"], "lmd-top/agent-state/v2");
         for k in ["cluster", "nodes", "artifacts", "stored", "models"] {
             assert!(v.get(k).is_some(), "top-level key '{}' present", k);
         }
-        assert_eq!(v["nodes"][0]["name"], "etri-001");
+        assert_eq!(v["nodes"][0]["name"], "node-a");
         assert_eq!(v["nodes"][0]["npu"], "RNGD drv2026.3.0");
     }
 }

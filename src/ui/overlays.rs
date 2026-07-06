@@ -3,31 +3,50 @@
 
 use super::*;
 use crate::app::App;
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 /// NPU 컴파일 옵션 편집 폼 오버레이 — ↑↓ 필드, ←→ 프리셋, e 커스텀 입력, Enter 매니페스트.
 /// 선택 인프라 대비 메모리 적합성(OOM/tight)과 조정 제안을 실시간 표시.
 pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
-    let Some(form) = &app.compile_form else { return };
+    let Some(form) = &app.compile_form else {
+        return;
+    };
     let fit = app.compile_fit(form);
     let full = f.area();
     // 높이: 헤더3 + family1 + 필드 + 도움말1 + fit 2 + 추정근거1 + tips + 여백.
-    let h = (form.fields.len() as u16) + (fit.tips.len() as u16) + (app.compile_preflight(form).len() as u16) + 14;
+    let h = (form.fields.len() as u16)
+        + (fit.tips.len() as u16)
+        + (app.compile_preflight(form).len() as u16)
+        + 14;
     let area = centered(full, 92, h.min(full.height.saturating_sub(2)));
     f.render_widget(Clear, area);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("  model  ", Style::default().fg(C_DIM())),
-        Span::styled(form.model_id.clone(), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD)),
         Span::styled(
-            format!("   engine {}   ~{}", form.engine, fit.params_b.map(|p| format!("{}B", fmt_num(p))).unwrap_or_else(|| "?".into())),
+            form.model_id.clone(),
+            Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "   engine {}   ~{}",
+                form.engine,
+                fit.params_b
+                    .map(|p| format!("{}B", fmt_num(p)))
+                    .unwrap_or_else(|| "?".into())
+            ),
             Style::default().fg(C_DIM()),
         ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  target ", Style::default().fg(C_DIM())),
         Span::styled(
-            format!("compiled/{}/{}/{}", form.model_id.replace('/', "--"), form.vendor, form.target()),
+            format!(
+                "compiled/{}/{}/{}",
+                form.model_id.replace('/', "--"),
+                form.vendor,
+                form.target()
+            ),
             Style::default().fg(C_ACC()),
         ),
     ]));
@@ -45,89 +64,145 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
         lines.push(choice_row(fld, active, active && form.editing));
     }
     lines.push(Line::from(""));
-    // 활성 필드 도움말
+    // Active field help.
     if let Some(fld) = form.fields.get(form.cursor) {
-        lines.push(Line::from(Span::styled(format!("  {}", fld.help), Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", fld.help),
+            Style::default().fg(C_DIM()),
+        )));
     }
-    // ── 서빙 메모리 추정(advisory) — 컴파일 자체를 막는 게 아니라 "이 옵션으로 서빙 시 칩에
-    //    들어갈지" 참고용 힌트. 이름 기반 휴리스틱이라 과신 금지 → OOM 도 빨간 ✗ 대신 부드럽게. ──
     let (vcol, glyph, hint) = match fit.verdict {
-        crate::app::FitVerdict::Fits => (C_OK(), "●", "여유 있음"),
-        crate::app::FitVerdict::Tight => (C_WARN(), "◐", "빠듯할 수 있음"),
-        crate::app::FitVerdict::Oom => (C_WARN(), "◐", "칩당 부족할 수 있음 → tp↑ 또는 max-len↓ 고려"),
-        crate::app::FitVerdict::Unknown => (C_DIM(), "○", "추정 불가"),
+        crate::app::FitVerdict::Fits => (C_OK(), "●", "fits"),
+        crate::app::FitVerdict::Tight => (C_WARN(), "◐", "tight"),
+        crate::app::FitVerdict::Oom => (
+            C_WARN(),
+            "◐",
+            "may not fit per chip; consider tp↑ or max-len↓",
+        ),
+        crate::app::FitVerdict::Unknown => (C_DIM(), "○", "unknown"),
     };
     lines.push(Line::from(vec![
         Span::styled("  serving fit~ ", Style::default().fg(C_DIM())),
-        Span::styled(format!("{} {}", glyph, hint), Style::default().fg(vcol).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{} {}", glyph, hint),
+            Style::default().fg(vcol).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!(
                 "   ≈{:.0}/{:.0} GiB/chip × {} chip   (w {:.0} + kv {:.0} + oh {:.0})",
-                fit.per_chip_gb, fit.avail_gb, fit.chips as i64, fit.weight_gb, fit.kv_gb, fit.overhead_gb
+                fit.per_chip_gb,
+                fit.avail_gb,
+                fit.chips as i64,
+                fit.weight_gb,
+                fit.kv_gb,
+                fit.overhead_gb
             ),
             Style::default().fg(C_DIM()),
         ),
     ]));
-    // 추정 근거·한계 명시(이름 기반 휴리스틱 — 컴파일을 막지 않는 참고 지표).
     lines.push(Line::from(Span::styled(
-        "  ※ 참고용 추정(이름 기반 파라미터·KV 선형근사) — 컴파일 진행엔 영향 없음, 실제는 컴파일로 확인",
+        "  Advisory estimate only (name-based params + linear KV approximation); compile is not blocked.",
         Style::default().fg(C_DIM()),
     )));
     for tip in &fit.tips {
-        let tcol = if tip.starts_with('⚠') { C_BAD() } else { C_WARN() };
-        lines.push(Line::from(Span::styled(format!("   → {}", tip), Style::default().fg(tcol))));
+        let tcol = if tip.starts_with('⚠') {
+            C_BAD()
+        } else {
+            C_WARN()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("   → {}", tip),
+            Style::default().fg(tcol),
+        )));
     }
-    // ── preflight: 컴파일 전 전제조건 사전 점검(누락 툴체인·레지스트리·드라이버 등 사전 방어) ──
     let pf = app.compile_preflight(form);
     let pf_ok = pf.iter().all(|(ok, _)| *ok);
     lines.push(Line::from(Span::styled(
-        format!("  preflight {}", if pf_ok { "● ready" } else { "✗ blocked" }),
-        Style::default().fg(if pf_ok { C_OK() } else { C_BAD() }).add_modifier(Modifier::BOLD),
+        format!(
+            "  preflight {}",
+            if pf_ok { "● ready" } else { "✗ blocked" }
+        ),
+        Style::default()
+            .fg(if pf_ok { C_OK() } else { C_BAD() })
+            .add_modifier(Modifier::BOLD),
     )));
     for (ok, msg) in &pf {
-        let (g, c) = if *ok { ("✓", C_DIM()) } else { ("✗", C_BAD()) };
-        lines.push(Line::from(Span::styled(format!("   {} {}", g, msg), Style::default().fg(c))));
+        let warn = msg.starts_with('⚠');
+        let (g, c) = if warn {
+            ("⚠", C_WARN())
+        } else if *ok {
+            ("✓", C_DIM())
+        } else {
+            ("✗", C_BAD())
+        };
+        let text = msg.trim_start_matches('⚠').trim_start();
+        lines.push(Line::from(Span::styled(
+            format!("   {} {}", g, text),
+            Style::default().fg(c),
+        )));
     }
     let title = if form.editing {
-        format!("compile · {} · TYPING custom — Enter/Esc confirm · Backspace del", form.vendor)
+        format!(
+            "compile · {} · TYPING custom — Enter/Esc confirm · Backspace del",
+            form.vendor
+        )
     } else {
-        format!("compile · {} · ↑↓ 항목 · ←→ 값 · e 직접입력 · Enter→적용확인(vi로 YAML 편집 가능) · q 취소", form.vendor)
+        format!(
+            "compile · {} · ↑↓ field · ←→ value · e edit · Enter→confirm apply · q cancel",
+            form.vendor
+        )
     };
     f.render_widget(Paragraph::new(lines).block(block(&title)), area);
 }
 
-/// 배포(서빙) 옵션 편집 폼 오버레이 — replicas·디바이스·노드 배치. 용량(수요 대 총/유휴) 표시.
+/// Deploy options form overlay.
 pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
     let Some(form) = &app.deploy_form else { return };
     let fit = app.deploy_fit(form);
     let full = f.area();
-    let h = (form.fields.len() as u16) + (fit.tips.len() as u16) + (app.deploy_preflight(form).len() as u16) + 17;
+    let h = (form.fields.len() as u16)
+        + (fit.tips.len() as u16)
+        + (app.deploy_preflight(form).len() as u16)
+        + 17;
     let w = full.width.saturating_sub(6).clamp(72, 104);
     let area = centered(full, w, h.min(full.height.saturating_sub(2)));
     f.render_widget(Clear, area);
-    // 섹션 헤더 헬퍼(구획을 명확히).
-    let section = |t: &str| Line::from(Span::styled(format!("── {} ", t), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)));
+    let section = |t: &str| {
+        Line::from(Span::styled(
+            format!("── {} ", t),
+            Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+        ))
+    };
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("  model  ", Style::default().fg(C_DIM())),
-        Span::styled(form.model_id.clone(), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("   engine {}", form.engine), Style::default().fg(C_DIM())),
+        Span::styled(
+            form.model_id.clone(),
+            Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("   engine {}", form.engine),
+            Style::default().fg(C_DIM()),
+        ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  serve   ", Style::default().fg(C_DIM())),
         Span::styled(form.mount.clone(), Style::default().fg(C_ACC())),
     ]));
     lines.push(Line::from(""));
-    lines.push(section("설정  (↑↓ 항목 · ←→ 값 선택 · e 직접입력)"));
+    lines.push(section("settings  (↑↓ field · ←→ value · e edit)"));
     for (i, fld) in form.fields.iter().enumerate() {
         let active = i == form.cursor;
         lines.push(choice_row(fld, active, active && form.editing));
     }
     if let Some(fld) = form.fields.get(form.cursor) {
-        lines.push(Line::from(Span::styled(format!("   ↳ {}", fld.help), Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled(
+            format!("   ↳ {}", fld.help),
+            Style::default().fg(C_DIM()),
+        )));
     }
     lines.push(Line::from(""));
-    lines.push(section("용량  (요청 디바이스가 유휴에 들어가는지)"));
+    lines.push(section("capacity  (requested devices vs free devices)"));
     let vcol = match fit.verdict {
         crate::app::FitVerdict::Fits => C_OK(),
         crate::app::FitVerdict::Tight => C_WARN(),
@@ -142,105 +217,200 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
     };
     lines.push(Line::from(vec![
         Span::styled("  cap    ", Style::default().fg(C_DIM())),
-        Span::styled(format!("{} {}", glyph, fit.verdict.label()), Style::default().fg(vcol).add_modifier(Modifier::BOLD)),
         Span::styled(
-            format!("   demand {} dev   free {} (res {}) / {} over {} node", fit.demand, fit.free, fit.resource_free, fit.total, fit.nodes),
+            format!("{} {}", glyph, fit.verdict.label()),
+            Style::default().fg(vcol).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "   demand {} dev   free {} (res {}) / {} over {} node",
+                fit.demand, fit.free, fit.resource_free, fit.total, fit.nodes
+            ),
             Style::default().fg(C_DIM()),
         ),
     ]));
     for tip in &fit.tips {
-        let tcol = if tip.starts_with('⚠') { C_BAD() } else { C_WARN() };
-        lines.push(Line::from(Span::styled(format!("   → {}", tip), Style::default().fg(tcol))));
+        let tcol = if tip.starts_with('⚠') {
+            C_BAD()
+        } else {
+            C_WARN()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("   → {}", tip),
+            Style::default().fg(tcol),
+        )));
     }
-    // ── preflight: apply 전에 "이 배포가 실패할 조건"을 미리 검사(사전 방어) ──
     let pf = app.deploy_preflight(form);
     let pf_ok = pf.iter().all(|(ok, _)| *ok);
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("── preflight ", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
-        Span::styled("(apply 전 실패 조건 미리 검사) ", Style::default().fg(C_DIM())),
         Span::styled(
-            if pf_ok { "● 모두 통과 — apply 가능" } else { "✗ 아래 ✗ 항목 해결 필요" },
-            Style::default().fg(if pf_ok { C_OK() } else { C_BAD() }).add_modifier(Modifier::BOLD),
+            "── preflight ",
+            Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "(checks likely apply failures) ",
+            Style::default().fg(C_DIM()),
+        ),
+        Span::styled(
+            if pf_ok {
+                "● passed — apply ready"
+            } else {
+                "✗ resolve failed checks below"
+            },
+            Style::default()
+                .fg(if pf_ok { C_OK() } else { C_BAD() })
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
     for (ok, msg) in &pf {
-        let (g, c) = if *ok { ("✓", C_OK()) } else { ("✗", C_BAD()) };
+        let (g, c) = if *ok {
+            ("✓", C_OK())
+        } else {
+            ("✗", C_BAD())
+        };
         lines.push(Line::from(vec![
-            Span::styled(format!("   {} ", g), Style::default().fg(c).add_modifier(Modifier::BOLD)),
-            Span::styled(msg.clone(), Style::default().fg(if *ok { C_DIM() } else { C_WARN() })),
+            Span::styled(
+                format!("   {} ", g),
+                Style::default().fg(c).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                msg.clone(),
+                Style::default().fg(if *ok { C_DIM() } else { C_WARN() }),
+            ),
         ]));
     }
     let title = if form.editing {
-        "deploy · 직접입력 중 — Enter/Esc 확인 · Backspace 삭제".to_string()
+        "deploy · editing custom value — Enter/Esc confirm · Backspace delete".to_string()
     } else if pf_ok {
-        "deploy · ↑↓ 항목 · ←→ 값 · e 직접입력 · Enter→적용확인(vi로 YAML 편집 가능) · q 취소".to_string()
+        "deploy · ↑↓ field · ←→ value · e edit · Enter→confirm apply · q cancel".to_string()
     } else {
-        "deploy · preflight ✗ 있음 · Enter→적용확인(적용은 막힐 수 있음) · q 취소".to_string()
+        "deploy · preflight has failures · Enter→confirm anyway · q cancel".to_string()
     };
     f.render_widget(Paragraph::new(lines).block(block(&title)), area);
 }
 
-/// 라우트 편집 폼 — rename(경로 텍스트) 또는 retarget(백엔드 선택).
+/// Route edit form — rename path text or retarget backend.
 pub(super) fn route_form_overlay(f: &mut Frame, app: &App) {
     let Some(form) = &app.route_form else { return };
     let full = f.area();
-    let h = if form.rename { 8 } else { (form.choices.len() as u16).min(10) + 8 };
+    let h = if form.rename {
+        8
+    } else {
+        (form.choices.len() as u16).min(10) + 8
+    };
     let area = centered(full, 76, h.min(full.height.saturating_sub(2)));
     f.render_widget(Clear, area);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("  route  ", Style::default().fg(C_DIM())),
-        Span::styled(form.path.clone(), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("   in {}", form.route), Style::default().fg(C_DIM())),
+        Span::styled(
+            form.path.clone(),
+            Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("   in {}", form.route),
+            Style::default().fg(C_DIM()),
+        ),
     ]));
     lines.push(Line::from(""));
     let title = if form.rename {
-        lines.push(Line::from(Span::styled("  새 경로(gateway path) 입력:", Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled(
+            "  New gateway path:",
+            Style::default().fg(C_DIM()),
+        )));
         lines.push(Line::from(vec![
             Span::raw("    "),
-            Span::styled(format!("{}_", form.value), Style::default().fg(C_WARN()).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled(
+                format!("{}_", form.value),
+                Style::default()
+                    .fg(C_WARN())
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
         ]));
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("  예: /gpu/qwen · /rngd/exaone · /atom/gemma  (URLRewrite 가 /v1 로 치환)", Style::default().fg(C_DIM()))));
-        "route rename · 타이핑 · Enter 확인 · Backspace 삭제 · Esc 취소"
+        lines.push(Line::from(Span::styled(
+            "  Examples: /gpu/qwen · /rngd/exaone · /atom/gemma  (URLRewrite maps to /v1)",
+            Style::default().fg(C_DIM()),
+        )));
+        "route rename · type · Enter confirm · Backspace delete · Esc cancel"
     } else {
-        lines.push(Line::from(Span::styled("  이 경로를 보낼 백엔드 선택(↑↓ · Enter):", Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled(
+            "  Select the backend for this path (↑↓ · Enter):",
+            Style::default().fg(C_DIM()),
+        )));
         for (i, c) in form.choices.iter().enumerate() {
             let active = i == form.cursor;
             let (g, st) = if active {
-                ("▶ ", Style::default().fg(Color::Black).bg(C_ACC()).add_modifier(Modifier::BOLD))
+                (
+                    "▶ ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(C_ACC())
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
                 ("  ", Style::default().fg(Color::Gray))
             };
             lines.push(Line::from(vec![Span::styled(format!("  {}{}", g, c), st)]));
         }
-        "route retarget · ↑↓ 선택 · Enter 확인 · Esc 취소"
+        "route retarget · ↑↓ select · Enter confirm · Esc cancel"
     };
-    f.render_widget(Paragraph::new(lines).block(block(title).border_style(Style::default().fg(C_WARN()))), area);
+    f.render_widget(
+        Paragraph::new(lines).block(block(title).border_style(Style::default().fg(C_WARN()))),
+        area,
+    );
 }
 
 /// Enter 컨텍스트 액션 메뉴 오버레이 — 가능한 동작을 라벨+설명+단축키로. 발견 가능한 UX.
 pub(super) fn action_menu_overlay(f: &mut Frame, app: &App) {
     let Some(menu) = &app.action_menu else { return };
     let full = f.area();
-    let w = 58u16;
+    let w = 70u16.min(full.width.saturating_sub(2));
     let h = (menu.items.len() as u16) + 4;
     let area = centered(full, w, h.min(full.height.saturating_sub(2)));
     f.render_widget(Clear, area);
     let mut lines: Vec<Line> = Vec::new();
     for (i, it) in menu.items.iter().enumerate() {
         let active = i == menu.cursor;
-        let marker = if active { "▶ " } else { "  " };
-        let base = if active {
+        let mode = it.action.required_mode();
+        let locked = !app.can(mode); // current permission mode can't run it — show, but dimmed with ⊘
+        let marker = if active {
+            "▶ "
+        } else if locked {
+            "⊘ "
+        } else {
+            "  "
+        };
+        let base = if locked {
+            Style::default().fg(C_DIM())
+        } else if active {
             Style::default().fg(C_HL()).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         };
+        let mcol = if locked {
+            C_DIM()
+        } else {
+            match mode {
+                crate::app::Mode::Observe => C_DIM(),
+                crate::app::Mode::Debug => C_ACC(),
+                crate::app::Mode::Admin => C_WARN(),
+                crate::app::Mode::Danger => C_BAD(),
+            }
+        };
+        let key_col = if locked { C_DIM() } else { C_ACC() };
         let mut line = Line::from(vec![
             Span::styled(marker, base),
-            Span::styled(format!("[{}] ", it.key), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("[{}] ", it.key),
+                Style::default().fg(key_col).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(format!("{:<9}", it.label), base),
+            Span::styled(
+                format!("{:<7}", it.action.risk_label()),
+                Style::default().fg(mcol),
+            ),
             Span::styled(it.desc.to_string(), Style::default().fg(C_DIM())),
         ]);
         if active {
@@ -249,7 +419,88 @@ pub(super) fn action_menu_overlay(f: &mut Frame, app: &App) {
         lines.push(line);
     }
     f.render_widget(
-        Paragraph::new(lines).block(block(&format!("{} · ↑↓ + Enter · [key] shortcut · q cancel", truncw(&menu.title, 40)))),
+        Paragraph::new(lines).block(block(&format!(
+            "{} · ↑↓ Enter · [key] · ⊘=needs higher mode · q cancel",
+            truncw(&menu.title, 34)
+        ))),
+        area,
+    );
+}
+
+/// 커맨드 팔레트 오버레이(`:`) — 쿼리 줄 + 퍼지 매칭 결과(매칭 문자 강조·점수순).
+pub(super) fn palette_overlay(f: &mut Frame, app: &App) {
+    let Some(p) = &app.palette else { return };
+    let full = f.area();
+    let rows = p.rows();
+    let w = 56u16;
+    // 최대 12행 표시(넘치면 커서 주변만).
+    let visible = rows.len().min(12);
+    let h = (visible as u16) + 4;
+    let area = centered(full, w, h.min(full.height.saturating_sub(2)));
+    f.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    // 쿼리 프롬프트.
+    lines.push(Line::from(vec![
+        Span::styled(
+            " : ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(C_ACC())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {}", p.query),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("▏", Style::default().fg(C_ACC())),
+    ]));
+    lines.push(Line::from(""));
+
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no match)",
+            Style::default().fg(C_DIM()),
+        )));
+    } else {
+        // 커서가 보이도록 윈도우 시작 계산.
+        let cursor = rows.iter().position(|r| r.3).unwrap_or(0);
+        let start = cursor.saturating_sub(visible.saturating_sub(1));
+        for (label, hint, idx, active) in rows.iter().skip(start).take(visible) {
+            let marker = if *active { "▶ " } else { "  " };
+            let base = if *active {
+                Style::default().fg(C_HL()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let mut sp = vec![Span::styled(marker, base)];
+            // 라벨 — 매칭된 char 는 accent+bold 로 강조.
+            for (ci, ch) in label.chars().enumerate() {
+                let st = if idx.contains(&ci) {
+                    Style::default()
+                        .fg(C_ACC())
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else {
+                    base
+                };
+                sp.push(Span::styled(ch.to_string(), st));
+            }
+            // 힌트(오른쪽 흐리게).
+            sp.push(Span::styled(
+                format!("  · {}", hint),
+                Style::default().fg(C_DIM()),
+            ));
+            let mut line = Line::from(sp);
+            if *active {
+                line.style = Style::default().bg(C_HL());
+            }
+            lines.push(line);
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(block("command palette · type to filter · ↑↓ + Enter · Esc")),
         area,
     );
 }
@@ -265,13 +516,19 @@ pub(super) fn model_color(name: &str) -> Color {
         Color::Rgb(148, 226, 213), // teal
         Color::Rgb(242, 205, 205), // rosewater
     ];
-    let h: u32 = name.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+    let h: u32 = name
+        .bytes()
+        .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
     PAL[(h as usize) % PAL.len()]
 }
 
 /// 옵션 한 줄 — 모든 후보를 인라인으로(선택만 강조). k9s 처럼 후보군이 한눈에.
 /// editing 이면 자유 입력 버퍼를 보여줌. 커스텀 값(프리셋에 없음)은 노란 강조 토큰.
-pub(super) fn choice_row(fld: &crate::app::CompileField, active: bool, editing: bool) -> Line<'static> {
+pub(super) fn choice_row(
+    fld: &crate::app::CompileField,
+    active: bool,
+    editing: bool,
+) -> Line<'static> {
     let name_style = if active {
         Style::default().fg(C_HL()).add_modifier(Modifier::BOLD)
     } else {
@@ -282,14 +539,22 @@ pub(super) fn choice_row(fld: &crate::app::CompileField, active: bool, editing: 
         Span::styled(format!("{:<17}", fld.label), name_style),
     ];
     if editing {
-        sp.push(Span::styled(format!("[ {}_ ]", fld.value), Style::default().fg(C_WARN()).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)));
+        sp.push(Span::styled(
+            format!("[ {}_ ]", fld.value),
+            Style::default()
+                .fg(C_WARN())
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ));
     } else {
         let mut matched = false;
         for c in &fld.choices {
             let is = *c == fld.value;
             matched |= is;
             let st = if is {
-                Style::default().fg(Color::Black).bg(C_ACC()).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(C_ACC())
+                    .add_modifier(Modifier::BOLD)
             } else if active {
                 Style::default().fg(Color::Gray)
             } else {
@@ -299,23 +564,37 @@ pub(super) fn choice_row(fld: &crate::app::CompileField, active: bool, editing: 
             sp.push(Span::raw(" "));
         }
         if !matched && !fld.value.is_empty() {
-            sp.push(Span::styled(format!(" {} ", fld.value), Style::default().fg(Color::Black).bg(C_WARN()).add_modifier(Modifier::BOLD)));
+            sp.push(Span::styled(
+                format!(" {} ", fld.value),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(C_WARN())
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
     }
     Line::from(sp)
 }
 
-/// 서빙 목표(SLO) 편집 폼 오버레이 — TTFT/TPOT/E2E/tok·s 목표를 그리드로.
+/// Serving objective edit form overlay.
 pub(super) fn objective_form_overlay(f: &mut Frame, app: &App) {
-    let Some(form) = &app.objective_form else { return };
+    let Some(form) = &app.objective_form else {
+        return;
+    };
     let full = f.area();
     let area = centered(full, 72, (form.fields.len() as u16) + 8);
     f.render_widget(Clear, area);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("  model  ", Style::default().fg(C_DIM())),
-        Span::styled(form.model.clone(), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD)),
-        Span::styled("   목표를 정하면 Perf 뷰에서 충족여부·조정제안을 표시", Style::default().fg(C_DIM())),
+        Span::styled(
+            form.model.clone(),
+            Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "   Perf shows pass/fail status and tuning advice when objectives are set",
+            Style::default().fg(C_DIM()),
+        ),
     ]));
     lines.push(Line::from(""));
     for (i, fld) in form.fields.iter().enumerate() {
@@ -324,7 +603,10 @@ pub(super) fn objective_form_overlay(f: &mut Frame, app: &App) {
     }
     lines.push(Line::from(""));
     if let Some(fld) = form.fields.get(form.cursor) {
-        lines.push(Line::from(Span::styled(format!("  {}", fld.help), Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", fld.help),
+            Style::default().fg(C_DIM()),
+        )));
     }
     let title = if form.editing {
         "objective · TYPING — Enter/Esc confirm".to_string()
@@ -345,7 +627,9 @@ pub(super) fn fmt_num(v: f64) -> String {
 
 /// 매니페스트 미리보기 오버레이(compile/deploy dry-run) — YAML 을 그대로 표시. `q`/esc 닫기, ↑↓ 스크롤.
 pub(super) fn preview_overlay(f: &mut Frame, app: &App) {
-    let Some((title, body)) = &app.preview else { return };
+    let Some((title, body)) = &app.preview else {
+        return;
+    };
     let full = f.area();
     let area = centered(full, 92, 30);
     f.render_widget(Clear, area);
@@ -363,11 +647,19 @@ pub(super) fn preview_overlay(f: &mut Frame, app: &App) {
         })
         .collect();
     f.render_widget(
-        Paragraph::new(lines).scroll((app.preview_scroll, 0)).block(block(&format!(
-            "{} · ↑↓ scroll · w save{} · q close",
-            title,
-            if app.preview_apply { " · v validate · a apply(admin)" } else { "" }
-        ))),
+        // 실패 이유(kubectl 에러)는 한 줄이 매우 길어 가로로 잘리므로 줄바꿈(wrap)으로 전부 보이게.
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((app.preview_scroll, 0))
+            .block(block(&format!(
+                "{} · ↑↓ scroll · w save{} · q close",
+                title,
+                if app.preview_apply {
+                    " · v validate · a apply(admin)"
+                } else {
+                    ""
+                }
+            ))),
         area,
     );
 }
