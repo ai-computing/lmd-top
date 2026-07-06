@@ -1,12 +1,16 @@
-//! kubectl 셸링 헬퍼 — JSON 으로 받아 serde_json::Value 로 파싱.
-//! Phase 1 은 kubectl 셸링으로 시작(빠름). 추후 kube-rs 네이티브 승격 검토.
+//! kubectl shell-out helpers — receive JSON and parse into serde_json::Value.
+//! Phase 1 starts with kubectl shell-out (fast). Consider promoting to native kube-rs later.
 
 use anyhow::{anyhow, Result};
 use tokio::process::Command;
 
-/// `kubectl <args...> -o json` 실행 → Value. (args 에 -o json 은 호출자가 포함)
+/// Run `kubectl <args...> -o json` → Value. (caller includes -o json in args)
 pub async fn get_json(args: &[&str]) -> Result<serde_json::Value> {
-    let out = Command::new("kubectl").args(args).arg("--request-timeout=15s").output().await?;
+    let out = Command::new("kubectl")
+        .args(args)
+        .arg("--request-timeout=15s")
+        .output()
+        .await?;
     if !out.status.success() {
         return Err(anyhow!(
             "kubectl {:?} failed: {}",
@@ -18,12 +22,12 @@ pub async fn get_json(args: &[&str]) -> Result<serde_json::Value> {
     Ok(v)
 }
 
-/// `.data["<key>"]` 텍스트 추출 (ConfigMap 등).
+/// Extract `.data["<key>"]` text (ConfigMap, etc.).
 pub fn cm_data<'a>(cm: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     cm["data"][key].as_str()
 }
 
-/// pod 로그 tail (동기, UI 스레드에서 호출). --all-containers, 최근 tail 줄.
+/// Tail pod logs (sync, called from UI thread). --all-containers, last `tail` lines.
 pub fn logs(ns: &str, pod: &str, tail: u32) -> Result<Vec<String>> {
     let out = std::process::Command::new("kubectl")
         .args([
@@ -40,22 +44,38 @@ pub fn logs(ns: &str, pod: &str, tail: u32) -> Result<Vec<String>> {
     if !out.status.success() {
         return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).lines().map(|l| l.to_string()).collect())
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .collect())
 }
 
-/// 파드 로그 마지막 비어있지 않은 줄(진행 힌트용). async·짧은 타임아웃. 실패 시 None.
+/// Last non-empty line of pod logs (for progress hints). async, short timeout. None on failure.
 pub async fn last_log_line(ns: &str, pod: &str) -> Option<String> {
-    let out = Command::new("kubectl").args(["logs", pod, "-n", ns, "--tail=5", "--request-timeout=4s"]).output().await.ok()?;
+    let out = Command::new("kubectl")
+        .args(["logs", pod, "-n", ns, "--tail=5", "--request-timeout=4s"])
+        .output()
+        .await
+        .ok()?;
     if !out.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&out.stdout).lines().rev().map(|l| l.trim()).find(|l| !l.is_empty()).map(|l| {
-        // 너무 길면 자름(패널 폭 보호).
-        if l.chars().count() > 60 { format!("{}…", l.chars().take(60).collect::<String>()) } else { l.to_string() }
-    })
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .rev()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .map(|l| {
+            // Truncate if too long (protect panel width).
+            if l.chars().count() > 60 {
+                format!("{}…", l.chars().take(60).collect::<String>())
+            } else {
+                l.to_string()
+            }
+        })
 }
 
-/// 변경 액션: deploy scale. (M5) — 동기 std 사용(블로킹 UI 스레드에서 호출).
+/// Mutating action: deploy scale. (M5) — uses sync std (called from blocking UI thread).
 pub fn scale_deploy(ns: &str, name: &str, replicas: i64) -> Result<()> {
     let out = std::process::Command::new("kubectl")
         .args([
@@ -77,14 +97,18 @@ pub fn scale_deploy(ns: &str, name: &str, replicas: i64) -> Result<()> {
     Ok(())
 }
 
-/// 매니페스트(다중 문서)에서 `kind: Job` 인 문서의 metadata.name 을 모은다.
-/// 컴파일 Job 재적용 전 기존 Job 선삭제용. 파싱 실패 문서는 조용히 건너뜀.
+/// Collect metadata.name of `kind: Job` documents from a (multi-document) manifest.
+/// Used to pre-delete existing Jobs before re-applying a compile Job. Unparseable documents are silently skipped.
 fn job_names(yaml: &str) -> Vec<String> {
     let mut names = Vec::new();
     for doc in yaml.split("\n---\n") {
         if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(doc) {
             if v.get("kind").and_then(|k| k.as_str()) == Some("Job") {
-                if let Some(n) = v.get("metadata").and_then(|m| m.get("name")).and_then(|n| n.as_str()) {
+                if let Some(n) = v
+                    .get("metadata")
+                    .and_then(|m| m.get("name"))
+                    .and_then(|n| n.as_str())
+                {
                     names.push(n.to_string());
                 }
             }
@@ -93,29 +117,101 @@ fn job_names(yaml: &str) -> Vec<String> {
     names
 }
 
-/// 매니페스트를 stdin 으로 `kubectl apply -f -` 적용. dry_run=true 면 서버 dry-run(무변경 검증).
-/// 성공 시 kubectl 출력(생성/변경 요약)을 반환.
+fn dry_run_job_name(name: &str) -> String {
+    const SUFFIX: &str = "-dryrun";
+    if name.len() + SUFFIX.len() <= 63 {
+        return format!("{}{}", name, SUFFIX);
+    }
+    let keep = 63usize.saturating_sub(SUFFIX.len());
+    format!(
+        "{}{}",
+        name.chars()
+            .take(keep)
+            .collect::<String>()
+            .trim_matches('-'),
+        SUFFIX
+    )
+}
+
+/// Server-side dry-run should validate the generated Job spec as a new Job. If a real Job
+/// of the same name already exists, `kubectl apply --dry-run=server` still checks the update
+/// path and fails on Job spec.template immutability. Rename only Job documents for dry-run
+/// validation; real apply keeps the exact names and deletes/recreates Jobs above.
+fn rename_jobs_for_dry_run(yaml: &str) -> String {
+    let mut docs = Vec::new();
+    for doc in yaml.split("\n---\n") {
+        if doc.trim().is_empty() {
+            continue;
+        }
+        let Ok(mut v) = serde_yaml::from_str::<serde_yaml::Value>(doc) else {
+            docs.push(doc.to_string());
+            continue;
+        };
+        if v.get("kind").and_then(|k| k.as_str()) == Some("Job") {
+            if let Some(name) = v
+                .get("metadata")
+                .and_then(|m| m.get("name"))
+                .and_then(|n| n.as_str())
+                .map(dry_run_job_name)
+            {
+                if let Some(meta) = v.get_mut("metadata").and_then(|m| m.as_mapping_mut()) {
+                    meta.insert(
+                        serde_yaml::Value::String("name".into()),
+                        serde_yaml::Value::String(name),
+                    );
+                }
+            }
+        }
+        docs.push(serde_yaml::to_string(&v).unwrap_or_else(|_| doc.to_string()));
+    }
+    docs.join("---\n")
+}
+
+/// Apply a manifest via stdin with `kubectl apply -f -`. dry_run=true does a server dry-run (validate without changes).
+/// On success, returns kubectl output (created/changed summary).
 pub fn apply_manifest(ns: &str, yaml: &str, dry_run: bool) -> Result<String> {
     use std::io::Write;
     use std::process::Stdio;
-    // Job 은 spec.template 이 immutable → 같은 이름 Job 이 이미 있으면 `apply` 가
-    // "field is immutable" 로 거부한다(컴파일 재시도가 실패하는 원인). 컴파일 Job 은
-    // 일회성이라 재적용 = 재실행이 맞으므로, 실적용 전 기존 Job 을 먼저 지운다(있으면).
+    // A Job's spec.template is immutable → if a Job of the same name already exists, `apply`
+    // rejects it with "field is immutable" (the cause of compile-retry failures). Compile Jobs
+    // are one-shot, so re-apply = re-run is correct; delete the existing Job first (if any) before the real apply.
     if !dry_run {
         for name in job_names(yaml) {
             let _ = std::process::Command::new("kubectl")
-                .args(["delete", "job", &name, "-n", ns, "--ignore-not-found", "--wait=true", "--request-timeout=8s"])
+                .args([
+                    "delete",
+                    "job",
+                    &name,
+                    "-n",
+                    ns,
+                    "--ignore-not-found",
+                    "--wait=true",
+                    "--request-timeout=8s",
+                ])
                 .output();
         }
     }
+    let dry_run_yaml;
+    let input_yaml = if dry_run && !job_names(yaml).is_empty() {
+        dry_run_yaml = rename_jobs_for_dry_run(yaml);
+        dry_run_yaml.as_str()
+    } else {
+        yaml
+    };
     let mut cmd = std::process::Command::new("kubectl");
     cmd.args(["apply", "-n", ns, "-f", "-", "--request-timeout=8s"]);
     if dry_run {
         cmd.arg("--dry-run=server");
     }
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
-    child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?.write_all(yaml.as_bytes())?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("no stdin"))?
+        .write_all(input_yaml.as_bytes())?;
     let out = child.wait_with_output()?;
     if !out.status.success() {
         return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
@@ -123,19 +219,18 @@ pub fn apply_manifest(ns: &str, yaml: &str, dry_run: bool) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// 파드 삭제(`kubectl delete pod <name> -n ns`) — 재스케줄 유도. admin 액션.
+/// Delete pod (`kubectl delete pod <name> -n ns`) — triggers reschedule. admin action.
 pub fn delete_pod(ns: &str, name: &str) -> Result<()> {
-    let out = std::process::Command::new("kubectl").args(["delete", "pod", name, "-n", ns, "--wait=false", "--request-timeout=8s"]).output()?;
-    if !out.status.success() {
-        return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    Ok(())
-}
-
-/// 컴파일 Job 삭제(`kubectl delete job <name>`) — 진행 취소/정리. 파드도 함께 정리됨.
-pub fn delete_job(ns: &str, name: &str) -> Result<()> {
     let out = std::process::Command::new("kubectl")
-        .args(["delete", "job", name, "-n", ns, "--ignore-not-found", "--wait=false", "--request-timeout=8s"])
+        .args([
+            "delete",
+            "pod",
+            name,
+            "-n",
+            ns,
+            "--wait=false",
+            "--request-timeout=8s",
+        ])
         .output()?;
     if !out.status.success() {
         return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
@@ -143,9 +238,35 @@ pub fn delete_job(ns: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// 리소스 live YAML 조회(`kubectl get <kind> <name> [-n ns] -o yaml`) — 읽기전용 preview 용.
+/// Delete compile Job (`kubectl delete job <name>`) — cancel/clean up in-progress work. Pods are cleaned up too.
+pub fn delete_job(ns: &str, name: &str) -> Result<()> {
+    let out = std::process::Command::new("kubectl")
+        .args([
+            "delete",
+            "job",
+            name,
+            "-n",
+            ns,
+            "--ignore-not-found",
+            "--wait=false",
+            "--request-timeout=8s",
+        ])
+        .output()?;
+    if !out.status.success() {
+        return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(())
+}
+
+/// Fetch live resource YAML (`kubectl get <kind> <name> [-n ns] -o yaml`) — for read-only preview.
 pub fn resource_yaml(kind: &str, ns: Option<&str>, name: &str) -> Result<String> {
-    let mut args: Vec<String> = vec!["get".into(), kind.into(), name.into(), "-o".into(), "yaml".into()];
+    let mut args: Vec<String> = vec![
+        "get".into(),
+        kind.into(),
+        name.into(),
+        "-o".into(),
+        "yaml".into(),
+    ];
     if let Some(n) = ns {
         args.push("-n".into());
         args.push(n.into());
@@ -158,10 +279,19 @@ pub fn resource_yaml(kind: &str, ns: Option<&str>, name: &str) -> Result<String>
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-// ── HTTPRoute 편집(라우트 관리) — get→JSON 수정→server-side apply ──
+// ── HTTPRoute editing (route management) — get→modify JSON→server-side apply ──
 fn route_load(ns: &str, name: &str) -> Result<serde_json::Value> {
     let out = std::process::Command::new("kubectl")
-        .args(["get", "httproute", name, "-n", ns, "-o", "json", "--request-timeout=8s"])
+        .args([
+            "get",
+            "httproute",
+            name,
+            "-n",
+            ns,
+            "-o",
+            "json",
+            "--request-timeout=8s",
+        ])
         .output()?;
     if !out.status.success() {
         return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
@@ -172,9 +302,15 @@ fn route_load(ns: &str, name: &str) -> Result<serde_json::Value> {
 fn route_save(ns: &str, mut v: serde_json::Value) -> Result<String> {
     use std::io::Write;
     use std::process::Stdio;
-    // SSA 를 위해 서버 관리 필드 제거(resourceVersion/managedFields/status 등).
+    // Remove server-managed fields for SSA (resourceVersion/managedFields/status, etc.).
     if let Some(m) = v.get_mut("metadata").and_then(|m| m.as_object_mut()) {
-        for k in ["managedFields", "resourceVersion", "uid", "creationTimestamp", "generation"] {
+        for k in [
+            "managedFields",
+            "resourceVersion",
+            "uid",
+            "creationTimestamp",
+            "generation",
+        ] {
             m.remove(k);
         }
     }
@@ -183,10 +319,25 @@ fn route_save(ns: &str, mut v: serde_json::Value) -> Result<String> {
     }
     let body = serde_json::to_string(&v)?;
     let mut cmd = std::process::Command::new("kubectl");
-    cmd.args(["apply", "--server-side", "--force-conflicts", "-n", ns, "-f", "-", "--request-timeout=8s"]);
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args([
+        "apply",
+        "--server-side",
+        "--force-conflicts",
+        "-n",
+        ns,
+        "-f",
+        "-",
+        "--request-timeout=8s",
+    ]);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
-    child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?.write_all(body.as_bytes())?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("no stdin"))?
+        .write_all(body.as_bytes())?;
     let out = child.wait_with_output()?;
     if !out.status.success() {
         return Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim()));
@@ -194,7 +345,7 @@ fn route_save(ns: &str, mut v: serde_json::Value) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// 라우트 경로 변경(rename) — HTTPRoute 내 matches[].path.value == old 를 new 로.
+/// Change route path (rename) — set matches[].path.value == old to new within the HTTPRoute.
 pub fn route_set_path(ns: &str, route: &str, old: &str, new: &str) -> Result<String> {
     let mut v = route_load(ns, route)?;
     let mut found = false;
@@ -216,7 +367,7 @@ pub fn route_set_path(ns: &str, route: &str, old: &str, new: &str) -> Result<Str
     route_save(ns, v)
 }
 
-/// 라우트 규칙 삭제(delete) — 해당 path 를 가진 rule 제거.
+/// Delete route rule (delete) — remove the rule with the given path.
 pub fn route_delete_rule(ns: &str, route: &str, path: &str) -> Result<String> {
     let mut v = route_load(ns, route)?;
     if let Some(rules) = v["spec"]["rules"].as_array_mut() {
@@ -234,10 +385,20 @@ pub fn route_delete_rule(ns: &str, route: &str, path: &str) -> Result<String> {
     route_save(ns, v)
 }
 
-/// 라우트 백엔드 변경(retarget) — 해당 path 의 backendRefs 를 새 backend/kind 로.
-pub fn route_retarget(ns: &str, route: &str, path: &str, backend: &str, kind: &str) -> Result<String> {
+/// Change route backend (retarget) — set the given path's backendRefs to a new backend/kind.
+pub fn route_retarget(
+    ns: &str,
+    route: &str,
+    path: &str,
+    backend: &str,
+    kind: &str,
+) -> Result<String> {
     let mut v = route_load(ns, route)?;
-    let group = if kind == "InferencePool" { "inference.networking.k8s.io" } else { "" };
+    let group = if kind == "InferencePool" {
+        "inference.networking.k8s.io"
+    } else {
+        ""
+    };
     let mut found = false;
     if let Some(rules) = v["spec"]["rules"].as_array_mut() {
         for rule in rules.iter_mut() {
@@ -246,7 +407,8 @@ pub fn route_retarget(ns: &str, route: &str, path: &str, backend: &str, kind: &s
                 .map(|ms| ms.iter().any(|m| m["path"]["value"].as_str() == Some(path)))
                 .unwrap_or(false);
             if hit {
-                rule["backendRefs"] = serde_json::json!([{ "group": group, "kind": kind, "name": backend }]);
+                rule["backendRefs"] =
+                    serde_json::json!([{ "group": group, "kind": kind, "name": backend }]);
                 found = true;
             }
         }
@@ -257,20 +419,34 @@ pub fn route_retarget(ns: &str, route: &str, path: &str, backend: &str, kind: &s
     route_save(ns, v)
 }
 
-/// 노드 cordon/uncordon — 스케줄 차단/해제. admin 액션(네임스페이스 무관).
+/// Node cordon/uncordon — block/unblock scheduling. admin action (namespace-agnostic).
 pub fn cordon(node: &str, on: bool) -> Result<()> {
     let verb = if on { "cordon" } else { "uncordon" };
-    let out = std::process::Command::new("kubectl").args([verb, node, "--request-timeout=8s"]).output()?;
+    let out = std::process::Command::new("kubectl")
+        .args([verb, node, "--request-timeout=8s"])
+        .output()?;
     if !out.status.success() {
-        return Err(anyhow!("{} failed: {}", verb, String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(anyhow!(
+            "{} failed: {}",
+            verb,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     Ok(())
 }
 
-/// 롤아웃 재시작(`kubectl rollout restart deploy/<name>`) — 롤링 재기동. admin 액션.
+/// Rollout restart (`kubectl rollout restart deploy/<name>`) — rolling restart. admin action.
 pub fn rollout_restart(ns: &str, name: &str) -> Result<()> {
     let out = std::process::Command::new("kubectl")
-        .args(["rollout", "restart", "deployment", name, "-n", ns, "--request-timeout=8s"])
+        .args([
+            "rollout",
+            "restart",
+            "deployment",
+            name,
+            "-n",
+            ns,
+            "--request-timeout=8s",
+        ])
         .output()?;
     if !out.status.success() {
         return Err(anyhow!(
@@ -287,10 +463,10 @@ mod tests {
 
     #[test]
     fn job_names_extracts_only_jobs() {
-        // 다중 문서(ConfigMap---Job) 에서 Job 이름만. flow 스타일 metadata 파싱.
+        // Only Job names from a multi-document manifest (ConfigMap---Job). flow-style metadata parsing.
         let yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata: { name: foo-script, namespace: llm-serving }\ndata: { a: b }\n---\napiVersion: batch/v1\nkind: Job\nmetadata: { name: compile-foo-rbln-tp4, namespace: llm-serving }\nspec: { backoffLimit: 0 }\n";
         assert_eq!(job_names(yaml), vec!["compile-foo-rbln-tp4".to_string()]);
-        // Job 없는 매니페스트(Deployment 등) → 빈 목록(선삭제 안 함).
+        // Manifest with no Job (Deployment, etc.) → empty list (no pre-deletion).
         let dep = "apiVersion: apps/v1\nkind: Deployment\nmetadata: { name: srv }\n";
         assert!(job_names(dep).is_empty());
     }

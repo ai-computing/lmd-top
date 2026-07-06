@@ -1,14 +1,14 @@
-//! 변경 작업 감사 로그 — lmd-top 이 클러스터에 적용한 모든 mutation 을 파일에 남긴다.
-//! "누가(mode)·언제(ts)·무엇을(action)·어디에(target)·결과(ok/FAIL·이유)" 한 줄.
-//! 관측 도구가 실제 변경 작업을 수행하므로, 사후 추적/책임 소재를 위해 필수.
+//! Mutation audit log — lmd-top records every mutation it applies to the cluster to a file.
+//! One line per: "who (mode) · when (ts) · what (action) · where (target) · result (ok/FAIL · reason)".
+//! Since an observability tool performs real mutations, this is essential for after-the-fact tracing/accountability.
 //!
-//! 경로: $LMD_AUDIT > ~/.config/lmd-top/audit.log. 실패해도 앱 흐름은 막지 않는다(best-effort).
-//! 순수 Rust만(외부 시간 크레이트 없음) — epoch 초를 자체 civil-date 계산으로 사람이 읽는 UTC 로.
+//! Path: $LMD_AUDIT > ~/.config/lmd-top/audit.log. Failures don't block app flow (best-effort).
+//! Pure Rust only (no external time crate) — converts epoch seconds to human-readable UTC via its own civil-date computation.
 
 use crate::app::Mode;
 use std::io::Write;
 
-/// 감사 로그 파일 경로. env override → XDG 관례.
+/// Audit log file path. env override → XDG convention.
 fn log_path() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("LMD_AUDIT") {
         return Some(std::path::PathBuf::from(p));
@@ -17,7 +17,7 @@ fn log_path() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(home).join(".config/lmd-top/audit.log"))
 }
 
-/// epoch 초 → "YYYY-MM-DDTHH:MM:SSZ" (UTC). Howard Hinnant civil-from-days 알고리즘.
+/// epoch seconds → "YYYY-MM-DDTHH:MM:SSZ" (UTC). Howard Hinnant civil-from-days algorithm.
 fn iso_utc(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
@@ -36,12 +36,17 @@ fn iso_utc(secs: u64) -> String {
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hh, mm, ss)
 }
 
-/// TSV 필드 안전화 — 개행/탭을 공백으로, 앞 한 줄만(멀티라인 kubectl 에러 대비).
+/// Make a TSV field safe — newlines/tabs to spaces, first line only (for multiline kubectl errors).
 fn sanitize(s: &str) -> String {
-    s.lines().next().unwrap_or("").replace('\t', " ").trim().to_string()
+    s.lines()
+        .next()
+        .unwrap_or("")
+        .replace('\t', " ")
+        .trim()
+        .to_string()
 }
 
-/// 변경 작업 한 건을 기록. result: Ok(요약) | Err(이유). best-effort(실패해도 조용히 무시).
+/// Record one mutation. result: Ok(summary) | Err(reason). best-effort (silently ignored on failure).
 pub fn record(mode: Mode, action: &str, target: &str, result: Result<&str, &str>) {
     let Some(path) = log_path() else { return };
     if let Some(dir) = path.parent() {
@@ -62,15 +67,19 @@ pub fn record(mode: Mode, action: &str, target: &str, result: Result<&str, &str>
         status,
         detail
     );
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = f.write_all(line.as_bytes());
     }
 }
 
-/// `--audit` — 감사 로그 파일 경로와 내용을 표준출력으로. 없으면 안내만.
+/// `--audit` — print the audit log file path and contents to stdout. If absent, just a notice.
 pub fn print_log() {
     let Some(path) = log_path() else {
-        eprintln!("lmd-top: HOME 미설정 — 감사 로그 경로를 정할 수 없음");
+        eprintln!("lmd-top: HOME not set — cannot determine audit log path");
         return;
     };
     match std::fs::read_to_string(&path) {
@@ -79,12 +88,12 @@ pub fn print_log() {
             println!("# ts\tmode\taction\ttarget\tstatus\tdetail");
             print!("{}", body);
         }
-        _ => println!("# audit log 비어있음(변경 작업 없음): {}", path.display()),
+        _ => println!("# audit log empty (no mutations): {}", path.display()),
     }
 }
 
-/// 테스트 전용 락 — `LMD_AUDIT` 환경변수는 프로세스 전역이라, 이를 만지는 테스트끼리
-/// 병렬 실행하면 서로의 값을 덮어써 레이스가 난다. 관련 테스트는 이 락으로 직렬화한다.
+/// Test-only lock — the `LMD_AUDIT` env var is process-global, so tests that touch it
+/// race by overwriting each other's value when run in parallel. Related tests serialize on this lock.
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -97,7 +106,7 @@ mod tests {
         assert_eq!(iso_utc(0), "1970-01-01T00:00:00Z");
         // 2021-01-01T00:00:00Z = 1609459200
         assert_eq!(iso_utc(1_609_459_200), "2021-01-01T00:00:00Z");
-        // 2000-02-29 (윤년) 12:34:56 = 951827696
+        // 2000-02-29 (leap year) 12:34:56 = 951827696
         assert_eq!(iso_utc(951_827_696), "2000-02-29T12:34:56Z");
     }
 
@@ -123,7 +132,7 @@ mod tests {
         assert_eq!(f0.len(), 6);
         assert_eq!(&f0[1..], ["admin", "scale→2", "ds4", "ok", "scaled"]);
         let f1: Vec<&str> = lines[1].split('\t').collect();
-        assert_eq!(&f1[3..], ["p1", "FAIL", "boom"]); // 멀티라인 이유는 첫 줄만
+        assert_eq!(&f1[3..], ["p1", "FAIL", "boom"]); // multiline reason keeps only the first line
         let _ = std::fs::remove_file(&path);
     }
 }

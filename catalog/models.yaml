@@ -46,6 +46,17 @@ models:
         replicas: 1
         uri: pvc://furiosa-artifacts/qwen3-embed
         requires_artifact: true
+  - id: qwen3-4b-fp8
+    display: Qwen3-4B-FP8 (Furiosa)
+    role: chat
+    placements:
+      - engine: furiosa
+        accel: furiosa
+        resource: furiosa.ai/rngd
+        count: 1
+        replicas: 1
+        uri: hf://furiosa-ai/Qwen3-4B-FP8
+        requires_artifact: false
   - id: llama3.1-8b
     display: Llama-3.1-8B-Instruct
     role: chat

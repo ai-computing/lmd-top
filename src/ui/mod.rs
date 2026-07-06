@@ -5,7 +5,9 @@
 use crate::app::{App, Mode, Sev, View};
 use crate::collect::{AccelKind, PerfDetail, Snapshot};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap,
+};
 
 mod theme;
 pub(crate) use theme::*;
@@ -18,13 +20,13 @@ pub(crate) use panel::Dashboard;
 mod overlays;
 use overlays::*;
 
-
 /// 오버레이 종류 — z-order(그리기 순서)와 입력 우선순위의 **단일 출처**.
 /// 지금까지 draw()의 그리기 순서와 main 의 입력 처리 순서가 따로 관리돼 드리프트 위험이 있었다.
 /// 여기 PRECEDENCE 하나로 통일: 위(topmost)일수록 나중에 그려지고(=화면 맨 앞), 키를 먼저 소비.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Overlay {
     Help,
+    ExitConfirm,
     Confirm,
     Palette,
     Alerts,
@@ -39,8 +41,9 @@ pub enum Overlay {
 
 impl Overlay {
     /// topmost 우선. 입력 소비·z-order 공용. (Help 가 가장 위, Logs 가 가장 아래)
-    pub const PRECEDENCE: [Overlay; 11] = [
+    pub const PRECEDENCE: [Overlay; 12] = [
         Overlay::Help,
+        Overlay::ExitConfirm,
         Overlay::Confirm,
         Overlay::Palette,
         Overlay::Alerts,
@@ -57,6 +60,7 @@ impl Overlay {
     pub fn is_open(self, app: &App) -> bool {
         match self {
             Overlay::Help => app.help,
+            Overlay::ExitConfirm => app.exit_confirm,
             Overlay::Confirm => app.confirm.is_some(),
             Overlay::Palette => app.palette.is_some(),
             Overlay::Alerts => app.alerts_panel,
@@ -72,12 +76,16 @@ impl Overlay {
 
     /// 현재 최상위(키를 소비할) 오버레이. 없으면 None(단일키 디스패치로).
     pub fn top(app: &App) -> Option<Overlay> {
-        Overlay::PRECEDENCE.iter().copied().find(|ov| ov.is_open(app))
+        Overlay::PRECEDENCE
+            .iter()
+            .copied()
+            .find(|ov| ov.is_open(app))
     }
 
     fn render(self, f: &mut Frame, app: &App) {
         match self {
             Overlay::Help => help_overlay(f),
+            Overlay::ExitConfirm => exit_confirm_overlay(f, app),
             Overlay::Confirm => confirm_overlay(f, app),
             Overlay::Palette => palette_overlay(f, app),
             Overlay::Alerts => alerts_overlay(f, app),
@@ -98,7 +106,11 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
         // 포커스 모드: 헤더/탭 숨기고 본문 최대화
         let c = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
             .split(f.area());
         title_bar(f, c[0], app);
         (c[1], c[2], None)
@@ -118,7 +130,18 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
         tabs(f, c[2], app);
         (c[3], c[4], Some(c[1]))
     };
-    if app.detail && matches!(app.view, View::Accel | View::Models | View::Overview | View::Pods | View::Nodes | View::Events | View::Launch) {
+    if app.detail
+        && matches!(
+            app.view,
+            View::Accel
+                | View::Models
+                | View::Overview
+                | View::Pods
+                | View::Nodes
+                | View::Events
+                | View::Serving
+        )
+    {
         detail_panel(f, body, app);
     } else {
         match app.view {
@@ -129,7 +152,8 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
             View::Routing => view_routing(f, body, app),
             View::Pods => view_pods(f, body, app),
             View::Perf => view_perf(f, body, app),
-            View::Launch => view_deploy(f, body, app),
+            View::Serving => view_serving(f, body, app),
+            View::Library => view_library(f, body, app),
             View::Events => view_events(f, body, app),
             View::Nodes => view_nodes(f, body, app),
             View::Topo => view_topo(f, body, app),
@@ -149,7 +173,7 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
     }
 }
 
-/// 변경 작업 확인 팝업 — 기본은 No. ←→ 로 Yes/No 선택, Enter 결정.
+/// Mutation confirmation popup. Defaults to No; ←→ selects Yes/No, Enter confirms.
 fn confirm_overlay(f: &mut Frame, app: &App) {
     let Some(pending) = &app.confirm else { return };
     let full = f.area();
@@ -158,7 +182,13 @@ fn confirm_overlay(f: &mut Frame, app: &App) {
     let yes = app.confirm_yes;
     let btn = |label: &str, on: bool| {
         if on {
-            Span::styled(format!("  {}  ", label), Style::default().fg(Color::Black).bg(C_ACC()).add_modifier(Modifier::BOLD))
+            Span::styled(
+                format!("  {}  ", label),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(C_ACC())
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
             Span::styled(format!("  {}  ", label), Style::default().fg(C_DIM()))
         }
@@ -166,27 +196,78 @@ fn confirm_overlay(f: &mut Frame, app: &App) {
     let is_apply = matches!(pending, crate::app::Pending::Apply { .. });
     let mut lines = vec![
         Line::from(""),
-        Line::from(Span::styled(format!("  {}", pending.prompt()), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            format!("  {}", pending.prompt()),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
     ];
     if is_apply {
-        lines.push(Line::from(Span::styled("  자동 생성된 매니페스트를 적용합니다 · e=vi로 열어 수정 · v=검증(dry-run)", Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled(
+            "  Applies a generated manifest · e=edit in vi · v=validate dry-run",
+            Style::default().fg(C_DIM()),
+        )));
     } else {
-        lines.push(Line::from(Span::styled("  이 작업을 실행할까요? 기본 선택은 No 입니다.", Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled(
+            "  Run this operation? Default selection is No.",
+            Style::default().fg(C_DIM()),
+        )));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::raw("      "),
-        btn("Yes 실행", yes),
+        btn("Yes run", yes),
         Span::raw("        "),
-        btn("No 취소", !yes),
+        btn("No cancel", !yes),
     ]));
     let title = if is_apply {
-        "confirm apply · default No · ←→ 선택 · Enter 결정 · e vi편집 · v 검증 · Esc 취소"
+        "confirm apply · default No · ←→ select · Enter confirm · e edit · v validate · Esc cancel"
     } else {
-        "confirm · default No · ←→ 선택 · Enter 결정 · Esc 취소"
+        "confirm · default No · ←→ select · Enter confirm · Esc cancel"
     };
     f.render_widget(
         Paragraph::new(lines).block(block(title).border_style(Style::default().fg(C_WARN()))),
+        area,
+    );
+}
+
+/// Quit confirmation popup. Opened by `q`; Enter/y exits, Esc/n returns to the TUI.
+fn exit_confirm_overlay(f: &mut Frame, _app: &App) {
+    let full = f.area();
+    let area = centered(full, 58, 7);
+    f.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Quit lmd-top?",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  The terminal will be restored and the session will end.",
+            Style::default().fg(C_DIM()),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("      "),
+            Span::styled(
+                "  Enter / y  Quit  ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(C_WARN())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("    "),
+            Span::styled("Esc / n  Cancel", Style::default().fg(C_DIM())),
+        ]),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).block(
+            block("quit confirmation · Enter/y quit · Esc/n cancel")
+                .border_style(Style::default().fg(C_WARN())),
+        ),
         area,
     );
 }
@@ -197,17 +278,30 @@ fn alerts_overlay(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let now = crate::collect::now_secs();
     let lines: Vec<Line> = if app.alerts.is_empty() {
-        vec![Line::from(Span::styled("  no alerts — all clear ●", Style::default().fg(C_OK())))]
+        vec![Line::from(Span::styled(
+            "  no alerts — all clear ●",
+            Style::default().fg(C_OK()),
+        ))]
     } else {
         app.alerts
             .iter()
             .map(|al| {
                 let age = now.saturating_sub(al.ts);
-                let (g, c) = if al.sev == Sev::Bad { ("✗", C_BAD()) } else { ("⚠", C_WARN()) };
+                let (g, c) = if al.sev == Sev::Bad {
+                    ("✗", C_BAD())
+                } else {
+                    ("⚠", C_WARN())
+                };
                 Line::from(vec![
-                    Span::styled(format!("  {} ", g), Style::default().fg(c).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!("  {} ", g),
+                        Style::default().fg(c).add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(format!("{:>4}s ago  ", age), Style::default().fg(C_DIM())),
-                    Span::styled(truncw(&al.msg, area.width.saturating_sub(18) as usize), Style::default().fg(Color::White)),
+                    Span::styled(
+                        truncw(&al.msg, area.width.saturating_sub(18) as usize),
+                        Style::default().fg(Color::White),
+                    ),
                 ])
             })
             .collect()
@@ -219,7 +313,10 @@ fn alerts_overlay(f: &mut Frame, app: &App) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(C_BAD()))
-                .title(Span::styled(title, Style::default().fg(C_BAD()).add_modifier(Modifier::BOLD))),
+                .title(Span::styled(
+                    title,
+                    Style::default().fg(C_BAD()).add_modifier(Modifier::BOLD),
+                )),
         ),
         area,
     );
@@ -227,10 +324,17 @@ fn alerts_overlay(f: &mut Frame, app: &App) {
 
 /// 2-패널: 넓으면 좌우, 좁으면(<100) 위아래로 — 반응형.
 fn two_panes(area: Rect, left_pct: u16) -> (Rect, Rect) {
-    let dir = if area.width >= 100 { Direction::Horizontal } else { Direction::Vertical };
+    let dir = if area.width >= 100 {
+        Direction::Horizontal
+    } else {
+        Direction::Vertical
+    };
     let c = Layout::default()
         .direction(dir)
-        .constraints([Constraint::Percentage(left_pct), Constraint::Percentage(100 - left_pct)])
+        .constraints([
+            Constraint::Percentage(left_pct),
+            Constraint::Percentage(100 - left_pct),
+        ])
         .split(area);
     (c[0], c[1])
 }
@@ -238,7 +342,12 @@ fn two_panes(area: Rect, left_pct: u16) -> (Rect, Rect) {
 pub(super) fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
-    Rect { x, y, width: w.min(area.width), height: h.min(area.height) }
+    Rect {
+        x,
+        y,
+        width: w.min(area.width),
+        height: h.min(area.height),
+    }
 }
 
 fn help_overlay(f: &mut Frame) {
@@ -246,50 +355,84 @@ fn help_overlay(f: &mut Frame) {
     f.render_widget(Clear, area);
     let g = |k: &str, d: &str| {
         Line::from(vec![
-            Span::styled(format!("  {:<10}", k), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("  {:<10}", k),
+                Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(d.to_string(), Style::default().fg(Color::White)),
         ])
     };
-    let sec = |t: &str| Line::from(Span::styled(format!(" {}", t), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD)));
+    let sec = |t: &str| {
+        Line::from(Span::styled(
+            format!(" {}", t),
+            Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+        ))
+    };
     let lines = vec![
-        sec("navigation"),
-        g("0-7 Tab ⇧Tab", "switch view (Overview/Nodes/Models/EPP/Flow/Pods/Deploy/Events)"),
-        g("up/dn j k", "select row (mouse scroll works too)"),
-        g("Enter", "actions menu (Deploy/Models/Pods/Overview/Flow) · detail on other views"),
-        g("w", "Nodes hub: nodes→devices→serving→map · focus panel (Deploy/EPP/Flow)"),
-        g("p i r e m", "cross-layer pivot (model↔pods↔infra↔route↔epp), esc retraces"),
-        g("o / O", "sort: o cycles the column, O toggles ▲/▼ direction (header/footer shows active)"),
-        g("/", "filter (substring) — list header shows Σ aggregate of shown rows"),
-        g(":", "command palette — fuzzy-jump to any view / display action"),
-        g("actions", "Enter menu: Info/Compile→RBLN·Furiosa/Deploy/Stop/Scale/Restart/Logs/YAML/Delete/Cordon/Objective"),
-        g("Flow route", "Enter on a route → Backend/Rename/Retarget/Delete (delete requires danger)"),
-        g("apply", "deploy/compile Enter → 확인 팝업(default No) · e=vi로 매니페스트 편집 · v=dry-run 검증"),
-        g("Objective", "set per-model SLO (TTFT/TPOT/E2E/tok·s) → Perf shows met/violated + data-driven advice"),
-        g("l s S x y", "accelerators (also in the actions menu): logs/scale/restart/stop/yaml"),
-        g("A", "alert history (threshold/health events)"),
-        g("R", "reset energy session (per-accel Wh)"),
-        g("t", "cycle theme (soft/classic/high-contrast/colorblind)"),
-        g("f", "animations on/off"),
-        g("g", "open Grafana dashboard"),
-        g("z", "zoom/focus (hide header+tabs)"),
-        g("Esc", "back: close detail/filter/zoom (does NOT quit)"),
-        g("? / q", "help / quit"),
+        sec("navigate"),
+        g(
+            "0-5 / Tab",
+            "switch section (Overview·Traffic·Models·Infra·Deploy·Events); Shift+Tab back",
+        ),
+        g(
+            "← / →  ([ ])",
+            "cycle sub-tabs in the section (e.g. Models→Perf→Pods)",
+        ),
+        g(
+            "Ctrl-w",
+            "panel-focus mode → then h/j/k/l or arrows move, Esc exits",
+        ),
+        g("↑↓ j k", "move selection or scroll"),
+        g("g / G", "jump to first / last row"),
+        g("Ctrl-u/d", "half-page up / down"),
+        g(
+            "Enter / a",
+            "open actions for the selection (detail when no menu)",
+        ),
+        g("Esc", "go back: detail → breadcrumb → filter → zoom"),
+        g(
+            "/ :",
+            "filter rows · command palette (jump anywhere / run any action)",
+        ),
+        g("o / O", "cycle sort column / toggle direction"),
+        sec("operations"),
+        g("y / l", "YAML / logs (accelerators, also in the ⏎ menu)"),
+        g("s S x", "scale / restart / stop"),
+        g(
+            "p i r e m",
+            "pivot across pods, infra, routes, EPP, and models",
+        ),
+        g("A", "alert history"),
+        g("R", "reset session energy"),
+        g("t / f / z", "theme · animations · zoom (focus)"),
+        g("Space", "pause/resume refresh   ( :graf opens Grafana )"),
         Line::from(""),
         sec("color / glyph"),
         Line::from(vec![
-            Span::styled("  ● ", Style::default().fg(C_OK())), Span::styled("up  ", Style::default().fg(C_DIM())),
-            Span::styled("○ ", Style::default().fg(C_DIM())), Span::styled("idle  ", Style::default().fg(C_DIM())),
-            Span::styled("◐ ", Style::default().fg(C_WARN())), Span::styled("pending  ", Style::default().fg(C_DIM())),
-            Span::styled("⚠ ", Style::default().fg(C_WARN())), Span::styled("throttle  ", Style::default().fg(C_DIM())),
-            Span::styled("⊘ ", Style::default().fg(C_WARN())), Span::styled("cordoned  ", Style::default().fg(C_DIM())),
-            Span::styled("✗ ", Style::default().fg(C_BAD())), Span::styled("down", Style::default().fg(C_DIM())),
+            Span::styled("  ● ", Style::default().fg(C_OK())),
+            Span::styled("up  ", Style::default().fg(C_DIM())),
+            Span::styled("○ ", Style::default().fg(C_DIM())),
+            Span::styled("idle  ", Style::default().fg(C_DIM())),
+            Span::styled("◐ ", Style::default().fg(C_WARN())),
+            Span::styled("pending  ", Style::default().fg(C_DIM())),
+            Span::styled("⚠ ", Style::default().fg(C_WARN())),
+            Span::styled("throttle  ", Style::default().fg(C_DIM())),
+            Span::styled("⊘ ", Style::default().fg(C_WARN())),
+            Span::styled("cordoned  ", Style::default().fg(C_DIM())),
+            Span::styled("✗ ", Style::default().fg(C_BAD())),
+            Span::styled("down", Style::default().fg(C_DIM())),
         ]),
         Line::from(vec![
             Span::styled("  util/mem/temp: ", Style::default().fg(C_DIM())),
-            Span::styled("low", Style::default().fg(C_OK())), Span::raw(" "),
-            Span::styled("mid", Style::default().fg(C_WARN())), Span::raw(" "),
+            Span::styled("low", Style::default().fg(C_OK())),
+            Span::raw(" "),
+            Span::styled("mid", Style::default().fg(C_WARN())),
+            Span::raw(" "),
             Span::styled("high", Style::default().fg(C_BAD())),
-            Span::styled("   ∪ = unified mem (GB10 등, CPU·GPU 공유)", Style::default().fg(C_DIM())),
+            Span::styled(
+                "   ∪ = unified memory (GB10 and similar shared CPU/GPU memory)",
+                Style::default().fg(C_DIM()),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  vendor: ", Style::default().fg(C_DIM())),
@@ -299,17 +442,19 @@ fn help_overlay(f: &mut Frame) {
         ]),
     ];
     f.render_widget(
-        Paragraph::new(lines).block(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(C_ACC()))
-                .title(Span::styled(" lmd-top · help (press any key to close) ", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD))),
+                .title(Span::styled(
+                    " lmd-top · help (press any key to close) ",
+                    Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+                )),
         ),
         area,
     );
 }
-
 
 fn logs_overlay(f: &mut Frame, app: &App) {
     let full = f.area();
@@ -325,7 +470,11 @@ fn logs_overlay(f: &mut Frame, app: &App) {
         .iter()
         .map(|l| {
             let low = l.to_ascii_lowercase();
-            let col = if low.contains("error") || low.contains("traceback") || low.contains("fatal") || low.contains("exception") {
+            let col = if low.contains("error")
+                || low.contains("traceback")
+                || low.contains("fatal")
+                || low.contains("exception")
+            {
                 C_BAD()
             } else if low.contains("warn") {
                 C_WARN()
@@ -349,24 +498,40 @@ fn logs_overlay(f: &mut Frame, app: &App) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(C_ACC()))
-                .title(Span::styled(title, Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD))),
+                .title(Span::styled(
+                    title,
+                    Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+                )),
         ),
         area,
     );
-    list_scrollbar(f, area, total, (app.logs_scroll as usize).min(total.saturating_sub(1)), 0);
+    list_scrollbar(
+        f,
+        area,
+        total,
+        (app.logs_scroll as usize).min(total.saturating_sub(1)),
+        0,
+    );
 }
 
 // ── 헤더 ───────────────────────────────────────────────
 fn title_bar(f: &mut Frame, area: Rect, app: &App) {
     let s = &app.snap;
     let (tick, paused) = (app.tick, app.paused);
-    let spin = if paused { "⏸" } else { SPINNER[(tick as usize) % SPINNER.len()] };
+    let spin = if paused {
+        "⏸"
+    } else {
+        SPINNER[(tick as usize) % SPINNER.len()]
+    };
     let gw = if s.gw_addr.is_empty() {
         Span::styled("⌂ gw —", Style::default().fg(C_DIM()))
     } else if s.gw_ok {
         Span::styled(format!("⌂ gw {} ●", s.gw_addr), Style::default().fg(C_OK()))
     } else {
-        Span::styled(format!("⌂ gw {} ○", s.gw_addr), Style::default().fg(C_WARN()))
+        Span::styled(
+            format!("⌂ gw {} ○", s.gw_addr),
+            Style::default().fg(C_WARN()),
+        )
     };
     // 데이터 신선도: 마지막 스냅샷이 몇 초 전인지(수집 주기 3s). stale 판단용.
     let fresh = if s.ts == 0 {
@@ -374,7 +539,10 @@ fn title_bar(f: &mut Frame, area: Rect, app: &App) {
     } else {
         let age = crate::collect::now_secs().saturating_sub(s.ts);
         let col = if age > 10 { C_WARN() } else { C_DIM() };
-        Span::styled(format!("  · updated {}s ago", age), Style::default().fg(col))
+        Span::styled(
+            format!("  · updated {}s ago", age),
+            Style::default().fg(col),
+        )
     };
     // 권한 모드 배지 — observe 는 은은하게, 상승 권한은 색+굵게(사고 방지 인지).
     let (mcol, mmod) = match app.mode {
@@ -384,18 +552,36 @@ fn title_bar(f: &mut Frame, area: Rect, app: &App) {
         Mode::Danger => (C_BAD(), Modifier::BOLD),
     };
     let mut spans = vec![
-        Span::styled(format!("{} ", spin), Style::default().fg(if paused { C_WARN() } else { C_ACC() })),
-        Span::styled("lmd-top", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" [{}]", app.mode.name()), Style::default().fg(mcol).add_modifier(mmod)),
-        Span::styled(format!("  llm-d · {} nodes  ", s.nodes.len()), Style::default().fg(C_DIM())),
+        Span::styled(
+            format!("{} ", spin),
+            Style::default().fg(if paused { C_WARN() } else { C_ACC() }),
+        ),
+        Span::styled(
+            "lmd-top",
+            Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" [{}]", app.mode.name()),
+            Style::default().fg(mcol).add_modifier(mmod),
+        ),
+        Span::styled(
+            format!("  llm-d · {} nodes  ", s.nodes.len()),
+            Style::default().fg(C_DIM()),
+        ),
         gw,
         fresh,
-        Span::styled(if paused { "  ⏸ PAUSED (space)" } else { "" }, Style::default().fg(C_WARN())),
+        Span::styled(
+            if paused { "  ⏸ PAUSED (space)" } else { "" },
+            Style::default().fg(C_WARN()),
+        ),
     ];
     // 변경 작업 진행 중 — 스피너로 표시(UI 는 안 얼고 워커 스레드가 kube 수행).
     if let Some(label) = &app.inflight {
         let sp = SPINNER[(tick as usize) % SPINNER.len()];
-        spans.push(Span::styled(format!("  {} {}", sp, truncw(label, 40)), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            format!("  {} {}", sp, truncw(label, 40)),
+            Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+        ));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -431,58 +617,131 @@ fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
         ("●", C_OK())
     };
     let mut spans = vec![
-        Span::styled(format!("{} SERVING {}/{}  ", sg, serving, total), Style::default().fg(sc).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("req/s {}  ", rate(p.req_rate)), Style::default().fg(C_DIM())),
-        Span::styled(format!("err {}  ", rate(err)), Style::default().fg(if err_bad { C_BAD() } else { C_DIM() })),
-        Span::styled(format!("TTFT {}  ", ms(p.ttft_p95)), Style::default().fg(C_DIM())),
-        Span::styled(format!("E2E {}  ", ms(p.e2e_p95)), Style::default().fg(C_DIM())),
+        Span::styled(
+            format!("{} SERVING {}/{}  ", sg, serving, total),
+            Style::default().fg(sc).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("req/s {}  ", rate(p.req_rate)),
+            Style::default().fg(C_DIM()),
+        ),
+        Span::styled(
+            format!("err {}  ", rate(err)),
+            Style::default().fg(if err_bad { C_BAD() } else { C_DIM() }),
+        ),
+        Span::styled(
+            format!("TTFT {}  ", ms(p.ttft_p95)),
+            Style::default().fg(C_DIM()),
+        ),
+        Span::styled(
+            format!("E2E {}  ", ms(p.e2e_p95)),
+            Style::default().fg(C_DIM()),
+        ),
         Span::raw("│ "),
-        Span::styled(format!("accel {}/{} busy  ", busy, nacc), Style::default().fg(C_DIM())),
-        Span::styled(format!("VRAM {:.0}%  ", mempct), Style::default().fg(mem_color(mempct))),
+        Span::styled(
+            format!("accel {}/{} busy  ", busy, nacc),
+            Style::default().fg(C_DIM()),
+        ),
+        Span::styled(
+            format!("VRAM {:.0}%  ", mempct),
+            Style::default().fg(mem_color(mempct)),
+        ),
         Span::styled(format!("⚡{:.0}W", pw), Style::default().fg(C_DIM())),
     ];
     // Prometheus 도달 불가 — 빈 테이블이 "장비 없음"이 아니라 연결 문제임을 명시.
     if !s.prom_ok {
-        spans.push(Span::styled("  ⚠ Prometheus unreachable (check LMD_PROM)", Style::default().fg(C_BAD()).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "  ⚠ Prometheus unreachable (check LMD_PROM)",
+            Style::default().fg(C_BAD()).add_modifier(Modifier::BOLD),
+        ));
     }
     // 활성 알림 카운트(A 로 히스토리)
     let nalert = app.active_alerts.len();
     if nalert > 0 {
-        spans.push(Span::styled(format!("  ⚠{} alert (A)", nalert), Style::default().fg(C_BAD()).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            format!("  ⚠{} alert (A)", nalert),
+            Style::default().fg(C_BAD()).add_modifier(Modifier::BOLD),
+        ));
     }
     let mut para = Paragraph::new(Line::from(spans));
     // 신규 알림 플래시: flash_until 이전이면 ~0.6s 주기로 요약바 전체를 반전.
     let now = crate::collect::now_secs();
     if now < app.flash_until && (app.tick / 3).is_multiple_of(2) {
-        para = para.style(Style::default().bg(C_BAD()).fg(Color::Black).add_modifier(Modifier::BOLD));
+        para = para.style(
+            Style::default()
+                .bg(C_BAD())
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
     }
     f.render_widget(para, area);
 }
 
 fn tabs(f: &mut Frame, area: Rect, app: &App) {
-    // 전체 라벨 폭이 화면을 넘으면 비활성 탭은 번호만 표시(활성 탭은 라벨 유지) — 반응형.
-    let full_w: usize = View::ALL
+    use crate::app::Section;
+    let cur_sec = app.view.section();
+    // Section tabs (0-5). Compact to number-only for inactive tabs when the strip won't fit.
+    let full_w: usize = Section::ALL
         .iter()
         .enumerate()
-        .map(|(i, v)| format!(" {}:{} ", i, v.title()).len() + 1)
+        .map(|(i, s)| format!(" {}:{} ", i, s.title()).len() + 1)
         .sum();
-    let compact = full_w > area.width as usize;
-    // 앞머리 마커 — Tab/0-9 로 탭 전환됨을 명시(안 그러면 전환 방법이 안 보임).
-    let mut spans: Vec<Span> = vec![Span::styled("⇥ ", Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD))];
-    for (i, v) in View::ALL.iter().enumerate() {
-        let sel = i == app.view.idx(); // 허브 하위 뷰(Accel/Perf)도 Nodes 슬롯을 하이라이트
+    let compact = full_w + 24 > area.width as usize;
+    // 앞머리 마커 — Tab/0-5 로 섹션 전환됨을 명시.
+    let mut spans: Vec<Span> = vec![Span::styled(
+        "⇥ ",
+        Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+    )];
+    for (i, s) in Section::ALL.iter().enumerate() {
+        let sel = *s == cur_sec;
         let st = if sel {
-            Style::default().fg(Color::Black).bg(C_ACC()).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Black)
+                .bg(C_ACC())
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(C_DIM())
         };
         let label = if sel || !compact {
-            format!(" {}:{} ", i, v.title())
+            format!(" {}:{} ", i, s.title())
         } else {
             format!(" {} ", i)
         };
         spans.push(Span::styled(label, st));
         spans.push(Span::raw(" "));
+    }
+    // Sub-tab strip for the current section (only when it has >1 member).
+    // `◂ … ▸` arrows signal ←/→ cycles; the active tab is a chip, siblings preview prev/next.
+    let members = cur_sec.members();
+    if members.len() > 1 {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            "◂ ",
+            Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+        ));
+        for (j, v) in members.iter().enumerate() {
+            if j > 0 {
+                spans.push(Span::styled(" · ", Style::default().fg(C_DIM())));
+            }
+            if *v == app.view {
+                spans.push(Span::styled(
+                    format!(" {} ", v.title()),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(C_ACC())
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    v.title().to_string(),
+                    Style::default().fg(C_DIM()),
+                ));
+            }
+        }
+        spans.push(Span::styled(
+            " ▸",
+            Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+        ));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -519,11 +778,39 @@ fn compact_footer(parts: &[String], width: usize) -> String {
 }
 
 fn footer(f: &mut Frame, area: Rect, app: &App) {
+    // vi/tmux panel-focus mode — a persistent banner so the user knows arrows now move panels.
+    if app.panel_move {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(
+                    " panel focus {}/{} — h/j/k/l or ←↑↓→ move · Esc exits",
+                    app.panel_focus + 1,
+                    app.panel_count()
+                ),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(C_ACC())
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            area,
+        );
+        return;
+    }
+    if app.exit_confirm {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " quit confirmation — Enter/y quit · Esc/n cancel",
+                Style::default().fg(C_WARN()).add_modifier(Modifier::BOLD),
+            ))),
+            area,
+        );
+        return;
+    }
     // 확인은 이제 팝업(confirm_overlay)으로 표시 — 푸터에는 안내만.
     if app.confirm.is_some() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " confirm popup — default No · ←→ Yes/No · Enter 결정 · Esc 취소",
+                " confirm popup — default No · ←→ Yes/No · Enter confirm · Esc cancel",
                 Style::default().fg(C_WARN()).add_modifier(Modifier::BOLD),
             ))),
             area,
@@ -534,8 +821,17 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     if app.filtering {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(" / ", Style::default().fg(Color::Black).bg(C_ACC()).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" {}", app.filter), Style::default().fg(Color::White)),
+                Span::styled(
+                    " / ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(C_ACC())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {}", app.filter),
+                    Style::default().fg(Color::White),
+                ),
                 Span::styled("▏", Style::default().fg(C_ACC())),
                 Span::styled("   Enter/Esc to apply", Style::default().fg(C_DIM())),
             ])),
@@ -548,7 +844,10 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
             let msg = truncw(t, area.width.saturating_sub(1) as usize);
             let bg = if app.toast_bad { C_BAD() } else { C_WARN() };
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(format!(" {} ", msg), Style::default().fg(Color::Black).bg(bg)))),
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {} ", msg),
+                    Style::default().fg(Color::Black).bg(bg),
+                ))),
                 area,
             );
             return;
@@ -556,7 +855,10 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     }
     let mut spans: Vec<Span> = Vec::new();
     if !app.filter.is_empty() {
-        spans.push(Span::styled(format!("[filter: {}] ", app.filter), Style::default().fg(Color::Black).bg(C_ACC())));
+        spans.push(Span::styled(
+            format!("[filter: {}] ", app.filter),
+            Style::default().fg(Color::Black).bg(C_ACC()),
+        ));
         spans.push(Span::raw(" "));
     }
     // 컨텍스트 푸터: 현재 뷰가 실제 할 수 있는 액션만(no-op 숨김).
@@ -570,31 +872,37 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         Perf => parts.push("⏎ p50/95/99".into()),
         _ => {}
     }
-    if matches!(v, Accel | Models | Overview | Pods | Launch | Epp | Events | Nodes) {
+    if matches!(
+        v,
+        Accel | Models | Overview | Pods | Serving | Library | Epp | Events | Nodes
+    ) {
         parts.push("/ filter".into());
     }
     if app.sort_modes() > 1 {
         // 컬럼 + 방향(▼/▲). O 로 방향 토글.
-        parts.push(format!("o sort:{}{} O⇅", app.sort_label(), app.sort_arrow()));
+        parts.push(format!(
+            "o sort:{}{} O⇅",
+            app.sort_label(),
+            app.sort_arrow()
+        ));
     }
     if app.panel_count() > 1 {
-        parts.push(format!("w panel {}/{}", app.panel_focus + 1, app.panel_count()));
+        parts.push(format!(
+            "^w+hjkl panel {}/{}",
+            app.panel_focus + 1,
+            app.panel_count()
+        ));
     }
-    // Nodes 허브: w 로 하위 뷰 전환(하드웨어 노드 → 디바이스 → 서빙 성능).
-    if v.is_hub() {
-        let sub = match v {
-            Nodes => "nodes",
-            Accel => "devices",
-            Perf => "serving",
-            Topo => "map",
-            _ => "",
-        };
-        parts.push(format!("w hub:{} (nodes→devices→serving→map)", sub));
+    // Sub-tab strip: `←`/`→` (or `[`/`]`) cycle the current section's views (e.g. Models→Perf→Pods).
+    let members = v.section().members();
+    if members.len() > 1 {
+        let strip: Vec<&str> = members.iter().map(|m| m.title()).collect();
+        parts.push(format!("←→ {}", strip.join("·")));
     }
-    // Enter 동작 — 액션 메뉴가 있는 뷰는 개별 키(l/y/s/S/x/c/d) 를 푸터에서 빼고 "⏎ actions" 로 모음(과밀 방지, 발견성↑).
-    let has_menu = matches!(v, Models | Overview | Pods | Launch | Routing);
+    // Enter/action behavior: views with action menus expose a single compact hint.
+    let has_menu = matches!(v, Models | Overview | Pods | Serving | Library | Routing);
     if has_menu {
-        parts.push("⏎ actions".into());
+        parts.push("a/⏎ actions".into());
     }
     // pivot(액션 메뉴 밖 — 크로스레이어 점프).
     match v {
@@ -615,12 +923,15 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         parts.push("y yaml".into());
     }
     // 전역
-    parts.push("⇥/⇧⇥/0-7 view".into());
+    parts.push("⇥/0-5 section".into());
     parts.push("A alerts".into());
     parts.push("t theme".into());
     parts.push("? help".into());
     parts.push("q quit".into());
-    spans.push(Span::styled(compact_footer(&parts, area.width.saturating_sub(1) as usize), Style::default().fg(C_DIM())));
+    spans.push(Span::styled(
+        compact_footer(&parts, area.width.saturating_sub(1) as usize),
+        Style::default().fg(C_DIM()),
+    ));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -637,12 +948,24 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 truncw(&a.busy_model, 22)
             };
-            let mempct = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
+            let mempct = if a.mem_total_gb > 0.0 {
+                a.mem_used_gb / a.mem_total_gb * 100.0
+            } else {
+                0.0
+            };
             let mut util = dot_bar(a.util, 9, util_color(a.util)).spans;
-            util.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
+            util.push(Span::styled(
+                format!(" {:>3.0}%", a.util),
+                Style::default().fg(util_color(a.util)),
+            ));
             let mut mem = dot_bar(mempct, 7, mem_color(mempct)).spans;
             mem.push(Span::styled(
-                format!(" {:.0}/{:.0}GB{}", a.mem_used_gb, a.mem_total_gb, if a.unified_mem { "∪" } else { "" }),
+                format!(
+                    " {:.0}/{:.0}GB{}",
+                    a.mem_used_gb,
+                    a.mem_total_gb,
+                    if a.unified_mem { "∪" } else { "" }
+                ),
                 Style::default().fg(C_DIM()),
             ));
             let (hg, hc) = if !a.alive {
@@ -652,18 +975,30 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 ("●", C_OK())
             };
-            let trend = sparkstr(&app.hist_for(&format!("acc:{}:{}:{}:util", a.kind.label(), a.node, a.id)), 12, 100);
+            let trend = sparkstr(
+                &app.hist_for(&format!("acc:{}:{}:{}:util", a.kind.label(), a.node, a.id)),
+                12,
+                100,
+            );
             Row::new(vec![
                 Cell::from(Line::from(vec![
-                    Span::styled(hg, Style::default().fg(hc)),                                  // 상태=글리프
+                    Span::styled(hg, Style::default().fg(hc)), // 상태=글리프
                     Span::raw(" "),
-                    Span::styled(a.disp().to_string(), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)), // 모델(감지)·vendor색
+                    Span::styled(
+                        a.disp().to_string(),
+                        Style::default()
+                            .fg(kind_color(a.kind))
+                            .add_modifier(Modifier::BOLD),
+                    ), // 모델(감지)·vendor색
                 ])),
                 cellw(a.id.clone(), 6),
                 cellw(a.node.clone(), 14),
                 Cell::from(Line::from(util)),
                 Cell::from(Line::from(mem)),
-                Cell::from(Span::styled(format!("{:.0}°C", a.temp), Style::default().fg(temp_color(a.temp)))),
+                Cell::from(Span::styled(
+                    format!("{:.0}°C", a.temp),
+                    Style::default().fg(temp_color(a.temp)),
+                )),
                 cellw(format!("{:.0}W", a.power), 5),
                 Cell::from(Span::styled(trend, Style::default().fg(util_color(a.util)))), // 인라인 트렌드(all-smi식)
                 Cell::from(Span::styled(model_cell, Style::default().fg(C_DIM()))),
@@ -686,9 +1021,26 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
         None => "Accelerators · UTIL=compute% MEM=VRAM · ⏎ timeline".to_string(),
     };
     render_list_table(
-        f, area, rows, &widths,
-        &["KIND", "ID", "NODE", "UTIL", "MEM", "TEMP", "PWR", "TREND(util)", "MODEL/POD"],
-        &title, app.selected, order.len(),
+        f,
+        area,
+        rows,
+        &widths,
+        &[
+            "KIND",
+            "ID",
+            "NODE",
+            "UTIL",
+            "MEM",
+            "TEMP",
+            "PWR",
+            "TREND(util)",
+            "MODEL/POD",
+        ],
+        &title,
+        app.selected,
+        order.len(),
+        app.sort_header_label(),
+        app.sort_arrow(),
     );
 }
 
@@ -705,12 +1057,23 @@ fn view_models(f: &mut Frame, area: Rect, app: &App) {
     list_scrollbar(f, area, total, app.selected, 1);
 }
 
-const MODEL_COLS: [&str; 10] = ["name", "engine", "accel", "ready", "run", "wait", "kv", "tps", "path", "status"];
+const MODEL_COLS: [&str; 10] = [
+    "name", "engine", "accel", "ready", "run", "wait", "kv", "tps", "path", "status",
+];
 
 fn model_col_header(k: &str) -> &'static str {
     match k {
-        "name" => "MODEL", "engine" => "ENGINE", "accel" => "ACCEL", "ready" => "READY", "run" => "RUN",
-        "wait" => "WAIT", "kv" => "KV", "tps" => "t/s", "path" => "PATH", "status" => "STATUS", _ => "?",
+        "name" => "MODEL",
+        "engine" => "ENGINE",
+        "accel" => "ACCEL",
+        "ready" => "READY",
+        "run" => "RUN",
+        "wait" => "WAIT",
+        "kv" => "KV",
+        "tps" => "t/s",
+        "path" => "PATH",
+        "status" => "STATUS",
+        _ => "?",
     }
 }
 fn model_col_width(k: &str) -> Constraint {
@@ -727,17 +1090,44 @@ fn model_col_width(k: &str) -> Constraint {
 }
 fn model_cell(k: &str, m: &crate::collect::ModelRow, selected: bool, tick: u64) -> Cell<'static> {
     match k {
-        "name" => Cell::from(if selected { marquee(&m.name, 20, tick) } else { truncw(&m.name, 20) }),
-        "engine" => Cell::from(Span::styled(truncw(&m.engine, 12), Style::default().fg(C_ACC()))),
-        "accel" => Cell::from(Span::styled(truncw(&m.accel, 13), Style::default().fg(C_DIM()))),
+        "name" => Cell::from(if selected {
+            marquee(&m.name, 20, tick)
+        } else {
+            truncw(&m.name, 20)
+        }),
+        "engine" => Cell::from(Span::styled(
+            truncw(&m.engine, 12),
+            Style::default().fg(C_ACC()),
+        )),
+        "accel" => Cell::from(Span::styled(
+            truncw(&m.accel, 13),
+            Style::default().fg(C_DIM()),
+        )),
         "ready" => cellw(format!("{}/{}", m.ready, m.desired), 6),
         "run" => cellw(fmt_opt(m.running), 4),
         "wait" => cellw(fmt_opt(m.waiting), 4),
-        "kv" => cellw(m.kv.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or("–".into()), 5),
+        "kv" => cellw(
+            m.kv.map(|x| format!("{:.0}%", x * 100.0))
+                .unwrap_or("–".into()),
+            5,
+        ),
         "tps" => cellw(m.tps.map(|x| format!("{:.0}", x)).unwrap_or("–".into()), 5),
-        "path" => cellw(if m.route.is_empty() { "–".into() } else { m.route.clone() }, 11),
+        "path" => cellw(
+            if m.route.is_empty() {
+                "–".into()
+            } else {
+                m.route.clone()
+            },
+            11,
+        ),
         "status" => {
-            let color = if m.status.contains("Running") { C_OK() } else if m.status.contains("Pending") { C_WARN() } else { C_DIM() };
+            let color = if m.status.contains("Running") {
+                C_OK()
+            } else if m.status.contains("Pending") {
+                C_WARN()
+            } else {
+                C_DIM()
+            };
             Cell::from(Span::styled(m.status.clone(), Style::default().fg(color)))
         }
         _ => Cell::from(""),
@@ -752,13 +1142,21 @@ fn models_table<'a>(app: &'a App, title: &'a str) -> Table<'static> {
         .enumerate()
         .map(|(pos, &i)| {
             let m = &app.snap.models[i];
-            Row::new(cols.iter().map(|c| model_cell(c, m, pos == app.selected, app.tick)).collect::<Vec<_>>())
+            Row::new(
+                cols.iter()
+                    .map(|c| model_cell(c, m, pos == app.selected, app.tick))
+                    .collect::<Vec<_>>(),
+            )
         })
         .collect();
     let widths: Vec<Constraint> = cols.iter().map(|c| model_col_width(c)).collect();
     let header: Vec<&str> = cols.iter().map(|c| model_col_header(c)).collect();
     Table::new(rows, widths)
-        .header(hrow(&header))
+        .header(hrow_sorted(
+            &header,
+            app.sort_header_label(),
+            app.sort_arrow(),
+        ))
         .column_spacing(1)
         .row_highlight_style(hl_style())
         .highlight_symbol("▎")
@@ -779,7 +1177,11 @@ fn view_pods(f: &mut Frame, area: Rect, app: &App) {
                 "Failed" => C_BAD(),
                 _ => C_DIM(),
             };
-            let name = if pos == app.selected { marquee(&p.name, 40, app.tick) } else { truncw(&p.name, 40) };
+            let name = if pos == app.selected {
+                marquee(&p.name, 40, app.tick)
+            } else {
+                truncw(&p.name, 40)
+            };
             Row::new(vec![
                 Cell::from(name),
                 cellw(p.ready.clone(), 6),
@@ -800,9 +1202,16 @@ fn view_pods(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(8),
     ];
     render_list_table(
-        f, area, rows, &widths,
+        f,
+        area,
+        rows,
+        &widths,
         &["POD", "READY", "PHASE", "NODE", "RESTARTS"],
-        "Pods (llm-serving) · ⏎ detail", app.selected, order.len(),
+        "Pods (llm-serving) · ⏎ detail",
+        app.selected,
+        order.len(),
+        app.sort_header_label(),
+        app.sort_arrow(),
     );
 }
 
@@ -831,8 +1240,12 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
     match &app.snap.epp {
         Some(cfg) => {
             let sfocus = app.panel_focus == 0; // scorers 패널 포커스
-            // 유효 가중치(what-if 오버라이드 반영) + 상대 영향도(%).
-            let eff: Vec<f64> = cfg.scorers.iter().map(|(n, w)| app.epp_weight(n, *w)).collect();
+                                               // 유효 가중치(what-if 오버라이드 반영) + 상대 영향도(%).
+            let eff: Vec<f64> = cfg
+                .scorers
+                .iter()
+                .map(|(n, w)| app.epp_weight(n, *w))
+                .collect();
             let maxw = eff.iter().cloned().fold(1.0, f64::max);
             let total: f64 = eff.iter().sum::<f64>().max(1e-9);
             let simulating = !app.epp_weights.is_empty();
@@ -847,26 +1260,51 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                         cellw(name.clone(), 26),
                         Cell::from(Span::styled(
                             format!("{:.0}", w),
-                            Style::default().fg(if ov { C_ACC() } else { C_WARN() }).add_modifier(if ov { Modifier::BOLD } else { Modifier::empty() }),
+                            Style::default()
+                                .fg(if ov { C_ACC() } else { C_WARN() })
+                                .add_modifier(if ov {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                }),
                         )),
                         Cell::from(bar_line(w / maxw * 100.0, 8, C_ACC())), // 고정폭 + track(░)
-                        Cell::from(Span::styled(format!("{:>3.0}%", infl), Style::default().fg(C_DIM()))),
+                        Cell::from(Span::styled(
+                            format!("{:>3.0}%", infl),
+                            Style::default().fg(C_DIM()),
+                        )),
                     ])
                 })
                 .collect();
             // 정직한 문구: +/- 는 가중치를 조정하고 infl=상대 점유율(weight share)을 보여줄 뿐,
             // 실제 라우팅 결정 재시뮬이 아님(그건 per-endpoint score 필요 → 인프라 대기).
             let ns = cfg.scorers.len();
-            let cnt = if sfocus { count_suffix(app.selected, ns) } else { String::new() };
+            let cnt = if sfocus {
+                count_suffix(app.selected, ns)
+            } else {
+                String::new()
+            };
             let title = if simulating {
                 format!("EPP scorers · +/- weight (sim) · infl=share{}", cnt)
             } else {
                 format!("EPP scorers · +/- weight · infl=share{}", cnt)
             };
-            let mut t = Table::new(srows, [Constraint::Min(14), Constraint::Length(3), Constraint::Length(9), Constraint::Length(4)])
-                .header(hrow(&["SCORER", "WT", "WEIGHT", "infl"]))
-                .column_spacing(1)
-                .block(if sfocus { block_active(&title) } else { block(&title) });
+            let mut t = Table::new(
+                srows,
+                [
+                    Constraint::Min(14),
+                    Constraint::Length(3),
+                    Constraint::Length(9),
+                    Constraint::Length(4),
+                ],
+            )
+            .header(hrow(&["SCORER", "WT", "WEIGHT", "infl"]))
+            .column_spacing(1)
+            .block(if sfocus {
+                block_active(&title)
+            } else {
+                block(&title)
+            });
             if sfocus {
                 t = t.row_highlight_style(hl_style()).highlight_symbol("▎");
             }
@@ -877,7 +1315,11 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                 list_scrollbar(f, top_l, ns, app.selected, 1);
             }
 
-            let sel = if sfocus { cfg.scorers.get(app.selected) } else { None };
+            let sel = if sfocus {
+                cfg.scorers.get(app.selected)
+            } else {
+                None
+            };
             let mut dl: Vec<Line> = vec![
                 Line::from(vec![
                     Span::styled("profile: ", Style::default().fg(C_DIM())),
@@ -889,16 +1331,31 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
             ];
             if let Some((name, w)) = sel {
                 dl.push(Line::from(vec![
-                    Span::styled(name.clone(), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        name.clone(),
+                        Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(format!("  (weight {:.0})", w), Style::default().fg(C_DIM())),
                 ]));
                 dl.push(Line::from(""));
-                dl.push(Line::from(Span::styled(scorer_desc(name), Style::default().fg(Color::White))));
+                dl.push(Line::from(Span::styled(
+                    scorer_desc(name),
+                    Style::default().fg(Color::White),
+                )));
             }
-            f.render_widget(Paragraph::new(dl).wrap(Wrap { trim: true }).block(block("what this scorer does")), top_r);
+            f.render_widget(
+                Paragraph::new(dl)
+                    .wrap(Wrap { trim: true })
+                    .block(block("what this scorer does")),
+                top_r,
+            );
         }
         None => f.render_widget(
-            Paragraph::new(Line::from(Span::styled("EPP ConfigMap not found (llmd-router-epp)", Style::default().fg(C_DIM())))).block(block("EPP scorers")),
+            Paragraph::new(Line::from(Span::styled(
+                "EPP ConfigMap not found (llmd-router-epp)",
+                Style::default().fg(C_DIM()),
+            )))
+            .block(block("EPP scorers")),
             top_l,
         ),
     }
@@ -916,16 +1373,41 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                 cellw(fmt_nan(p.queue, 1), 8),
                 Cell::from(Span::styled(
                     fmt_nan(p.sat, 2),
-                    Style::default().fg(if p.sat > 0.8 { C_BAD() } else if p.sat > 0.5 { C_WARN() } else { C_DIM() }),
+                    Style::default().fg(if p.sat > 0.8 {
+                        C_BAD()
+                    } else if p.sat > 0.5 {
+                        C_WARN()
+                    } else {
+                        C_DIM()
+                    }),
                 )),
             ])
         })
         .collect();
     let pfocus = app.panel_focus == 1; // InferencePool 패널 포커스
-    let ptitle = format!("InferencePool{}", if pfocus { count_suffix(app.selected, app.snap.pools.len()) } else { String::new() });
-    let mut t = Table::new(rows, [Constraint::Min(12), Constraint::Length(7), Constraint::Length(8), Constraint::Length(6)])
-        .header(hrow(&["POOL", "EP r/t", "QUEUE", "SAT"]))
-        .block(if pfocus { block_active(&ptitle) } else { block(&ptitle) });
+    let ptitle = format!(
+        "InferencePool{}",
+        if pfocus {
+            count_suffix(app.selected, app.snap.pools.len())
+        } else {
+            String::new()
+        }
+    );
+    let mut t = Table::new(
+        rows,
+        [
+            Constraint::Min(12),
+            Constraint::Length(7),
+            Constraint::Length(8),
+            Constraint::Length(6),
+        ],
+    )
+    .header(hrow(&["POOL", "EP r/t", "QUEUE", "SAT"]))
+    .block(if pfocus {
+        block_active(&ptitle)
+    } else {
+        block(&ptitle)
+    });
     if pfocus {
         t = t.row_highlight_style(hl_style()).highlight_symbol("▎");
     }
@@ -940,30 +1422,58 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
     let mut dl: Vec<Line> = vec![Line::from(vec![
         Span::styled("EPP in path: ", Style::default().fg(C_DIM())),
         Span::styled(
-            if app.snap.epp_in_path { "yes" } else { "no (bypassed)" },
-            Style::default().fg(if app.snap.epp_in_path { C_OK() } else { C_WARN() }),
+            if app.snap.epp_in_path {
+                "yes"
+            } else {
+                "no (bypassed)"
+            },
+            Style::default().fg(if app.snap.epp_in_path {
+                C_OK()
+            } else {
+                C_WARN()
+            }),
         ),
         Span::styled(
-            format!("   prefix idx: {}", if app.snap.prefix_idx.is_nan() { "-".into() } else { format!("{:.0}", app.snap.prefix_idx) }),
+            format!(
+                "   prefix idx: {}",
+                if app.snap.prefix_idx.is_nan() {
+                    "-".into()
+                } else {
+                    format!("{:.0}", app.snap.prefix_idx)
+                }
+            ),
             Style::default().fg(C_DIM()),
         ),
     ])];
     let total: f64 = app.snap.decisions.iter().map(|(_, c)| c).sum();
     if app.snap.decisions.is_empty() || total <= 0.0 {
         dl.push(Line::from(Span::styled(
-            if app.snap.epp_in_path { "no distribution data (waiting for traffic)" } else { "no distribution data (EPP bypassed - see Topo)" },
+            if app.snap.epp_in_path {
+                "no distribution data (waiting for traffic)"
+            } else {
+                "no distribution data (EPP bypassed - see Topo)"
+            },
             Style::default().fg(C_DIM()),
         )));
     } else {
         for (pod, cnt) in app.snap.decisions.iter().take(5) {
             let share = cnt / total * 100.0;
-            let mut sp = vec![Span::styled(format!("{:<20} ", truncw(pod, 20)), Style::default().fg(Color::White))];
+            let mut sp = vec![Span::styled(
+                format!("{:<20} ", truncw(pod, 20)),
+                Style::default().fg(Color::White),
+            )];
             sp.extend(bar_line(share, 8, C_ACC()).spans);
-            sp.push(Span::styled(format!(" {:>3.0}%", share), Style::default().fg(C_DIM())));
+            sp.push(Span::styled(
+                format!(" {:>3.0}%", share),
+                Style::default().fg(C_DIM()),
+            ));
             dl.push(Line::from(sp));
         }
     }
-    f.render_widget(Paragraph::new(dl).block(block("request distribution (routing decisions)")), bottom_r);
+    f.render_widget(
+        Paragraph::new(dl).block(block("request distribution (routing decisions)")),
+        bottom_r,
+    );
 }
 
 // ── Topology (구성/라우팅/분배 한눈에) ──────────────────
@@ -979,7 +1489,10 @@ fn c_svc() -> Color {
 }
 /// `[TAG]` 형태의 타입 배지 span.
 fn tag(t: &str, c: Color) -> Span<'static> {
-    Span::styled(format!("[{}]", t), Style::default().fg(c).add_modifier(Modifier::BOLD))
+    Span::styled(
+        format!("[{}]", t),
+        Style::default().fg(c).add_modifier(Modifier::BOLD),
+    )
 }
 
 fn view_routing(f: &mut Frame, area: Rect, app: &App) {
@@ -1006,7 +1519,15 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     let gw = if s.gw_addr.is_empty() {
         "llm-d-gateway  (—)".to_string()
     } else {
-        format!("llm-d-gateway  {}  {}", s.gw_addr, if s.gw_ok { "●Programmed" } else { "○ pending" })
+        format!(
+            "llm-d-gateway  {}  {}",
+            s.gw_addr,
+            if s.gw_ok {
+                "●Programmed"
+            } else {
+                "○ pending"
+            }
+        )
     };
     lines.push(Line::from(vec![
         tag("GW", c_gw()),
@@ -1017,13 +1538,23 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(vec![
             Span::styled("└─ ", Style::default().fg(C_DIM())),
             tag("ROUTE", Color::White),
-            Span::styled(" no HTTPRoute discovered in namespace", Style::default().fg(C_DIM())),
+            Span::styled(
+                " no HTTPRoute discovered in namespace",
+                Style::default().fg(C_DIM()),
+            ),
         ]));
     } else {
         lines.push(Line::from(vec![
             Span::styled("└─ ", Style::default().fg(C_DIM())),
             tag("ROUTE", Color::White),
-            Span::styled(format!(" {} route rule{}", s.routes.len(), if s.routes.len() == 1 { "" } else { "s" }), Style::default().fg(Color::White)),
+            Span::styled(
+                format!(
+                    " {} route rule{}",
+                    s.routes.len(),
+                    if s.routes.len() == 1 { "" } else { "s" }
+                ),
+                Style::default().fg(Color::White),
+            ),
         ]));
     }
     let n = s.routes.len();
@@ -1034,7 +1565,11 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         let up = m.map(|m| m.ready > 0).unwrap_or(false);
         let is_pool = r.kind == "InferencePool";
         // backend 계층 배지: InferencePool → [EPP], Service → [SVC](직결).
-        let (btag, bcol) = if is_pool { ("EPP", c_epp()) } else { ("SVC", c_svc()) };
+        let (btag, bcol) = if is_pool {
+            ("EPP", c_epp())
+        } else {
+            ("SVC", c_svc())
+        };
         let sel = app.panel_focus == 0 && i == app.selected; // routes 패널 포커스일 때만 강조
         if sel {
             sel_line = lines.len();
@@ -1042,36 +1577,65 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         let mut spans = vec![
             Span::styled(rbr, Style::default().fg(C_DIM())),
             dot(up),
-            Span::styled(format!("{:<13} ", truncw(&r.path, 13)), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{:<13} ", truncw(&r.path, 13)),
+                Style::default().fg(Color::White),
+            ),
             Span::styled("→", Style::default().fg(C_DIM())),
             tag(btag, bcol),
-            Span::styled(format!("{} ", truncw(&r.backend, 20)), Style::default().fg(bcol)),
+            Span::styled(
+                format!("{} ", truncw(&r.backend, 20)),
+                Style::default().fg(bcol),
+            ),
         ];
         // 모델 계층 배지 + 상태/가속기/엔진.
         spans.push(Span::styled("→", Style::default().fg(C_DIM())));
         spans.push(tag("MODEL", if up { C_OK() } else { C_DIM() }));
         match m {
             Some(m) => spans.push(Span::styled(
-                format!("{} {}/{} {} [{}]", truncw(&m.name, 16), m.ready, m.desired, m.accel, m.engine),
+                format!(
+                    "{} {}/{} {} [{}]",
+                    truncw(&m.name, 16),
+                    m.ready,
+                    m.desired,
+                    m.accel,
+                    m.engine
+                ),
                 Style::default().fg(if up { C_OK() } else { C_DIM() }),
             )),
             None => spans.push(Span::styled("(no serving)", Style::default().fg(C_WARN()))),
         }
         let mut rl = Line::from(spans);
         if sel {
-            rl = rl.style(Style::default().bg(C_HL()).add_modifier(Modifier::BOLD)); // 선택 route(정렬 유지 위해 배경만)
+            rl = rl.style(Style::default().bg(C_HL()).add_modifier(Modifier::BOLD));
+            // 선택 route(정렬 유지 위해 배경만)
         }
         lines.push(rl);
         // 하위: [INFRA] 이 backend 의 파드들(트리 자식)
         let cont = if last { "      " } else { "   │  " };
-        let pods: Vec<&crate::collect::PodRow> = s.pods.iter().filter(|p| p.name.starts_with(&r.backend)).collect();
+        let pods: Vec<&crate::collect::PodRow> = s
+            .pods
+            .iter()
+            .filter(|p| p.name.starts_with(&r.backend))
+            .collect();
         for (j, p) in pods.iter().enumerate() {
-            let pbr = if j + 1 == pods.len() { "└─ " } else { "├─ " };
-            let pc = if p.phase == "Running" { C_OK() } else { C_DIM() };
+            let pbr = if j + 1 == pods.len() {
+                "└─ "
+            } else {
+                "├─ "
+            };
+            let pc = if p.phase == "Running" {
+                C_OK()
+            } else {
+                C_DIM()
+            };
             lines.push(Line::from(vec![
                 Span::styled(format!("{}{}", cont, pbr), Style::default().fg(C_TRACK())),
                 tag("INFRA", C_DIM()),
-                Span::styled(format!(" {} ", truncw(&p.name, 30)), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!(" {} ", truncw(&p.name, 30)),
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(format!("{} @{}", p.phase, p.node), Style::default().fg(pc)),
             ]));
         }
@@ -1079,7 +1643,10 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     // EPP 경유 여부 진단
     if !s.routes.is_empty() {
         if s.epp_in_path {
-            lines.push(Line::from(Span::styled("  ✓ routes go through InferencePool (EPP-routed)", Style::default().fg(C_OK()))));
+            lines.push(Line::from(Span::styled(
+                "  ✓ routes go through InferencePool (EPP-routed)",
+                Style::default().fg(C_OK()),
+            )));
         } else {
             lines.push(Line::from(Span::styled(
                 "  ⚠ some HTTPRoutes point to Service directly → EPP bypassed (no model-aware routing)",
@@ -1094,11 +1661,26 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         .split(area);
     // 트리가 길면 선택 route 가 보이도록 세로 스크롤(무언의 잘림 방지).
     let vis = (top[0].height as usize).saturating_sub(2);
-    let scroll = if sel_line + 2 > vis { (sel_line + 3).saturating_sub(vis) as u16 } else { 0 };
+    let scroll = if sel_line + 2 > vis {
+        (sel_line + 3).saturating_sub(vis) as u16
+    } else {
+        0
+    };
     let rfocus = app.panel_focus == 0;
-    let rtitle = format!("Flow · Gateway→EPP→Model→Infra · ↑↓ route · p/i/m/e pivot{}", if rfocus { count_suffix(app.selected, s.routes.len()) } else { String::new() });
+    let rtitle = format!(
+        "Flow · Gateway→EPP→Model→Infra · ↑↓ route · p/i/m/e pivot{}",
+        if rfocus {
+            count_suffix(app.selected, s.routes.len())
+        } else {
+            String::new()
+        }
+    );
     f.render_widget(
-        Paragraph::new(lines).scroll((scroll, 0)).block(if rfocus { block_active(&rtitle) } else { block(&rtitle) }),
+        Paragraph::new(lines).scroll((scroll, 0)).block(if rfocus {
+            block_active(&rtitle)
+        } else {
+            block(&rtitle)
+        }),
         top[0],
     );
 
@@ -1106,7 +1688,10 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     let pfocus = app.panel_focus == 1; // InferencePool 패널 포커스
     let mut pl: Vec<Line> = Vec::new();
     if s.pools.is_empty() {
-        pl.push(Line::from(Span::styled("(no InferencePool)", Style::default().fg(C_DIM()))));
+        pl.push(Line::from(Span::styled(
+            "(no InferencePool)",
+            Style::default().fg(C_DIM()),
+        )));
     }
     for (pi, p) in s.pools.iter().enumerate() {
         let sel = pfocus && pi == app.selected;
@@ -1131,10 +1716,24 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         }
         let mut pline = Line::from(vec![
             tag("EPP", c_epp()),
-            Span::styled(format!(" {:<18}", truncw(&p.name, 18)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("●{}/{} ep ", p.ep_ready, p.ep_total), Style::default().fg(epc)),
-            Span::styled(format!("←{} ", truncw(&route_path, 14)), Style::default().fg(c_gw())),
-            Span::styled(format!("picker:{} ", if p.epp.is_empty() { "–" } else { &p.epp }), Style::default().fg(c_epp())),
+            Span::styled(
+                format!(" {:<18}", truncw(&p.name, 18)),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("●{}/{} ep ", p.ep_ready, p.ep_total),
+                Style::default().fg(epc),
+            ),
+            Span::styled(
+                format!("←{} ", truncw(&route_path, 14)),
+                Style::default().fg(c_gw()),
+            ),
+            Span::styled(
+                format!("picker:{} ", if p.epp.is_empty() { "–" } else { &p.epp }),
+                Style::default().fg(c_epp()),
+            ),
             Span::styled(metrics, Style::default().fg(C_DIM())),
         ]);
         if sel {
@@ -1145,13 +1744,27 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         if sel {
             pl.push(Line::from(vec![
                 Span::styled("    selector ", Style::default().fg(C_DIM())),
-                Span::styled(if p.selector.is_empty() { "–".into() } else { p.selector.clone() }, Style::default().fg(Color::Gray)),
-                Span::styled("   ⏎ actions (rename/retarget/delete)", Style::default().fg(C_DIM())),
+                Span::styled(
+                    if p.selector.is_empty() {
+                        "–".into()
+                    } else {
+                        p.selector.clone()
+                    },
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    "   ⏎ actions (rename/retarget/delete)",
+                    Style::default().fg(C_DIM()),
+                ),
             ]));
         }
     }
     if !s.objectives.is_empty() {
-        let so: Vec<String> = s.objectives.iter().map(|o| format!("{}(p{}→{})", o.name, o.priority, o.pool)).collect();
+        let so: Vec<String> = s
+            .objectives
+            .iter()
+            .map(|o| format!("{}(p{}→{})", o.name, o.priority, o.pool))
+            .collect();
         pl.push(Line::from(vec![
             Span::styled("SLO  ", Style::default().fg(C_DIM())),
             Span::styled(so.join("  "), Style::default().fg(Color::White)),
@@ -1161,14 +1774,37 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         pl.push(Line::from(vec![
             Span::styled("autoscale ", Style::default().fg(C_DIM())),
             Span::styled(truncw(&a.target, 26), Style::default().fg(Color::White)),
-            Span::styled(format!("  {}↔{} rep={} ", a.min, a.max, a.replicas), Style::default().fg(C_DIM())),
-            Span::styled(if a.active { "active" } else { "idle" }, Style::default().fg(if a.active { C_OK() } else { C_DIM() })),
-            Span::styled(if a.ready { " ✓" } else { " ⚠notready" }, Style::default().fg(if a.ready { C_OK() } else { C_WARN() })),
+            Span::styled(
+                format!("  {}↔{} rep={} ", a.min, a.max, a.replicas),
+                Style::default().fg(C_DIM()),
+            ),
+            Span::styled(
+                if a.active { "active" } else { "idle" },
+                Style::default().fg(if a.active { C_OK() } else { C_DIM() }),
+            ),
+            Span::styled(
+                if a.ready { " ✓" } else { " ⚠notready" },
+                Style::default().fg(if a.ready { C_OK() } else { C_WARN() }),
+            ),
             Span::styled(format!(" [{}]", a.triggers), Style::default().fg(C_DIM())),
         ]));
     }
-    let ptitle = format!("InferencePool / EPP / SLO / Autoscale{}", if pfocus { count_suffix(app.selected, s.pools.len()) } else { String::new() });
-    f.render_widget(Paragraph::new(pl).block(if pfocus { block_active(&ptitle) } else { block(&ptitle) }), top[1]);
+    let ptitle = format!(
+        "InferencePool / EPP / SLO / Autoscale{}",
+        if pfocus {
+            count_suffix(app.selected, s.pools.len())
+        } else {
+            String::new()
+        }
+    );
+    f.render_widget(
+        Paragraph::new(pl).block(if pfocus {
+            block_active(&ptitle)
+        } else {
+            block(&ptitle)
+        }),
+        top[1],
+    );
 }
 
 // ── Overview ───────────────────────────────────────────
@@ -1180,13 +1816,20 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     let mut cluster_lines: Vec<Line> = Vec::new();
     {
         // 벤더별 (수, 색, 사용메모리GB) — 스택 바용.
-        let mut kinds: std::collections::BTreeMap<&str, (usize, Color, f64)> = std::collections::BTreeMap::new();
+        let mut kinds: std::collections::BTreeMap<&str, (usize, Color, f64)> =
+            std::collections::BTreeMap::new();
         let (mut usum, mut mu, mut mt, mut pw, mut tsum) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
         for a in &s.accel {
-            let e = kinds.entry(a.disp()).or_insert((0, kind_color(a.kind), 0.0));
+            let e = kinds
+                .entry(a.disp())
+                .or_insert((0, kind_color(a.kind), 0.0));
             e.0 += 1;
             e.2 += a.mem_used_gb;
-            usum += a.util; mu += a.mem_used_gb; mt += a.mem_total_gb; pw += a.power; tsum += a.temp;
+            usum += a.util;
+            mu += a.mem_used_gb;
+            mt += a.mem_total_gb;
+            pw += a.power;
+            tsum += a.temp;
         }
         let ncnt = s.accel.len().max(1);
         let avg = usum / ncnt as f64;
@@ -1194,25 +1837,59 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         let mempct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
         let ready = s.models.iter().filter(|m| m.ready > 0).count();
         // 인벤토리 라벨(GB10×2 …) + 라벨된 집계(util·temp·VRAM·W·models). req/s·TTFT 는 상단바에 있어 생략.
-        let mut sp = vec![Span::styled(format!("{} accel  ", s.accel.len()), Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))];
+        let mut sp = vec![Span::styled(
+            format!("{} accel  ", s.accel.len()),
+            Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+        )];
         for (k, (c, col, _)) in &kinds {
-            sp.push(Span::styled(format!("{}×{} ", k, c), Style::default().fg(*col).add_modifier(Modifier::BOLD)));
+            sp.push(Span::styled(
+                format!("{}×{} ", k, c),
+                Style::default().fg(*col).add_modifier(Modifier::BOLD),
+            ));
         }
-        sp.push(Span::styled(format!("│ util {:.0}% ", avg), Style::default().fg(util_color(avg))));
-        sp.push(Span::styled(format!("temp {:.0}°C ", avg_temp), Style::default().fg(temp_color(avg_temp))));
-        sp.push(Span::styled(format!("│ VRAM {:.0}/{:.0}GB {:.0}% ", mu, mt, mempct), Style::default().fg(mem_color(mempct))));
+        sp.push(Span::styled(
+            format!("│ util {:.0}% ", avg),
+            Style::default().fg(util_color(avg)),
+        ));
+        sp.push(Span::styled(
+            format!("temp {:.0}°C ", avg_temp),
+            Style::default().fg(temp_color(avg_temp)),
+        ));
+        sp.push(Span::styled(
+            format!("│ VRAM {:.0}/{:.0}GB {:.0}% ", mu, mt, mempct),
+            Style::default().fg(mem_color(mempct)),
+        ));
         // 노드 루트 디스크 집계(존재하는 노드만)
-        let (du, dt): (f64, f64) = s.nodes.iter().fold((0.0, 0.0), |(u, t), n| (u + n.disk_used_gb, t + n.disk_total_gb));
+        let (du, dt): (f64, f64) = s.nodes.iter().fold((0.0, 0.0), |(u, t), n| {
+            (u + n.disk_used_gb, t + n.disk_total_gb)
+        });
         if dt > 0.0 {
             let dp = du / dt * 100.0;
-            sp.push(Span::styled(format!("disk {:.0}% ", dp), Style::default().fg(mem_color(dp))));
+            sp.push(Span::styled(
+                format!("disk {:.0}% ", dp),
+                Style::default().fg(mem_color(dp)),
+            ));
         }
-        sp.push(Span::styled(format!("⚡{:.0}W ", pw), Style::default().fg(C_DIM())));
-        sp.push(Span::styled(format!("│ models {}/{} ", ready, s.models.len()), Style::default().fg(if ready > 0 { C_OK() } else { C_DIM() })));
+        sp.push(Span::styled(
+            format!("⚡{:.0}W ", pw),
+            Style::default().fg(C_DIM()),
+        ));
+        sp.push(Span::styled(
+            format!("│ models {}/{} ", ready, s.models.len()),
+            Style::default().fg(if ready > 0 { C_OK() } else { C_DIM() }),
+        ));
         // 세션 에너지 총합(R 리셋)
-        let ewh: f64 = s.accel.iter().map(|a| app.energy_session_wh(a)).filter(|x| !x.is_nan()).sum();
+        let ewh: f64 = s
+            .accel
+            .iter()
+            .map(|a| app.energy_session_wh(a))
+            .filter(|x| !x.is_nan())
+            .sum();
         if ewh > 0.0 {
-            sp.push(Span::styled(format!("· E {:.1}Wh", ewh), Style::default().fg(C_ACC())));
+            sp.push(Span::styled(
+                format!("· E {:.1}Wh", ewh),
+                Style::default().fg(C_ACC()),
+            ));
         }
         cluster_lines.push(Line::from(sp));
 
@@ -1220,9 +1897,15 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         if mt > 0.0 {
             let barw = ((area.width as usize).saturating_sub(24)).clamp(10, 48);
             let segs: Vec<(f64, Color)> = kinds.values().map(|(_, col, m)| (*m, *col)).collect();
-            let mut vsp = vec![Span::styled(format!("{:<6}", "VRAM"), Style::default().fg(C_DIM()))];
+            let mut vsp = vec![Span::styled(
+                format!("{:<6}", "VRAM"),
+                Style::default().fg(C_DIM()),
+            )];
             vsp.extend(stacked_bar(&segs, mt, barw));
-            vsp.push(Span::styled(format!(" {:.0}/{:.0}GB used", mu, mt), Style::default().fg(C_DIM())));
+            vsp.push(Span::styled(
+                format!(" {:.0}/{:.0}GB used", mu, mt),
+                Style::default().fg(C_DIM()),
+            ));
             cluster_lines.push(Line::from(vsp));
         }
 
@@ -1233,14 +1916,18 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         let iw = (area.width as usize).saturating_sub(2); // 카드 내부 폭(테두리 제외)
         let per_line = iw.saturating_sub(LABEL_W) / 2; // 글리프 "● " = 2칸씩
         let per_line = per_line.max(1);
-        let mut bykind: std::collections::BTreeMap<&str, Vec<&crate::collect::Accel>> = std::collections::BTreeMap::new();
+        let mut bykind: std::collections::BTreeMap<&str, Vec<&crate::collect::Accel>> =
+            std::collections::BTreeMap::new();
         for a in &s.accel {
             bykind.entry(a.disp()).or_default().push(a);
         }
         let mut led_lines: Vec<Line> = Vec::new();
         'kinds: for (k, list) in &bykind {
             let kc = kind_color(list[0].kind);
-            let mut cur: Vec<Span> = vec![Span::styled(format!("{:<4} ", k), Style::default().fg(kc).add_modifier(Modifier::BOLD))];
+            let mut cur: Vec<Span> = vec![Span::styled(
+                format!("{:<4} ", k),
+                Style::default().fg(kc).add_modifier(Modifier::BOLD),
+            )];
             let mut n = 0usize;
             for a in list {
                 if n == per_line {
@@ -1272,7 +1959,10 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
             }
         }
         if led_lines.is_empty() {
-            led_lines.push(Line::from(Span::styled("(no accelerators)", Style::default().fg(C_DIM()))));
+            led_lines.push(Line::from(Span::styled(
+                "(no accelerators)",
+                Style::default().fg(C_DIM()),
+            )));
         }
         cluster_lines.extend(led_lines);
     }
@@ -1281,15 +1971,27 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     // 위계(눈이 가는 순서 = 중요도): 히어로(용량·부하) → 판정(문제?) → 가속기 → 서빙경로 → 모델 리스트.
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(cluster_h), Constraint::Length(3), Constraint::Length(6), Constraint::Length(5), Constraint::Min(4)])
+        .constraints([
+            Constraint::Length(cluster_h),
+            Constraint::Length(3),
+            Constraint::Length(6),
+            Constraint::Length(5),
+            Constraint::Min(4),
+        ])
         .split(area);
-    f.render_widget(Paragraph::new(cluster_lines).block(block("Cluster")), rows[0]);
+    f.render_widget(
+        Paragraph::new(cluster_lines).block(block("Cluster")),
+        rows[0],
+    );
 
     // 판정(plain-language verdict) — 히어로 바로 밑으로 올려 "지금 문제 있나?"에 즉답.
     let (txt, col) = diagnose(s);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(truncw(&txt, rows[1].width.saturating_sub(2) as usize), Style::default().fg(col).add_modifier(Modifier::BOLD))))
-            .block(block("Status")),
+        Paragraph::new(Line::from(Span::styled(
+            truncw(&txt, rows[1].width.saturating_sub(2) as usize),
+            Style::default().fg(col).add_modifier(Modifier::BOLD),
+        )))
+        .block(block("Status")),
         rows[1],
     );
 
@@ -1298,66 +2000,138 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     let mut groups: Vec<(AccelKind, String, usize, f64, f64, f64, bool, bool, String)> = Vec::new();
     for a in &s.accel {
         if let Some(g) = groups.iter_mut().find(|g| g.0 == a.kind && g.1 == a.node) {
-            g.2 += 1; g.3 += a.util; g.4 += a.mem_used_gb; g.5 += a.mem_total_gb;
-            g.6 = g.6 && a.alive; g.7 = g.7 || a.throttle > 0.0;
+            g.2 += 1;
+            g.3 += a.util;
+            g.4 += a.mem_used_gb;
+            g.5 += a.mem_total_gb;
+            g.6 = g.6 && a.alive;
+            g.7 = g.7 || a.throttle > 0.0;
         } else {
-            groups.push((a.kind, a.node.clone(), 1, a.util, a.mem_used_gb, a.mem_total_gb, a.alive, a.throttle > 0.0, a.disp().to_string()));
+            groups.push((
+                a.kind,
+                a.node.clone(),
+                1,
+                a.util,
+                a.mem_used_gb,
+                a.mem_total_gb,
+                a.alive,
+                a.throttle > 0.0,
+                a.disp().to_string(),
+            ));
         }
     }
     let mut al: Vec<Line> = Vec::new();
     for (kind, node, cnt, us, mu, mt, alive, thr, model) in &groups {
         let util = us / (*cnt as f64);
         let mempct = if *mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
-        let (hi, hc) = if !*alive { ("✗", C_BAD()) } else if *thr { ("⚠", C_WARN()) } else { ("●", C_OK()) };
+        let (hi, hc) = if !*alive {
+            ("✗", C_BAD())
+        } else if *thr {
+            ("⚠", C_WARN())
+        } else {
+            ("●", C_OK())
+        };
         let mut sp = vec![
             Span::styled(format!("{} ", hi), Style::default().fg(hc)),
-            Span::styled(format!("{:<4}×{} ", model, cnt), Style::default().fg(kind_color(*kind)).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("@{:<16} ", truncw(node, 16)), Style::default().fg(C_DIM())),
+            Span::styled(
+                format!("{:<4}×{} ", model, cnt),
+                Style::default()
+                    .fg(kind_color(*kind))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("@{:<16} ", truncw(node, 16)),
+                Style::default().fg(C_DIM()),
+            ),
         ];
         sp.extend(dot_bar(util, 10, util_color(util)).spans); // overview 는 레인보우 바(장식) — 수치는 severity 색으로 의미 유지
-        sp.push(Span::styled(format!(" {:>3.0}% ", util), Style::default().fg(util_color(util))));
+        sp.push(Span::styled(
+            format!(" {:>3.0}% ", util),
+            Style::default().fg(util_color(util)),
+        ));
         sp.push(Span::styled("mem ", Style::default().fg(C_DIM())));
         sp.extend(dot_bar(mempct, 10, mem_color(mempct)).spans); // MEM 도 레인보우 바 — 유휴 때도 채움이 보임
-        // GB 필드 고정폭(우측정렬) → 뒤따르는 트렌드 스파크라인이 열 정렬됨.
-        sp.push(Span::styled(format!(" {:>3.0}/{:>3.0}GB  ", mu, mt), Style::default().fg(mem_color(mempct))));
+                                                                 // GB 필드 고정폭(우측정렬) → 뒤따르는 트렌드 스파크라인이 열 정렬됨.
+        sp.push(Span::styled(
+            format!(" {:>3.0}/{:>3.0}GB  ", mu, mt),
+            Style::default().fg(mem_color(mempct)),
+        ));
         sp.push(Span::styled("trend ", Style::default().fg(C_DIM())));
-        let trend = sparkstr(&app.hist_for(&format!("sys:{}_util", kind.label())), 14, 100); // all-smi식 인라인 트렌드
+        let trend = sparkstr(
+            &app.hist_for(&format!("sys:{}_util", kind.label())),
+            14,
+            100,
+        ); // all-smi식 인라인 트렌드
         sp.push(Span::styled(trend, Style::default().fg(util_color(util))));
         al.push(Line::from(sp));
     }
     if al.is_empty() {
-        al.push(Line::from(Span::styled("  (no accelerator metrics)", Style::default().fg(C_DIM()))));
+        al.push(Line::from(Span::styled(
+            "  (no accelerator metrics)",
+            Style::default().fg(C_DIM()),
+        )));
     }
     // 무언의 잘림 방지: (종류,노드) 그룹이 패널보다 많으면 마지막 줄을 "+N more" 로.
     let acap = (rows[2].height as usize).saturating_sub(2);
     if al.len() > acap && acap > 0 {
         let hidden = al.len() - (acap - 1);
         al.truncate(acap - 1);
-        al.push(Line::from(Span::styled(format!("  … +{} more (see Accel / Nodes tab)", hidden), Style::default().fg(C_DIM()))));
+        al.push(Line::from(Span::styled(
+            format!("  … +{} more (see Accel / Nodes tab)", hidden),
+            Style::default().fg(C_DIM()),
+        )));
     }
-    f.render_widget(Paragraph::new(al).block(block("Accelerators (by kind / node)")), rows[2]);
+    f.render_widget(
+        Paragraph::new(al).block(block("Accelerators (by kind / node)")),
+        rows[2],
+    );
 
     // Inference: EPP 경로 + 풀 endpoints + scorers + autoscale
     let mut pl: Vec<Line> = Vec::new();
     pl.push(Line::from(vec![
         Span::styled("EPP path ", Style::default().fg(C_DIM())),
         Span::styled(
-            if s.epp_in_path { "via InferencePool ●" } else { "bypassed (HTTPRoute→Service) ⚠" },
+            if s.epp_in_path {
+                "via InferencePool ●"
+            } else {
+                "bypassed (HTTPRoute→Service) ⚠"
+            },
             Style::default().fg(if s.epp_in_path { C_OK() } else { C_WARN() }),
         ),
     ]));
     for p in s.pools.iter().take(2) {
         pl.push(Line::from(vec![
             dot(p.ep_ready > 0),
-            Span::styled(format!("{:<16} ", truncw(&p.name, 16)), Style::default().fg(Color::White)),
-            Span::styled(format!("endpoints {}/{}  sat {}", p.ep_ready, p.ep_total, fmt_nan(p.sat, 2)), Style::default().fg(C_DIM())),
+            Span::styled(
+                format!("{:<16} ", truncw(&p.name, 16)),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!(
+                    "endpoints {}/{}  sat {}",
+                    p.ep_ready,
+                    p.ep_total,
+                    fmt_nan(p.sat, 2)
+                ),
+                Style::default().fg(C_DIM()),
+            ),
         ]));
     }
     if let Some(cfg) = &s.epp {
-        let names: Vec<String> = cfg.scorers.iter().map(|(n, w)| format!("{}·{:.0}", n.replace("-scorer", ""), w)).collect();
-        pl.push(Line::from(Span::styled(format!("scorers: {}", names.join("  ")), Style::default().fg(C_DIM()))));
+        let names: Vec<String> = cfg
+            .scorers
+            .iter()
+            .map(|(n, w)| format!("{}·{:.0}", n.replace("-scorer", ""), w))
+            .collect();
+        pl.push(Line::from(Span::styled(
+            format!("scorers: {}", names.join("  ")),
+            Style::default().fg(C_DIM()),
+        )));
     }
-    f.render_widget(Paragraph::new(pl).block(block("Inference (EPP / InferencePool)")), rows[3]);
+    f.render_widget(
+        Paragraph::new(pl).block(block("Inference (EPP / InferencePool)")),
+        rows[3],
+    );
 
     let mut st = TableState::default();
     st.select(Some(app.selected));
@@ -1368,11 +2142,24 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
 fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     let (cur, tot) = app.detail_pos();
     let (prev, next) = app.neighbor_names();
-    let nav = format!(" · ◂ {}  {}/{}  {} ▸ · esc back", truncw(&prev, 16), cur, tot, truncw(&next, 16));
+    let nav = format!(
+        " · ◂ {}  {}/{}  {} ▸ · esc back",
+        truncw(&prev, 16),
+        cur,
+        tot,
+        truncw(&next, 16)
+    );
     // Accelerator: info + util/mem/temp timeline
     if let Some(a) = app.selected_accel() {
-        let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(11), Constraint::Min(6)]).split(area);
-        let mempct = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(11), Constraint::Min(6)])
+            .split(area);
+        let mempct = if a.mem_total_gb > 0.0 {
+            a.mem_used_gb / a.mem_total_gb * 100.0
+        } else {
+            0.0
+        };
         let health = if !a.alive {
             ("✗ not alive", C_BAD())
         } else if a.throttle > 0.0 {
@@ -1384,41 +2171,96 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         let barw = (rows[0].width as usize).saturating_sub(34).clamp(10, 46);
         let mut lines = vec![
             Line::from(vec![
-                Span::styled(format!("{} ", a.disp()), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("id {} @ {}   ", a.id, a.node), Style::default().fg(C_DIM())),
-                Span::styled(health.0, Style::default().fg(health.1).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{} ", a.disp()),
+                    Style::default()
+                        .fg(kind_color(a.kind))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("id {} @ {}   ", a.id, a.node),
+                    Style::default().fg(C_DIM()),
+                ),
+                Span::styled(
+                    health.0,
+                    Style::default().fg(health.1).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(format!("   {:.0} W", a.power), Style::default().fg(C_DIM())),
-                Span::styled(format!("   {}", if a.busy_model.is_empty() { "(idle)" } else { a.busy_model.as_str() }), Style::default().fg(C_ACC())),
+                Span::styled(
+                    format!(
+                        "   {}",
+                        if a.busy_model.is_empty() {
+                            "(idle)"
+                        } else {
+                            a.busy_model.as_str()
+                        }
+                    ),
+                    Style::default().fg(C_ACC()),
+                ),
             ]),
             Line::from(""),
-            gauge_row("compute", a.util, &format!("{:.0} %", a.util), util_color(a.util), barw),
+            gauge_row(
+                "compute",
+                a.util,
+                &format!("{:.0} %", a.util),
+                util_color(a.util),
+                barw,
+            ),
             gauge_row(
                 if a.unified_mem { "mem∪" } else { "VRAM" },
                 mempct,
                 &format!(
                     "{:.1} / {:.1} GB  ({:.0}%){}",
-                    a.mem_used_gb, a.mem_total_gb, mempct,
-                    if a.unified_mem { "  unified w/ host" } else { "" }
+                    a.mem_used_gb,
+                    a.mem_total_gb,
+                    mempct,
+                    if a.unified_mem {
+                        "  unified w/ host"
+                    } else {
+                        ""
+                    }
                 ),
                 mem_color(mempct),
                 barw,
             ),
-            gauge_row("temp", a.temp.min(100.0), &format!("{:.0} °C", a.temp), temp_color(a.temp), barw),
+            gauge_row(
+                "temp",
+                a.temp.min(100.0),
+                &format!("{:.0} °C", a.temp),
+                temp_color(a.temp),
+                barw,
+            ),
         ];
         // 메모리 대역폭(통합 메모리에선 진짜 병목) — DCGM MEM_COPY_UTIL. 있을 때만.
         if !a.mem_bw.is_nan() {
-            lines.push(gauge_row("mem bw", a.mem_bw, &format!("{:.0} %", a.mem_bw), grad_color(a.mem_bw), barw));
+            lines.push(gauge_row(
+                "mem bw",
+                a.mem_bw,
+                &format!("{:.0} %", a.mem_bw),
+                grad_color(a.mem_bw),
+                barw,
+            ));
         }
         if !a.clock_mhz.is_nan() || !a.mem_temp.is_nan() {
             lines.push(Line::from(vec![
                 Span::styled(format!("{:<8} ", "clock"), Style::default().fg(C_DIM())),
                 Span::styled(
-                    if a.clock_mhz.is_nan() { "–".into() } else { format!("{:.0} MHz", a.clock_mhz) },
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    if a.clock_mhz.is_nan() {
+                        "–".into()
+                    } else {
+                        format!("{:.0} MHz", a.clock_mhz)
+                    },
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("    mem temp ", Style::default().fg(C_DIM())),
                 Span::styled(
-                    if a.mem_temp.is_nan() { "–".into() } else { format!("{:.0} °C", a.mem_temp) },
+                    if a.mem_temp.is_nan() {
+                        "–".into()
+                    } else {
+                        format!("{:.0} °C", a.mem_temp)
+                    },
                     Style::default().fg(temp_color(a.mem_temp)),
                 ),
             ]));
@@ -1430,16 +2272,40 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             let avg = if hrs > 1e-6 { ewh / hrs } else { f64::NAN };
             lines.push(Line::from(vec![
                 Span::styled(format!("{:<8} ", "energy"), Style::default().fg(C_DIM())),
-                Span::styled(format!("{:.2} Wh", ewh), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("  (session · avg {})", if avg.is_nan() { "–".into() } else { format!("{:.0} W", avg) }), Style::default().fg(C_DIM())),
+                Span::styled(
+                    format!("{:.2} Wh", ewh),
+                    Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "  (session · avg {})",
+                        if avg.is_nan() {
+                            "–".into()
+                        } else {
+                            format!("{:.0} W", avg)
+                        }
+                    ),
+                    Style::default().fg(C_DIM()),
+                ),
                 Span::styled("  R reset", Style::default().fg(C_DIM())),
             ]));
         }
-        f.render_widget(Paragraph::new(lines).block(block(&format!("Accelerator{}", nav))), rows[0]);
+        f.render_widget(
+            Paragraph::new(lines).block(block(&format!("Accelerator{}", nav))),
+            rows[0],
+        );
         // 타임라인: util% / VRAM% 두 개만 넓게(반응형). temp/power 는 위 게이지로.
         let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
         let (l, r) = two_panes(rows[1], 50);
-        bar_timeline(f, l, app, &format!("{}:util", k), "compute util", "%", Some(100.0));
+        bar_timeline(
+            f,
+            l,
+            app,
+            &format!("{}:util", k),
+            "compute util",
+            "%",
+            Some(100.0),
+        );
         bar_timeline(f, r, app, &format!("{}:mem", k), "VRAM", "%", Some(100.0));
         return;
     }
@@ -1447,7 +2313,11 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     if let Some(n) = app.selected_node() {
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(10), Constraint::Min(4), Constraint::Length(8)])
+            .constraints([
+                Constraint::Length(10),
+                Constraint::Min(4),
+                Constraint::Length(8),
+            ])
             .split(area);
         let (hg, hc) = if n.cordoned {
             ("⊘ cordoned", C_WARN())
@@ -1458,41 +2328,117 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         } else {
             ("● ready", C_OK())
         };
-        let mempct = if n.mem_total_gb > 0.0 { n.mem_used_gb / n.mem_total_gb * 100.0 } else { 0.0 };
+        let mempct = if n.mem_total_gb > 0.0 {
+            n.mem_used_gb / n.mem_total_gb * 100.0
+        } else {
+            0.0
+        };
         let barw = (rows[0].width as usize).saturating_sub(34).clamp(10, 46);
         let lines = vec![
             Line::from(vec![
-                Span::styled(format!("{}  ", truncw(&n.name, 30)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                Span::styled(hg, Style::default().fg(hc).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("   kubelet {}", n.version), Style::default().fg(C_DIM())),
                 Span::styled(
-                    if n.npu.is_empty() { String::new() } else { format!("   NPU {}", n.npu) },
+                    format!("{}  ", truncw(&n.name, 30)),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(hg, Style::default().fg(hc).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("   kubelet {}", n.version),
+                    Style::default().fg(C_DIM()),
+                ),
+                Span::styled(
+                    if n.npu.is_empty() {
+                        String::new()
+                    } else {
+                        format!("   NPU {}", n.npu)
+                    },
                     Style::default().fg(C_ACC()),
                 ),
             ]),
             Line::from(""),
-            gauge_row("cpu", if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct }, &if n.cpu_pct.is_nan() { "–".into() } else { format!("{:.0} %", n.cpu_pct) }, util_color(n.cpu_pct.max(0.0)), barw),
-            gauge_row("memory", mempct, &if n.mem_total_gb <= 0.0 { "–".into() } else { format!("{:.0} / {:.0} GB  ({:.0}%)", n.mem_used_gb, n.mem_total_gb, mempct) }, mem_color(mempct), barw),
+            gauge_row(
+                "cpu",
+                if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct },
+                &if n.cpu_pct.is_nan() {
+                    "–".into()
+                } else {
+                    format!("{:.0} %", n.cpu_pct)
+                },
+                util_color(n.cpu_pct.max(0.0)),
+                barw,
+            ),
+            gauge_row(
+                "memory",
+                mempct,
+                &if n.mem_total_gb <= 0.0 {
+                    "–".into()
+                } else {
+                    format!(
+                        "{:.0} / {:.0} GB  ({:.0}%)",
+                        n.mem_used_gb, n.mem_total_gb, mempct
+                    )
+                },
+                mem_color(mempct),
+                barw,
+            ),
             {
-                let dp = if n.disk_total_gb > 0.0 { n.disk_used_gb / n.disk_total_gb * 100.0 } else { 0.0 };
-                gauge_row("disk /", dp, &if n.disk_total_gb <= 0.0 { "–".into() } else { format!("{:.0} / {:.0} GB  ({:.0}%)", n.disk_used_gb, n.disk_total_gb, dp) }, mem_color(dp), barw)
+                let dp = if n.disk_total_gb > 0.0 {
+                    n.disk_used_gb / n.disk_total_gb * 100.0
+                } else {
+                    0.0
+                };
+                gauge_row(
+                    "disk /",
+                    dp,
+                    &if n.disk_total_gb <= 0.0 {
+                        "–".into()
+                    } else {
+                        format!(
+                            "{:.0} / {:.0} GB  ({:.0}%)",
+                            n.disk_used_gb, n.disk_total_gb, dp
+                        )
+                    },
+                    mem_color(dp),
+                    barw,
+                )
             },
             Line::from(vec![
                 Span::styled(format!("{:<8} ", "load1"), Style::default().fg(C_DIM())),
-                Span::styled(if n.load1.is_nan() { "–".into() } else { format!("{:.2}", n.load1) }, Style::default().fg(C_WARN()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    if n.load1.is_nan() {
+                        "–".into()
+                    } else {
+                        format!("{:.2}", n.load1)
+                    },
+                    Style::default().fg(C_WARN()).add_modifier(Modifier::BOLD),
+                ),
             ]),
         ];
-        f.render_widget(Paragraph::new(lines).block(block(&format!("Node{}", nav))), rows[0]);
+        f.render_widget(
+            Paragraph::new(lines).block(block(&format!("Node{}", nav))),
+            rows[0],
+        );
         // 이 노드가 가진 모든 디바이스(full 라인). ↑↓ 로 커서 이동(0=노드요약, i=개별 device 히스토리).
-        let devs: Vec<&crate::collect::Accel> = app.snap.accel.iter().filter(|a| a.node == n.name).collect();
+        let devs: Vec<&crate::collect::Accel> =
+            app.snap.accel.iter().filter(|a| a.node == n.name).collect();
         let mut dl: Vec<Line> = Vec::new();
         if devs.is_empty() {
-            dl.push(Line::from(Span::styled("(no accelerators on this node)", Style::default().fg(C_DIM()))));
+            dl.push(Line::from(Span::styled(
+                "(no accelerators on this node)",
+                Style::default().fg(C_DIM()),
+            )));
         } else {
             let last = devs.len();
             for (j, a) in devs.iter().enumerate() {
                 let sel = app.dev_sel == j + 1;
-                let branch = if sel { "▸ " } else if j + 1 == last { "└─" } else { "├─" };
+                let branch = if sel {
+                    "▸ "
+                } else if j + 1 == last {
+                    "└─"
+                } else {
+                    "├─"
+                };
                 let mut line = accel_brief(a, branch, true);
                 if sel {
                     line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
@@ -1501,9 +2447,18 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             }
         }
         let dtitle = if app.dev_sel == 0 {
-            format!("devices on {} ({}) · ↑↓ pick device → history", truncw(&n.name, 16), devs.len())
+            format!(
+                "devices on {} ({}) · ↑↓ pick device → history",
+                truncw(&n.name, 16),
+                devs.len()
+            )
         } else {
-            format!("devices on {} ({}) · ↑↓ move · ▸#{} history below", truncw(&n.name, 16), devs.len(), app.dev_sel)
+            format!(
+                "devices on {} ({}) · ↑↓ move · ▸#{} history below",
+                truncw(&n.name, 16),
+                devs.len(),
+                app.dev_sel
+            )
         };
         f.render_widget(Paragraph::new(dl).block(block(&dtitle)), rows[1]);
         // 하단 타임라인: dev_sel==0 → 노드 host cpu/mem/disk 요약, 아니면 선택 device 의 util/VRAM.
@@ -1511,41 +2466,105 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             let k = format!("nod:{}", n.name);
             let mut dash = Dashboard::new().min_width(24);
             let kc = k.clone();
-            dash = dash.cell(move |f, r| bar_timeline(f, r, app, &format!("{}:cpu", kc), "host cpu", "%", Some(100.0)));
+            dash = dash.cell(move |f, r| {
+                bar_timeline(
+                    f,
+                    r,
+                    app,
+                    &format!("{}:cpu", kc),
+                    "host cpu",
+                    "%",
+                    Some(100.0),
+                )
+            });
             let km = k.clone();
-            dash = dash.cell(move |f, r| bar_timeline(f, r, app, &format!("{}:mem", km), "host mem", "%", Some(100.0)));
+            dash = dash.cell(move |f, r| {
+                bar_timeline(
+                    f,
+                    r,
+                    app,
+                    &format!("{}:mem", km),
+                    "host mem",
+                    "%",
+                    Some(100.0),
+                )
+            });
             if n.disk_total_gb > 0.0 {
                 let kd = k.clone();
-                dash = dash.cell(move |f, r| bar_timeline(f, r, app, &format!("{}:disk", kd), "disk /", "%", Some(100.0)));
+                dash = dash.cell(move |f, r| {
+                    bar_timeline(
+                        f,
+                        r,
+                        app,
+                        &format!("{}:disk", kd),
+                        "disk /",
+                        "%",
+                        Some(100.0),
+                    )
+                });
             }
             dash.render(f, rows[2]);
         } else if let Some(a) = devs.get(app.dev_sel - 1) {
             let (l, r) = two_panes(rows[2], 50);
             let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
             let name = format!("{} {}", a.disp(), a.id);
-            bar_timeline(f, l, app, &format!("{}:util", k), &format!("{} util", name), "%", Some(100.0));
-            bar_timeline(f, r, app, &format!("{}:mem", k), &format!("{} VRAM", name), "%", Some(100.0));
+            bar_timeline(
+                f,
+                l,
+                app,
+                &format!("{}:util", k),
+                &format!("{} util", name),
+                "%",
+                Some(100.0),
+            );
+            bar_timeline(
+                f,
+                r,
+                app,
+                &format!("{}:mem", k),
+                &format!("{} VRAM", name),
+                "%",
+                Some(100.0),
+            );
         }
         return;
     }
 
     // Event 상세 — 표에서 잘리는 전체 메시지를 읽기 위한 뷰.
     if let Some(e) = app.selected_event() {
-        let (tg, tc) = if e.typ == "Warning" { ("⚠ Warning", C_WARN()) } else { ("● Normal", C_OK()) };
+        let (tg, tc) = if e.typ == "Warning" {
+            ("⚠ Warning", C_WARN())
+        } else {
+            ("● Normal", C_OK())
+        };
         let lines = vec![
             Line::from(vec![
-                Span::styled(format!("{}  ", tg), Style::default().fg(tc).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("×{}", e.count), Style::default().fg(if e.count > 1 { C_WARN() } else { C_DIM() })),
+                Span::styled(
+                    format!("{}  ", tg),
+                    Style::default().fg(tc).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("×{}", e.count),
+                    Style::default().fg(if e.count > 1 { C_WARN() } else { C_DIM() }),
+                ),
             ]),
             Line::from(""),
             kv("reason", &e.reason, Color::White),
             kv("object", &e.object, C_ACC()),
             Line::from(""),
-            Line::from(Span::styled("message", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))),
-            Line::from(Span::styled(e.message.clone(), Style::default().fg(Color::White))),
+            Line::from(Span::styled(
+                "message",
+                Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                e.message.clone(),
+                Style::default().fg(Color::White),
+            )),
         ];
         f.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }).block(block(&format!("Event{}", nav))),
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(block(&format!("Event{}", nav))),
             area,
         );
         return;
@@ -1557,16 +2576,46 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             kv("model", &a.model, Color::White),
             kv("family", &a.family, C_DIM()),
             kv("engine", &a.engine, C_ACC()),
-            kv("image", if a.image.is_empty() { "–" } else { &a.image }, C_DIM()),
+            kv(
+                "image",
+                if a.image.is_empty() { "–" } else { &a.image },
+                C_DIM(),
+            ),
             Line::from(""),
-            kv("source", if a.source.is_empty() { "– (not in container args/env)" } else { &a.source }, Color::White),
-            kv("storage node", if a.node.is_empty() { "–" } else { &a.node }, Color::White),
-            kv("storage path", if a.mount.is_empty() { "– (no volume mount)" } else { &a.mount }, Color::White),
+            kv(
+                "source",
+                if a.source.is_empty() {
+                    "– (not in container args/env)"
+                } else {
+                    &a.source
+                },
+                Color::White,
+            ),
+            kv(
+                "storage node",
+                if a.node.is_empty() { "–" } else { &a.node },
+                Color::White,
+            ),
+            kv(
+                "storage path",
+                if a.mount.is_empty() {
+                    "– (no volume mount)"
+                } else {
+                    &a.mount
+                },
+                Color::White,
+            ),
             Line::from(""),
-            Line::from(Span::styled("compile / serve options", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(
+                "compile / serve options",
+                Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+            )),
         ];
         if a.opts.is_empty() {
-            lines.push(Line::from(Span::styled("  (none detected in the container spec)", Style::default().fg(C_DIM()))));
+            lines.push(Line::from(Span::styled(
+                "  (none detected in the container spec)",
+                Style::default().fg(C_DIM()),
+            )));
         }
         for (k, v) in &a.opts {
             lines.push(Line::from(vec![
@@ -1575,7 +2624,10 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             ]));
         }
         f.render_widget(
-            Paragraph::new(lines).scroll((app.detail_scroll, 0)).wrap(Wrap { trim: false }).block(block(&format!("Model artifact{}", nav))),
+            Paragraph::new(lines)
+                .scroll((app.detail_scroll, 0))
+                .wrap(Wrap { trim: false })
+                .block(block(&format!("Model artifact{}", nav))),
             area,
         );
         return;
@@ -1585,33 +2637,96 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     if let Some(m) = app.selected_model() {
         let mut lines: Vec<Line> = Vec::new();
         lines.push(kv("model", &m.name, Color::White));
-        lines.push(kv("status", &m.status, if m.ready > 0 { C_OK() } else { C_DIM() }));
-        lines.push(kv("replicas", &format!("{}/{} (ready/desired)", m.ready, m.desired), Color::White));
+        lines.push(kv(
+            "status",
+            &m.status,
+            if m.ready > 0 { C_OK() } else { C_DIM() },
+        ));
+        lines.push(kv(
+            "replicas",
+            &format!("{}/{} (ready/desired)", m.ready, m.desired),
+            Color::White,
+        ));
         lines.push(kv("engine", &m.engine, C_ACC()));
         lines.push(kv("accelerator", &m.accel, C_ACC()));
-        lines.push(kv("route", if m.route.is_empty() { "–" } else { m.route.as_str() }, Color::White));
+        lines.push(kv(
+            "route",
+            if m.route.is_empty() {
+                "–"
+            } else {
+                m.route.as_str()
+            },
+            Color::White,
+        ));
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("inference (vLLM)", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))));
-        lines.push(kv("  running / waiting", &format!("{} / {}", fmt_opt(m.running), fmt_opt(m.waiting)), Color::White));
-        lines.push(kv("  KV cache", &m.kv.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or("- (no vLLM metrics)".into()), Color::White));
-        lines.push(kv("  tokens/s", &m.tps.map(|x| format!("{:.1}", x)).unwrap_or("–".into()), Color::White));
-        lines.push(kv("  TTFT p95", &m.ttft.map(|x| format!("{:.0} ms", x * 1000.0)).unwrap_or("–".into()), Color::White));
+        lines.push(Line::from(Span::styled(
+            "inference (vLLM)",
+            Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(kv(
+            "  running / waiting",
+            &format!("{} / {}", fmt_opt(m.running), fmt_opt(m.waiting)),
+            Color::White,
+        ));
+        lines.push(kv(
+            "  KV cache",
+            &m.kv
+                .map(|x| format!("{:.0}%", x * 100.0))
+                .unwrap_or("- (no vLLM metrics)".into()),
+            Color::White,
+        ));
+        lines.push(kv(
+            "  tokens/s",
+            &m.tps.map(|x| format!("{:.1}", x)).unwrap_or("–".into()),
+            Color::White,
+        ));
+        lines.push(kv(
+            "  TTFT p95",
+            &m.ttft
+                .map(|x| format!("{:.0} ms", x * 1000.0))
+                .unwrap_or("–".into()),
+            Color::White,
+        ));
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("pivot ▸ peek (press key to open)", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled(
+            "pivot ▸ peek (press key to open)",
+            Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+        )));
         // [p] pods — 매칭 파드 수/running + 첫 이름
-        let mpods: Vec<&crate::collect::PodRow> = app.snap.pods.iter().filter(|p| p.name.starts_with(&m.name)).collect();
+        let mpods: Vec<&crate::collect::PodRow> = app
+            .snap
+            .pods
+            .iter()
+            .filter(|p| p.name.starts_with(&m.name))
+            .collect();
         let running = mpods.iter().filter(|p| p.phase == "Running").count();
         let pods_prev = if mpods.is_empty() {
             "(none)".to_string()
         } else {
-            format!("{} pod(s) · {} running · {}", mpods.len(), running, truncw(&mpods[0].name, 26))
+            format!(
+                "{} pod(s) · {} running · {}",
+                mpods.len(),
+                running,
+                truncw(&mpods[0].name, 26)
+            )
         };
         lines.push(pivot_prev("p", "pods", &pods_prev));
         // [i] infra — 이 모델을 돌리는 디바이스(있으면 util 집계), 없으면 배치 문자열
-        let macc: Vec<&crate::collect::Accel> = app.snap.accel.iter().filter(|a| !a.busy_model.is_empty() && a.busy_model.starts_with(&m.name)).collect();
+        let macc: Vec<&crate::collect::Accel> = app
+            .snap
+            .accel
+            .iter()
+            .filter(|a| !a.busy_model.is_empty() && a.busy_model.starts_with(&m.name))
+            .collect();
         let infra_prev = if !macc.is_empty() {
             let u = macc.iter().map(|a| a.util).sum::<f64>() / macc.len() as f64;
-            format!("{}×{} @{} · util {:.0}%", macc[0].disp(), macc.len(), truncw(&macc[0].node, 16), u)
+            format!(
+                "{}×{} @{} · util {:.0}%",
+                macc[0].disp(),
+                macc.len(),
+                truncw(&macc[0].node, 16),
+                u
+            )
         } else if !m.accel.is_empty() && m.accel != "-" {
             m.accel.clone()
         } else {
@@ -1619,10 +2734,29 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         };
         lines.push(pivot_prev("i", "infra", &infra_prev));
         // [r] route — HTTPRoute 경로
-        lines.push(pivot_prev("r", "route", if m.route.is_empty() { "no route" } else { m.route.as_str() }));
+        lines.push(pivot_prev(
+            "r",
+            "route",
+            if m.route.is_empty() {
+                "no route"
+            } else {
+                m.route.as_str()
+            },
+        ));
         // [e] epp — EPP 경유 여부
-        lines.push(pivot_prev("e", "epp", if app.snap.epp_in_path { "via InferencePool ●" } else { "bypassed → Service ⚠" }));
-        lines.push(Line::from(Span::styled("  s scale · S restart", Style::default().fg(C_DIM()))));
+        lines.push(pivot_prev(
+            "e",
+            "epp",
+            if app.snap.epp_in_path {
+                "via InferencePool ●"
+            } else {
+                "bypassed → Service ⚠"
+            },
+        ));
+        lines.push(Line::from(Span::styled(
+            "  s scale · S restart",
+            Style::default().fg(C_DIM()),
+        )));
         // 매칭되는 per-model perf 시계열(이름 정확/포함 일치) → 하단 타임라인.
         let mkey = app
             .snap
@@ -1630,24 +2764,39 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .find(|r| r.model == m.name || m.name.contains(&r.model) || r.model.contains(&m.name))
             .map(|r| format!("mperf:{}", r.model));
-        let series: [(&str, &str, &str); 4] = [("tps", "tok/s", ""), ("ttft", "TTFT", "ms"), ("decode", "DECODE", "ms"), ("e2e", "E2E", "ms")];
+        let series: [(&str, &str, &str); 4] = [
+            ("tps", "tok/s", ""),
+            ("ttft", "TTFT", "ms"),
+            ("decode", "DECODE", "ms"),
+            ("e2e", "E2E", "ms"),
+        ];
         let present: Vec<&(&str, &str, &str)> = match &mkey {
-            Some(k) => series.iter().filter(|(s, _, _)| !app.hist_for(&format!("{}:{}", k, s)).is_empty()).collect(),
+            Some(k) => series
+                .iter()
+                .filter(|(s, _, _)| !app.hist_for(&format!("{}:{}", k, s)).is_empty())
+                .collect(),
             None => Vec::new(),
         };
         let n_lines = lines.len();
-        let pblk = Paragraph::new(lines).scroll((app.detail_scroll, 0)).wrap(Wrap { trim: false }).block(block(&format!("Model{}", nav)));
+        let pblk = Paragraph::new(lines)
+            .scroll((app.detail_scroll, 0))
+            .wrap(Wrap { trim: false })
+            .block(block(&format!("Model{}", nav)));
         if present.is_empty() {
             f.render_widget(pblk, area);
         } else {
             let mk = mkey.unwrap();
             let text_h = (n_lines as u16 + 2).clamp(12, 24); // 내용에 맞춘 텍스트 패널 높이
-            let split = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(text_h), Constraint::Min(6)]).split(area);
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(text_h), Constraint::Min(6)])
+                .split(area);
             f.render_widget(pblk, split[0]);
             let mut dash = Dashboard::new().min_width(30);
             for (s, label, unit) in present {
                 let key = format!("{}:{}", mk, s);
-                dash = dash.cell(move |f, rect| bar_timeline(f, rect, app, &key, label, unit, None));
+                dash =
+                    dash.cell(move |f, rect| bar_timeline(f, rect, app, &key, label, unit, None));
             }
             dash.render(f, split[1]);
         }
@@ -1659,27 +2808,58 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
     if let Some(p) = app.selected_pod() {
         title = "Pod";
         lines.push(kv("pod", &p.name, Color::White));
-        lines.push(kv("phase", &p.phase, if p.phase == "Running" { C_OK() } else { C_DIM() }));
+        lines.push(kv(
+            "phase",
+            &p.phase,
+            if p.phase == "Running" {
+                C_OK()
+            } else {
+                C_DIM()
+            },
+        ));
         lines.push(kv("ready", &p.ready, Color::White));
         lines.push(kv("node", &p.node, Color::White));
-        lines.push(kv("restarts", &p.restarts.to_string(), if p.restarts > 0 { C_WARN() } else { Color::White }));
+        lines.push(kv(
+            "restarts",
+            &p.restarts.to_string(),
+            if p.restarts > 0 {
+                C_WARN()
+            } else {
+                Color::White
+            },
+        ));
         lines.push(pivot_line(&[("i", "infra"), ("m", "model")]));
     } else {
-        lines.push(Line::from(Span::styled("no item selected", Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled(
+            "no item selected",
+            Style::default().fg(C_DIM()),
+        )));
     }
 
     f.render_widget(
-        Paragraph::new(lines).scroll((app.detail_scroll, 0)).wrap(Wrap { trim: false }).block(block(&format!("{}{}", title, nav))),
+        Paragraph::new(lines)
+            .scroll((app.detail_scroll, 0))
+            .wrap(Wrap { trim: false })
+            .block(block(&format!("{}{}", title, nav))),
         area,
     );
 }
 
 /// 드릴 pivot 안내 줄 — `pivot  [p] pods  [i] infra …`. 상세 패널·크로스레이어 내비 광고.
 fn pivot_line(pivots: &[(&str, &str)]) -> Line<'static> {
-    let mut sp = vec![Span::styled("pivot  ", Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD))];
+    let mut sp = vec![Span::styled(
+        "pivot  ",
+        Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+    )];
     for (k, label) in pivots {
-        sp.push(Span::styled(format!("[{}]", k), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)));
-        sp.push(Span::styled(format!(" {}  ", label), Style::default().fg(C_DIM())));
+        sp.push(Span::styled(
+            format!("[{}]", k),
+            Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+        ));
+        sp.push(Span::styled(
+            format!(" {}  ", label),
+            Style::default().fg(C_DIM()),
+        ));
     }
     Line::from(sp)
 }
@@ -1687,7 +2867,10 @@ fn pivot_line(pivots: &[(&str, &str)]) -> Line<'static> {
 /// pivot 미리보기 한 줄 — `[k] label  <peek>`. 키 누르면 해당 레이어로 이동(preview 로 먼저 엿봄).
 fn pivot_prev(key: &str, label: &str, preview: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("  [{}] ", key), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("  [{}] ", key),
+            Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!("{:<6} ", label), Style::default().fg(C_DIM())),
         Span::styled(preview.to_string(), Style::default().fg(Color::White)),
     ])
@@ -1709,19 +2892,37 @@ fn perf_detail_view(f: &mut Frame, area: Rect, app: &App, d: &PerfDetail) {
     // 구간별 percentile 테이블
     let qrow = |label: &str, a: &[f64; 3], col: Color| {
         Row::new(vec![
-            Cell::from(Span::styled(label.to_string(), Style::default().fg(C_DIM()))),
+            Cell::from(Span::styled(
+                label.to_string(),
+                Style::default().fg(C_DIM()),
+            )),
             Cell::from(Span::styled(ms(a[0]), Style::default().fg(col))),
             Cell::from(Span::styled(ms(a[1]), Style::default().fg(col))),
-            Cell::from(Span::styled(ms(a[2]), Style::default().fg(col).add_modifier(Modifier::BOLD))),
+            Cell::from(Span::styled(
+                ms(a[2]),
+                Style::default().fg(col).add_modifier(Modifier::BOLD),
+            )),
         ])
     };
     let qt = Table::new(
-        vec![qrow("TTFT", &d.ttft, C_ACC()), qrow("TPOT", &d.tpot, C_DECODE()), qrow("E2E", &d.e2e, C_WARN())],
-        [Constraint::Length(8), Constraint::Length(10), Constraint::Length(10), Constraint::Length(10)],
+        vec![
+            qrow("TTFT", &d.ttft, C_ACC()),
+            qrow("TPOT", &d.tpot, C_DECODE()),
+            qrow("E2E", &d.e2e, C_WARN()),
+        ],
+        [
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
+        ],
     )
     .header(hrow(&["METRIC", "p50", "p95", "p99"]))
     .column_spacing(2)
-    .block(block(&format!("latency percentiles · {} · esc back", truncw(&d.model, 30))));
+    .block(block(&format!(
+        "latency percentiles · {} · esc back",
+        truncw(&d.model, 30)
+    )));
     f.render_widget(qt, rows[0]);
 
     // 하단: 좌 = 지표별 시계열 타임라인 그리드, 우 = E2E 버킷 히스토그램.
@@ -1737,11 +2938,17 @@ fn perf_detail_view(f: &mut Frame, area: Rect, app: &App, d: &PerfDetail) {
         ("decode", "DECODE", "ms"),
         ("e2e", "E2E", "ms"),
     ];
-    let present: Vec<&(&str, &str, &str)> = series.iter().filter(|(s, _, _)| !app.hist_for(&format!("{}:{}", mk, s)).is_empty()).collect();
+    let present: Vec<&(&str, &str, &str)> = series
+        .iter()
+        .filter(|(s, _, _)| !app.hist_for(&format!("{}:{}", mk, s)).is_empty())
+        .collect();
     if present.is_empty() {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled("no per-model time series yet — populates under traffic", Style::default().fg(C_DIM()))))
-                .block(block("metrics over time")),
+            Paragraph::new(Line::from(Span::styled(
+                "no per-model time series yet — populates under traffic",
+                Style::default().fg(C_DIM()),
+            )))
+            .block(block("metrics over time")),
             grid_area,
         );
     } else {
@@ -1754,47 +2961,99 @@ fn perf_detail_view(f: &mut Frame, area: Rect, app: &App, d: &PerfDetail) {
     }
 
     // E2E 지연 버킷 분포(히스토그램) — 누적차 rate, 바 길이 = 상대 빈도.
-    let maxc = d.buckets.iter().map(|(_, c)| *c).fold(0.0f64, f64::max).max(1e-9);
+    let maxc = d
+        .buckets
+        .iter()
+        .map(|(_, c)| *c)
+        .fold(0.0f64, f64::max)
+        .max(1e-9);
     let mut hl: Vec<Line> = Vec::new();
     if d.buckets.iter().all(|(_, c)| *c <= 0.0) {
-        hl.push(Line::from(Span::styled("idle — E2E buckets populate under traffic", Style::default().fg(C_DIM()))));
+        hl.push(Line::from(Span::styled(
+            "idle — E2E buckets populate under traffic",
+            Style::default().fg(C_DIM()),
+        )));
     } else {
         let bw = (hist_area.width as usize).saturating_sub(20).clamp(8, 34);
         for (le, c) in &d.buckets {
             if *c <= 0.0 {
                 continue;
             }
-            let lbl = if le.is_infinite() { "  ∞".to_string() } else { format!("≤{}", ms(*le)) };
-            let mut sp = vec![Span::styled(format!("{:>8} ", lbl), Style::default().fg(C_DIM()))];
+            let lbl = if le.is_infinite() {
+                "  ∞".to_string()
+            } else {
+                format!("≤{}", ms(*le))
+            };
+            let mut sp = vec![Span::styled(
+                format!("{:>8} ", lbl),
+                Style::default().fg(C_DIM()),
+            )];
             sp.extend(bar_line(c / maxc * 100.0, bw, C_ACC()).spans);
-            sp.push(Span::styled(format!(" {:.2}/s", c), Style::default().fg(C_DIM())));
+            sp.push(Span::styled(
+                format!(" {:.2}/s", c),
+                Style::default().fg(C_DIM()),
+            ));
             hl.push(Line::from(sp));
         }
     }
-    f.render_widget(Paragraph::new(hl).block(block("E2E distribution · rate/bucket")), hist_area);
+    f.render_widget(
+        Paragraph::new(hl).block(block("E2E distribution · rate/bucket")),
+        hist_area,
+    );
 }
 
 // ── Perf (EPP 정책용 성능/분배) ─────────────────────────
 fn ms(v: f64) -> String {
-    if v.is_nan() { "–".into() } else if v >= 1.0 { format!("{:.2}s", v) } else { format!("{:.0}ms", v * 1000.0) }
+    if v.is_nan() {
+        "–".into()
+    } else if v >= 1.0 {
+        format!("{:.2}s", v)
+    } else {
+        format!("{:.0}ms", v * 1000.0)
+    }
 }
 fn rate(v: f64) -> String {
-    if v.is_nan() { "–".into() } else { format!("{:.2}", v) }
+    if v.is_nan() {
+        "–".into()
+    } else {
+        format!("{:.2}", v)
+    }
 }
 /// htop 식 braille 영역 그래프 타임라인 — 셀당 2×4 점으로 고해상도, 시점 값별 색(초록→빨강).
 /// 최신값 오른쪽(now) 고정. 외부 크레이트 없이 프레임 버퍼 직접 렌더. ymax_opt=Some(100)→0~100.
 #[allow(clippy::needless_range_loop)] // DOTS[dr][dc] 2D 인덱싱이 더 명확
-fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, unit: &str, ymax_opt: Option<f64>) {
+fn bar_timeline(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    key: &str,
+    label: &str,
+    unit: &str,
+    ymax_opt: Option<f64>,
+) {
     let raw = app.hist_for(key);
     let cur = raw.last().copied().unwrap_or(0);
     let dmax = raw.iter().copied().max().unwrap_or(0);
     // 자동 축: 피크가 높이의 ~80~90% 를 채우도록(살짝 헤드룸). 세밀 계단이라 과도한 여백 없음.
-    let ymax = ymax_opt.unwrap_or_else(|| nice_ceil((dmax as f64) * 1.05)).max(1.0);
+    let ymax = ymax_opt
+        .unwrap_or_else(|| nice_ceil((dmax as f64) * 1.05))
+        .max(1.0);
     let cur_pct = (cur as f64 / ymax * 100.0).clamp(0.0, 100.0);
     let ttl = Line::from(vec![
-        Span::styled(format!(" {} ", label), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("▏ now {}{} ", cur, unit), Style::default().fg(grad_color(cur_pct)).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("▏ max {}{} ", dmax, unit), Style::default().fg(C_DIM())),
+        Span::styled(
+            format!(" {} ", label),
+            Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("▏ now {}{} ", cur, unit),
+            Style::default()
+                .fg(grad_color(cur_pct))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("▏ max {}{} ", dmax, unit),
+            Style::default().fg(C_DIM()),
+        ),
     ]);
     let blk = Block::default()
         .borders(Borders::ALL)
@@ -1815,7 +3074,9 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
     let n = data.len();
     // 서브열 gsc(왼→오)의 채움 높이(서브행, 바닥부터) / 값%
     let sample = |gsc: usize| -> Option<f64> {
-        if gsc + n < sub_cols { return None; } // 데이터 없는 왼쪽
+        if gsc + n < sub_cols {
+            return None;
+        } // 데이터 없는 왼쪽
         Some(data[gsc + n - sub_cols] as f64)
     };
     // 점 비트: [세로행 0..4(위→아래)][가로열 0..2]
@@ -1846,7 +3107,9 @@ fn bar_timeline(f: &mut Frame, area: Rect, app: &App, key: &str, label: &str, un
             }
             if bits != 0 {
                 let ch = char::from_u32(0x2800 + bits as u32).unwrap_or('⣿');
-                buf[(inner.x + cx as u16, inner.y + cy as u16)].set_char(ch).set_fg(grad_color(vmax));
+                buf[(inner.x + cx as u16, inner.y + cy as u16)]
+                    .set_char(ch)
+                    .set_fg(grad_color(vmax));
             }
         }
     }
@@ -1861,10 +3124,13 @@ fn nice_ceil(v: f64) -> f64 {
     let mag = 10f64.powf(v.log10().floor());
     let n = v / mag;
     const STEPS: [f64; 10] = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0];
-    let step = STEPS.iter().copied().find(|&s| n <= s + 1e-9).unwrap_or(10.0);
+    let step = STEPS
+        .iter()
+        .copied()
+        .find(|&s| n <= s + 1e-9)
+        .unwrap_or(10.0);
     step * mag
 }
-
 
 fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     // 드릴: 선택 모델 지연 분포(Enter). perf_detail 이 채워져 있으면 그것부터.
@@ -1875,14 +3141,20 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         }
     }
     let p = &app.snap.perf;
-    let any = [p.e2e_p95, p.ttft_p95, p.tps, p.req_rate].iter().any(|x| !x.is_nan());
+    let any = [p.e2e_p95, p.ttft_p95, p.tps, p.req_rate]
+        .iter()
+        .any(|x| !x.is_nan());
 
     // 디바이스 패널 높이는 대수에 맞춰 가변(작은 클러스터는 컴팩트, 큰 건 상한). 상한 초과분은 "+N more".
     let ndev = app.snap.accel.len().max(1) as u16;
     let dev_h = (ndev + 2).clamp(6, 18);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(dev_h), Constraint::Length(3), Constraint::Min(5)])
+        .constraints([
+            Constraint::Length(dev_h),
+            Constraint::Length(3),
+            Constraint::Min(5),
+        ])
         .split(area);
 
     // 상단: 디바이스별 util/VRAM 시계열을 컴팩트 한 줄 스파크라인으로(바로 보이는 개요).
@@ -1891,25 +3163,55 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     let spark_w = (inner_w.saturating_sub(38) / 2).clamp(6, 30);
     let mut dlines: Vec<Line> = Vec::new();
     if app.snap.accel.is_empty() {
-        dlines.push(Line::from(Span::styled("(no accelerators)", Style::default().fg(C_DIM()))));
+        dlines.push(Line::from(Span::styled(
+            "(no accelerators)",
+            Style::default().fg(C_DIM()),
+        )));
     }
     for a in &app.snap.accel {
         let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
         let uh = app.hist_for(&format!("{}:util", k));
         let mh = app.hist_for(&format!("{}:mem", k));
-        let memp = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
-        let (hg, hc) = if !a.alive { ("✗", C_BAD()) } else if a.throttle > 0.0 { ("⚠", C_WARN()) } else { ("●", C_OK()) };
+        let memp = if a.mem_total_gb > 0.0 {
+            a.mem_used_gb / a.mem_total_gb * 100.0
+        } else {
+            0.0
+        };
+        let (hg, hc) = if !a.alive {
+            ("✗", C_BAD())
+        } else if a.throttle > 0.0 {
+            ("⚠", C_WARN())
+        } else {
+            ("●", C_OK())
+        };
         let mut sp = vec![
             Span::styled(format!("{} ", hg), Style::default().fg(hc)),
-            Span::styled(format!("{:<5}", a.disp()), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:<6} ", truncw(&a.id, 6)), Style::default().fg(C_DIM())),
+            Span::styled(
+                format!("{:<5}", a.disp()),
+                Style::default()
+                    .fg(kind_color(a.kind))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<6} ", truncw(&a.id, 6)),
+                Style::default().fg(C_DIM()),
+            ),
             Span::styled("util ", Style::default().fg(C_DIM())),
         ];
         sp.extend(spark_colored(&uh, spark_w, 100));
-        sp.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
-        sp.push(Span::styled(if a.unified_mem { "  m∪ " } else { "  vram " }, Style::default().fg(C_DIM())));
+        sp.push(Span::styled(
+            format!(" {:>3.0}%", a.util),
+            Style::default().fg(util_color(a.util)),
+        ));
+        sp.push(Span::styled(
+            if a.unified_mem { "  m∪ " } else { "  vram " },
+            Style::default().fg(C_DIM()),
+        ));
         sp.extend(spark_colored(&mh, spark_w, 100));
-        sp.push(Span::styled(format!(" {:>3.0}%", memp), Style::default().fg(mem_color(memp))));
+        sp.push(Span::styled(
+            format!(" {:>3.0}%", memp),
+            Style::default().fg(mem_color(memp)),
+        ));
         dlines.push(Line::from(sp));
     }
     // 무언의 잘림 방지: 패널에 안 들어가면 마지막 줄을 "+N more" 로(전체는 Accel 탭).
@@ -1917,25 +3219,45 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     if dlines.len() > cap && cap > 0 {
         let hidden = dlines.len() - (cap - 1);
         dlines.truncate(cap - 1);
-        dlines.push(Line::from(Span::styled(format!("  … +{} more (see Accel tab)", hidden), Style::default().fg(C_DIM()))));
+        dlines.push(Line::from(Span::styled(
+            format!("  … +{} more (see Accel tab)", hidden),
+            Style::default().fg(C_DIM()),
+        )));
     }
-    f.render_widget(Paragraph::new(dlines).block(block("Devices · util / VRAM over time (now on right)")), rows[0]);
+    f.render_widget(
+        Paragraph::new(dlines).block(block("Devices · util / VRAM over time (now on right)")),
+        rows[0],
+    );
 
     // throughput 숫자 + 데이터 없음 안내
     let tl = Line::from(vec![
         Span::styled("req/s ", Style::default().fg(C_DIM())),
-        Span::styled(format!("{}  ", rate(p.req_rate)), Style::default().fg(C_OK())),
+        Span::styled(
+            format!("{}  ", rate(p.req_rate)),
+            Style::default().fg(C_OK()),
+        ),
         Span::styled("err/s ", Style::default().fg(C_DIM())),
-        Span::styled(format!("{}  ", rate(p.err_rate)), Style::default().fg(if p.err_rate > 0.0 { C_BAD() } else { C_DIM() })),
+        Span::styled(
+            format!("{}  ", rate(p.err_rate)),
+            Style::default().fg(if p.err_rate > 0.0 { C_BAD() } else { C_DIM() }),
+        ),
         Span::styled("tok/s ", Style::default().fg(C_DIM())),
         Span::styled(format!("{}  ", rate(p.tps)), Style::default().fg(C_OK())),
         Span::styled("prefix-hit ", Style::default().fg(C_DIM())),
         Span::styled(
-            if p.prefix_hit.is_nan() { "–  ".into() } else { format!("{:.0}%  ", p.prefix_hit * 100.0) },
+            if p.prefix_hit.is_nan() {
+                "–  ".into()
+            } else {
+                format!("{:.0}%  ", p.prefix_hit * 100.0)
+            },
             Style::default().fg(C_ACC()),
         ),
         Span::styled(
-            if any { "" } else { "· no data: needs EPP-path traffic + vLLM metrics" },
+            if any {
+                ""
+            } else {
+                "· no data: needs EPP-path traffic + vLLM metrics"
+            },
             Style::default().fg(C_WARN()),
         ),
     ]);
@@ -1954,10 +3276,15 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         };
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled("no per-model perf data", Style::default().fg(C_DIM()))),
+                Line::from(Span::styled(
+                    "no per-model perf data",
+                    Style::default().fg(C_DIM()),
+                )),
                 Line::from(Span::styled(msg, Style::default().fg(C_DIM()))),
             ])
-            .block(block("Per-model perf (p95) · latency / tokens / throughput")),
+            .block(block(
+                "Per-model perf (p95) · latency / tokens / throughput",
+            )),
             bodyc_l,
         );
     } else {
@@ -1968,7 +3295,10 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
                 let preempt_cell = if r.preempt.is_nan() || r.preempt <= 0.0 {
                     Cell::from(Span::styled("·", Style::default().fg(C_DIM())))
                 } else {
-                    Cell::from(Span::styled(format!("{:.2}", r.preempt), Style::default().fg(C_BAD())))
+                    Cell::from(Span::styled(
+                        format!("{:.2}", r.preempt),
+                        Style::default().fg(C_BAD()),
+                    ))
                 };
                 // SLO 상태 글리프(목표 대비): ●충족 ◐부분 ✗위반 ·목표없음.
                 let adv = app.perf_advice(r);
@@ -1991,8 +3321,14 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(Span::styled(rate(r.tps), Style::default().fg(C_OK()))),
                     cellw(ms(r.ttft_p95), 7),
                     Cell::from(Span::styled(ms(r.queue_p95), Style::default().fg(C_WARN()))), // 대기
-                    Cell::from(Span::styled(ms(r.prefill_p95), Style::default().fg(C_PREFILL()))), // P
-                    Cell::from(Span::styled(ms(r.decode_p95), Style::default().fg(C_DECODE()))), // D
+                    Cell::from(Span::styled(
+                        ms(r.prefill_p95),
+                        Style::default().fg(C_PREFILL()),
+                    )), // P
+                    Cell::from(Span::styled(
+                        ms(r.decode_p95),
+                        Style::default().fg(C_DECODE()),
+                    )), // D
                     cellw(ms(r.tpot_p95), 7),
                     Cell::from(Span::styled(ms(r.e2e_p95), Style::default().fg(C_WARN()))),
                     preempt_cell,
@@ -2014,10 +3350,25 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
                 Constraint::Length(6),
             ],
         )
-        .header(hrow(&["MODEL", "req/s", "tok/s", "TTFT", "QUEUE", "PFILL", "DECODE", "TPOT", "E2E", "premt"]));
+        .header(hrow_sorted(
+            &[
+                "MODEL", "req/s", "tok/s", "TTFT", "QUEUE", "PFILL", "DECODE", "TPOT", "E2E",
+                "premt",
+            ],
+            app.sort_header_label(),
+            app.sort_arrow(),
+        ));
         let title = match app.agg_summary() {
             Some(a) => format!("Per-model perf · ⏎ drill  —  {}", a),
-            None => format!("Per-model perf · active · o sort:{} · ⏎ drill{}", app.sort_label(), if mfocus { count_suffix(app.selected, order.len()) } else { String::new() }),
+            None => format!(
+                "Per-model perf · active · o sort:{} · ⏎ drill{}",
+                app.sort_label(),
+                if mfocus {
+                    count_suffix(app.selected, order.len())
+                } else {
+                    String::new()
+                }
+            ),
         };
         // per-model 표 + 하단 SLO 어드바이저(선택 모델).
         let lc = Layout::default()
@@ -2025,7 +3376,11 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             .constraints([Constraint::Min(4), Constraint::Length(5)])
             .split(bodyc_l);
         let (tbl_area, adv_area) = (lc[0], lc[1]);
-        let mut mt = mt.column_spacing(1).block(if mfocus { block_active(&title) } else { block(&title) });
+        let mut mt = mt.column_spacing(1).block(if mfocus {
+            block_active(&title)
+        } else {
+            block(&title)
+        });
         if mfocus {
             mt = mt.row_highlight_style(hl_style()).highlight_symbol("▎");
         }
@@ -2041,38 +3396,70 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             let r = &app.snap.perf_rows[si];
             let adv = app.perf_advice(r);
             if !adv.has_obj {
-                al.push(Line::from(Span::styled("no objective — set via Models → ⏎ Objective (target TTFT/TPOT/E2E/tok·s)", Style::default().fg(C_DIM()))));
+                al.push(Line::from(Span::styled(
+                    "no objective — set via Models → ⏎ Objective (target TTFT/TPOT/E2E/tok·s)",
+                    Style::default().fg(C_DIM()),
+                )));
             } else {
                 let mut sp = vec![Span::styled("SLO  ", Style::default().fg(C_DIM()))];
                 for (m, ok) in &adv.checks {
-                    sp.push(Span::styled(format!("{}{}  ", if *ok { "✓" } else { "✗" }, m), Style::default().fg(if *ok { C_OK() } else { C_BAD() })));
+                    sp.push(Span::styled(
+                        format!("{}{}  ", if *ok { "✓" } else { "✗" }, m),
+                        Style::default().fg(if *ok { C_OK() } else { C_BAD() }),
+                    ));
                 }
                 if adv.checks.is_empty() {
-                    sp.push(Span::styled("(no observed metrics yet)", Style::default().fg(C_DIM())));
+                    sp.push(Span::styled(
+                        "(no observed metrics yet)",
+                        Style::default().fg(C_DIM()),
+                    ));
                 }
                 al.push(Line::from(sp));
                 for t in adv.tips.iter().take(2) {
-                    al.push(Line::from(Span::styled(format!("→ {}", t), Style::default().fg(C_WARN()))));
+                    al.push(Line::from(Span::styled(
+                        format!("→ {}", t),
+                        Style::default().fg(C_WARN()),
+                    )));
                 }
                 if adv.all_met() {
-                    al.push(Line::from(Span::styled("→ meets objective ✓", Style::default().fg(C_OK()))));
+                    al.push(Line::from(Span::styled(
+                        "→ meets objective ✓",
+                        Style::default().fg(C_OK()),
+                    )));
                 }
             }
         }
-        f.render_widget(Paragraph::new(al).block(block("SLO advisor (data-driven)")), adv_area);
+        f.render_widget(
+            Paragraph::new(al).block(block("SLO advisor (data-driven)")),
+            adv_area,
+        );
     }
 
     // per-pod queue (요청 분배 — 절대 큐 깊이). focus 1 이면 선택 강조.
     let qfocus = app.panel_focus == 1;
     let mut ql: Vec<Line> = Vec::new();
-    let maxq = app.snap.pod_queues.iter().map(|(_, q)| *q).fold(1.0, f64::max);
+    let maxq = app
+        .snap
+        .pod_queues
+        .iter()
+        .map(|(_, q)| *q)
+        .fold(1.0, f64::max);
     if app.snap.pod_queues.is_empty() {
-        ql.push(Line::from(Span::styled("no per-pod queue data", Style::default().fg(C_DIM()))));
+        ql.push(Line::from(Span::styled(
+            "no per-pod queue data",
+            Style::default().fg(C_DIM()),
+        )));
     } else {
         for (j, (pod, q)) in app.snap.pod_queues.iter().enumerate().take(12) {
-            let mut sp = vec![Span::styled(format!("{:<20} ", truncw(pod, 20)), Style::default().fg(Color::White))];
+            let mut sp = vec![Span::styled(
+                format!("{:<20} ", truncw(pod, 20)),
+                Style::default().fg(Color::White),
+            )];
             sp.extend(bar_line(q / maxq * 100.0, 8, C_ACC()).spans);
-            sp.push(Span::styled(format!(" {:.0}", q), Style::default().fg(C_DIM())));
+            sp.push(Span::styled(
+                format!(" {:.0}", q),
+                Style::default().fg(C_DIM()),
+            ));
             let mut line = Line::from(sp);
             if qfocus && app.selected == j {
                 line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
@@ -2080,8 +3467,22 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             ql.push(line);
         }
     }
-    let qtitle = format!("request distribution (per-pod queue){}", if qfocus { count_suffix(app.selected, app.snap.pod_queues.len()) } else { String::new() });
-    f.render_widget(Paragraph::new(ql).block(if qfocus { block_active(&qtitle) } else { block(&qtitle) }), bodyc_r);
+    let qtitle = format!(
+        "request distribution (per-pod queue){}",
+        if qfocus {
+            count_suffix(app.selected, app.snap.pod_queues.len())
+        } else {
+            String::new()
+        }
+    );
+    f.render_widget(
+        Paragraph::new(ql).block(if qfocus {
+            block_active(&qtitle)
+        } else {
+            block(&qtitle)
+        }),
+        bodyc_r,
+    );
 }
 
 /// 컴파일 진행바 스팬 — progress Some 이면 실측 determinate([███░░] 45%),
@@ -2096,7 +3497,10 @@ fn compile_progress_bar(progress: Option<f32>, tick: u64, width: usize) -> Vec<S
             let col = if p >= 1.0 { C_OK() } else { C_ACC() };
             vec![
                 Span::styled(bar, Style::default().fg(col)),
-                Span::styled(format!(" {:>3.0}%", p * 100.0), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(" {:>3.0}%", p * 100.0),
+                    Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+                ),
             ]
         }
         None => {
@@ -2113,218 +3517,415 @@ fn compile_progress_bar(progress: Option<f32>, tick: u64, width: usize) -> Vec<S
     }
 }
 
-// ── Launch (모델 카탈로그 + 배치 솔버, 읽기전용) ────────
-// Deploy — 모델 라이프사이클: 컴파일 변형(어디 저장/어떤 옵션) → 배치 타깃 → 카탈로그(가능성).
-// 컴파일/배포 실행은 Phase 2(게이팅) 예정 — 지금은 관측·계획.
-fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(6), Constraint::Length(6), Constraint::Length(6), Constraint::Length(6)])
-        .split(area);
-    let focus = app.panel_focus; // 0 변형 · 1 타깃 · 2 카탈로그 · 3 진행 중 컴파일
-    let blk = |title: &str, active: bool| if active { block_active(title) } else { block(title) };
-
-    // ── 1) 컴파일 변형: family → variant 트리(배포된 것 + 스토어에만 있는 것) ──
-    let mut fams: Vec<(String, Vec<usize>)> = Vec::new();
-    for i in 0..app.snap.artifacts.len() {
-        let fam = app.snap.artifacts[i].family.clone();
-        if let Some(e) = fams.iter_mut().find(|(k, _)| *k == fam) {
-            e.1.push(i);
-        } else {
-            fams.push((fam, vec![i]));
-        }
-    }
-    // 스토어 인벤토리(배포 무관)를 family 별로 — 배포된 family 없으면 새 family 로.
-    let stored_of = |fam: &str| -> Vec<&crate::collect::StoredModel> { app.snap.stored.iter().filter(|s| s.family == fam).collect() };
-    for s in &app.snap.stored {
-        if !fams.iter().any(|(k, _)| *k == s.family) {
-            fams.push((s.family.clone(), Vec::new()));
-        }
-    }
-    let vsel = if focus == 0 { app.sel_orig() } else { None };
+// ── Deploy▸Serving — 현재 서빙 중인 배포(라이브 아티팩트). family › version › running-target 트리. ──
+// 라이프사이클 렌즈: 무엇이 도는지 · 어느 컴파일 타깃/디바이스로 · replica 상태. 액션 x/s/r/y/l/o.
+fn view_serving(f: &mut Frame, area: Rect, app: &App) {
+    let order = app.serving_order(); // family›version 그룹 순서(내비=표시 일치)
     let mut lines: Vec<Line> = Vec::new();
     let mut sel_line = 0usize;
-    // 범례 — 상태(운영중/중지/배포가능)와 타입(원본/컴파일본) 구별.
     lines.push(Line::from(vec![
-        Span::styled("상태: ", Style::default().fg(C_DIM())),
-        Span::styled("● 운영중 ", Style::default().fg(C_OK())),
-        Span::styled("◑ 시작중 ", Style::default().fg(C_WARN())),
-        Span::styled("○ 중지 ", Style::default().fg(C_DIM())),
-        Span::styled("◇ 배포가능(스토어)   ", Style::default().fg(C_ACC())),
-        Span::styled("타입: ", Style::default().fg(C_DIM())),
+        Span::styled("state: ", Style::default().fg(C_DIM())),
+        Span::styled("● running ", Style::default().fg(C_OK())),
+        Span::styled("◑ starting ", Style::default().fg(C_WARN())),
+        Span::styled("○ stopped(0)   ", Style::default().fg(C_DIM())),
+        Span::styled("type: ", Style::default().fg(C_DIM())),
         tag("HF", C_ACC()),
-        Span::styled("원본 ", Style::default().fg(C_DIM())),
         tag("RBLN", Color::Magenta),
         tag("RNGD", C_WARN()),
-        Span::styled("컴파일본", Style::default().fg(C_DIM())),
     ]));
-    if fams.is_empty() {
-        lines.push(Line::from(Span::styled("(no models — deploy one, or set up the shared model-store)", Style::default().fg(C_DIM()))));
+    if order.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(현재 서빙 중인 배포 없음 — Library[Tab]에서 모델을 배포하세요)",
+            Style::default().fg(C_DIM()),
+        )));
     }
-    for (fam, idxs) in &fams {
-        let stored = stored_of(fam);
-        let total = idxs.len() + stored.len();
-        lines.push(Line::from(vec![
-            Span::styled("▪ ", Style::default().fg(C_ACC())),
-            Span::styled(fam.clone(), Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  ({} build{})", total, if total == 1 { "" } else { "s" }), Style::default().fg(C_DIM())),
-        ]));
-        let last = idxs.len();
-        for (j, &i) in idxs.iter().enumerate() {
-            let a = &app.snap.artifacts[i];
-            let selected = vsel == Some(i);
-            if selected {
-                sel_line = lines.len();
-            }
-            let br = if j + 1 == last { "  └─ " } else { "  ├─ " };
-            // 상태(운영중/시작중/중지/미배포) — 모델 ready/desired 기준으로 명확히.
-            let m = app.snap.models.iter().find(|m| m.name == a.model);
-            let (g, gc) = match m {
-                Some(m) if m.ready > 0 => ("●", C_OK()),
-                Some(m) if m.desired > 0 => ("◑", C_WARN()),
-                Some(_) => ("○", C_DIM()),
-                None => ("○", C_DIM()),
-            };
-            // 타입 배지 — 엔진으로 원본(HF)/컴파일본(RBLN/RNGD) 구별.
-            let tbadge = if a.engine.contains("RBLN") {
-                tag("RBLN", Color::Magenta)
-            } else if a.engine.contains("Furiosa") {
-                tag("RNGD", C_WARN())
-            } else {
-                tag("HF", C_ACC())
-            };
-            let opts = opts_summary(a);
-            let npu = matches!(a.engine.as_str(), "vLLM-RBLN" | "Furiosa-LLM") || a.engine.contains("RBLN");
-            let mut sp = vec![
-                Span::styled(br.to_string(), Style::default().fg(C_TRACK())),
-                Span::styled(format!("{} ", g), Style::default().fg(gc)),
-                tbadge,
-                Span::styled(format!(" {:<18} ", truncw(&a.model, 18)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:<11} ", truncw(&a.engine, 11)), Style::default().fg(C_ACC())),
-                Span::styled(format!("{:<26} ", truncw(if opts.is_empty() { "–" } else { &opts }, 26)), Style::default().fg(if npu { C_WARN() } else { Color::Gray })),
-                Span::styled(format!("@{}", if a.node.is_empty() { "?" } else { &a.node }), Style::default().fg(C_DIM())),
-            ];
-            if !a.mount.is_empty() {
-                sp.push(Span::styled(format!(" {}", truncw(a.mount.split(" ← ").next().unwrap_or(&a.mount), 14)), Style::default().fg(C_TRACK())));
-            }
-            let mut line = Line::from(sp);
-            if selected {
-                line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
-            }
-            lines.push(line);
-        }
-        // 스토어에만 있는(배포 안 된) 빌드 — ○ 로 구분, 컴파일 타깃/포맷/크기.
-        let slast = stored.len();
-        for (k, s) in stored.iter().enumerate() {
-            let br = if k + 1 == slast && idxs.is_empty() { "  └─ " } else { "  ├─ " };
-            // 배포가능(스토어에만 있고 운영 안 됨) — ◇. 타입 배지 + 원본/컴파일본 라벨.
-            let tbadge = match s.format.as_str() {
-                "rbln" => tag("RBLN", Color::Magenta),
-                "furiosa" => tag("RNGD", C_WARN()),
-                _ => tag("HF", C_ACC()),
-            };
-            let label = if s.format == "hf" {
-                if s.revision.is_empty() || s.revision == "-" { "원본 가중치(HF)".to_string() } else { format!("원본 @{}", truncw(&s.revision, 8)) }
-            } else {
-                format!("컴파일본 · {}", s.compiled_for)
-            };
+    let ver_of = crate::app::App::artifact_version;
+    let mut last_fam = String::new();
+    let mut last_ver = String::new();
+    for (pos, &i) in order.iter().enumerate() {
+        let a = &app.snap.artifacts[i];
+        let fam = a.family.clone();
+        let ver = ver_of(a);
+        // 같은 family 안에 서로 다른 version 이 둘 이상일 때만 version 티어를 노출(적응형 접기).
+        let ver_cnt = order
+            .iter()
+            .filter(|&&k| app.snap.artifacts[k].family == fam)
+            .map(|&k| ver_of(&app.snap.artifacts[k]))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        if fam != last_fam {
+            let cnt = order
+                .iter()
+                .filter(|&&k| app.snap.artifacts[k].family == fam)
+                .count();
             lines.push(Line::from(vec![
-                Span::styled(br.to_string(), Style::default().fg(C_TRACK())),
-                Span::styled("◇ ", Style::default().fg(C_ACC())),
-                tbadge,
-                Span::styled(format!(" {:<30} ", truncw(&s.repo, 30)), Style::default().fg(Color::Gray)),
-                Span::styled(format!("{:<22} ", truncw(&label, 22)), Style::default().fg(if s.format == "hf" { C_DIM() } else { C_WARN() })),
-                Span::styled(format!("{}  ", s.size), Style::default().fg(C_DIM())),
-                Span::styled(truncw(&s.path, 22), Style::default().fg(C_TRACK())),
+                Span::styled("▪ ", Style::default().fg(C_ACC())),
+                Span::styled(
+                    fam.clone(),
+                    Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  ({} deploy{})", cnt, if cnt == 1 { "" } else { "s" }),
+                    Style::default().fg(C_DIM()),
+                ),
             ]));
+            last_fam = fam.clone();
+            last_ver.clear();
         }
+        if ver != last_ver {
+            if ver_cnt > 1 {
+                lines.push(Line::from(vec![
+                    Span::styled("  › ", Style::default().fg(C_TRACK())),
+                    Span::styled(truncw(&ver, 48), Style::default().fg(Color::Gray)),
+                ]));
+            }
+            last_ver = ver.clone();
+        }
+        let indent = if ver_cnt > 1 { "     └ " } else { "  └ " };
+        let m = app.snap.models.iter().find(|m| m.name == a.model);
+        let (g, gc) = match m {
+            Some(m) if m.ready > 0 => ("●", C_OK()),
+            Some(m) if m.desired > 0 => ("◑", C_WARN()),
+            _ => ("○", C_DIM()),
+        };
+        let tbadge = if a.engine.contains("RBLN") {
+            tag("RBLN", Color::Magenta)
+        } else if a.engine.contains("Furiosa") {
+            tag("RNGD", C_WARN())
+        } else {
+            tag("HF", C_ACC())
+        };
+        let opts = opts_summary(a);
+        let npu =
+            matches!(a.engine.as_str(), "vLLM-RBLN" | "Furiosa-LLM") || a.engine.contains("RBLN");
+        let reps = m
+            .map(|m| format!("{}/{} rep", m.ready, m.desired))
+            .unwrap_or_else(|| "–".into());
+        let selected = pos == app.selected;
+        if selected {
+            sel_line = lines.len();
+        }
+        let mut sp = vec![
+            Span::styled(indent.to_string(), Style::default().fg(C_TRACK())),
+            Span::styled(format!("{} ", g), Style::default().fg(gc)),
+            tbadge,
+            Span::styled(
+                format!(" {:<14} ", truncw(&a.model, 14)),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "{:<24} ",
+                    truncw(if opts.is_empty() { "–" } else { &opts }, 24)
+                ),
+                Style::default().fg(if npu { C_WARN() } else { Color::Gray }),
+            ),
+            Span::styled(format!("{:<9} ", reps), Style::default().fg(C_ACC())),
+            Span::styled(
+                format!("@{}", if a.node.is_empty() { "?" } else { &a.node }),
+                Style::default().fg(C_DIM()),
+            ),
+        ];
+        if let Some(t) = m.and_then(|m| m.tps) {
+            sp.push(Span::styled(
+                format!("  {:.0} tok/s", t),
+                Style::default().fg(C_OK()),
+            ));
+        }
+        let mut line = Line::from(sp);
+        if selected {
+            line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+        }
+        lines.push(line);
     }
-    let vis = (rows[0].height as usize).saturating_sub(2);
-    let scroll = if sel_line + 2 > vis { (sel_line + 3).saturating_sub(vis) as u16 } else { 0 };
-    let vtotal = app.snap.artifacts.len();
+    let vis = (area.height as usize).saturating_sub(2);
+    let scroll = if sel_line + 2 > vis {
+        (sel_line + 3).saturating_sub(vis) as u16
+    } else {
+        0
+    };
     f.render_widget(
-        Paragraph::new(lines).scroll((scroll, 0)).block(blk(&format!("모델 (계열 → 빌드) · ●운영중 ◇배포가능 · [HF]원본 [RBLN/RNGD]컴파일본 · ⏎ actions{}", if focus == 0 { count_suffix(app.selected, vtotal) } else { String::new() }), focus == 0)),
+        Paragraph::new(lines).scroll((scroll, 0)).block(block_active(&format!(
+            "Serving · 현재 서빙 중 (family › version › target) · x stop · s scale · r restart · y yaml · l logs · ⏎ actions{}",
+            count_suffix(app.selected, order.len())
+        ))),
+        area,
+    );
+}
+
+// ── Deploy▸Library — 배포 가능한 모델 라이브러리. ──
+// 배포 렌즈 3패널: 0 스토어 컴파일본(family›repo›target, 선택·배포) · 1 카탈로그(조직 제공) · 2 진행 중 컴파일.
+fn view_library(f: &mut Frame, area: Rect, app: &App) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(6),
+            Constraint::Length(7),
+            Constraint::Length(6),
+        ])
+        .split(area);
+    let focus = app.panel_focus; // 0 스토어 빌드 · 1 카탈로그 · 2 진행 중 컴파일
+    let blk = |title: &str, active: bool| {
+        if active {
+            block_active(title)
+        } else {
+            block(title)
+        }
+    };
+
+    // ── 1) 스토어 컴파일본: family › repo › target(포맷/compiled_for). 물리적으로 존재하는 배포 가능 빌드. ──
+    let sorder = app.stored_order();
+    let mut sl: Vec<Line> = Vec::new();
+    sl.push(Line::from(vec![
+        Span::styled("type: ", Style::default().fg(C_DIM())),
+        tag("HF", C_ACC()),
+        Span::styled("source ", Style::default().fg(C_DIM())),
+        tag("RBLN", Color::Magenta),
+        tag("RNGD", C_WARN()),
+        Span::styled("compiled · ◇ deployable", Style::default().fg(C_DIM())),
+    ]));
+    if sorder.is_empty() {
+        sl.push(Line::from(Span::styled(
+            "(스토어에 빌드 없음 — 카탈로그에서 컴파일하면 discovery 후 여기 나타남)",
+            Style::default().fg(C_DIM()),
+        )));
+    }
+    let mut ssel_line = 0usize;
+    let mut last_fam = String::new();
+    let mut last_repo = String::new();
+    for (pos, &i) in sorder.iter().enumerate() {
+        let s = &app.snap.stored[i];
+        let fam = s.family.clone();
+        let repo_cnt = sorder
+            .iter()
+            .filter(|&&k| app.snap.stored[k].family == fam)
+            .map(|&k| app.snap.stored[k].repo.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        if fam != last_fam {
+            let cnt = sorder
+                .iter()
+                .filter(|&&k| app.snap.stored[k].family == fam)
+                .count();
+            sl.push(Line::from(vec![
+                Span::styled("▪ ", Style::default().fg(C_ACC())),
+                Span::styled(
+                    fam.clone(),
+                    Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  ({} build{})", cnt, if cnt == 1 { "" } else { "s" }),
+                    Style::default().fg(C_DIM()),
+                ),
+            ]));
+            last_fam = fam.clone();
+            last_repo.clear();
+        }
+        if s.repo != last_repo {
+            if repo_cnt > 1 {
+                sl.push(Line::from(vec![
+                    Span::styled("  › ", Style::default().fg(C_TRACK())),
+                    Span::styled(truncw(&s.repo, 48), Style::default().fg(Color::Gray)),
+                ]));
+            }
+            last_repo = s.repo.clone();
+        }
+        let indent = if repo_cnt > 1 { "     └ " } else { "  └ " };
+        let (tbadge, is_src) = match s.format.as_str() {
+            "rbln" => (tag("RBLN", Color::Magenta), false),
+            "furiosa" => (tag("RNGD", C_WARN()), false),
+            _ => (tag("HF", C_ACC()), true),
+        };
+        let label = if is_src {
+            if s.revision.is_empty() || s.revision == "-" {
+                "source weights".to_string()
+            } else {
+                format!("source @{}", truncw(&s.revision, 8))
+            }
+        } else {
+            format!("compiled · {}", s.compiled_for)
+        };
+        let selected = focus == 0 && pos == app.selected;
+        if selected {
+            ssel_line = sl.len();
+        }
+        let mut sp = vec![
+            Span::styled(indent.to_string(), Style::default().fg(C_TRACK())),
+            Span::styled("◇ ", Style::default().fg(C_ACC())),
+            tbadge,
+        ];
+        // 버전(repo) 티어가 접혔으면 repo 이름을 leaf 에 병기(식별용).
+        if repo_cnt <= 1 {
+            sp.push(Span::styled(
+                format!(
+                    " {:<20} ",
+                    truncw(s.repo.rsplit('/').next().unwrap_or(&s.repo), 20)
+                ),
+                Style::default().fg(Color::White),
+            ));
+        }
+        sp.push(Span::styled(
+            format!(" {:<24} ", truncw(&label, 24)),
+            Style::default().fg(if is_src { C_DIM() } else { C_WARN() }),
+        ));
+        sp.push(Span::styled(
+            format!("{:<7} ", s.size),
+            Style::default().fg(C_DIM()),
+        ));
+        sp.push(Span::styled(
+            truncw(&s.path, 26),
+            Style::default().fg(C_TRACK()),
+        ));
+        let mut line = Line::from(sp);
+        if selected {
+            line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+        }
+        sl.push(line);
+    }
+    let svis = (rows[0].height as usize).saturating_sub(2);
+    let sscroll = if ssel_line + 2 > svis {
+        (ssel_line + 3).saturating_sub(svis) as u16
+    } else {
+        0
+    };
+    f.render_widget(
+        Paragraph::new(sl).scroll((sscroll, 0)).block(blk(
+            &format!(
+                "Library · 스토어 빌드 (family › repo › target) · d deploy · ⏎ actions{}",
+                if focus == 0 {
+                    count_suffix(app.selected, sorder.len())
+                } else {
+                    String::new()
+                }
+            ),
+            focus == 0,
+        )),
         rows[0],
     );
 
-    // ── 2) 배치 타깃: 노드별 디바이스 점유(focus 1 일 때 선택/강조) ──
-    let nodes = app.target_nodes();
-    let mut tl: Vec<Line> = Vec::new();
-    if nodes.is_empty() {
-        tl.push(Line::from(Span::styled("(no accelerators)", Style::default().fg(C_DIM()))));
+    // ── 2) 카탈로그 트리(focus 1): family › model, 재고 가능성 배지 + 타깃(placement) 벤더 요약 ──
+    let corder = app.library_order();
+    let mut cl: Vec<Line> = Vec::new();
+    if corder.is_empty() {
+        cl.push(Line::from(Span::styled(
+            "(카탈로그 비어있음 — catalog/models.yaml 또는 LMD_CATALOG)",
+            Style::default().fg(C_DIM()),
+        )));
     }
-    // 노드 → (kind → 그 노드의 해당 kind 디바이스들). LED 로 점유(●=busy, ○=free, ✗=dead) 표시.
-    for (j, node) in nodes.iter().enumerate() {
-        let mut sp = vec![Span::styled(format!("{:<17} ", truncw(node, 17)), Style::default().fg(Color::White))];
-        // kind 별로 디바이스 모음(정렬 유지 위해 disp 순).
-        let mut by_kind: std::collections::BTreeMap<String, Vec<&crate::collect::Accel>> = std::collections::BTreeMap::new();
-        for a in app.snap.accel.iter().filter(|a| &a.node == node) {
-            by_kind.entry(a.disp().to_string()).or_default().push(a);
+    let fam_of = crate::app::App::catalog_family;
+    let mut csel_line = 0usize;
+    let mut clast_fam = String::new();
+    for (pos, &i) in corder.iter().enumerate() {
+        let m = &app.catalog[i];
+        let fam = fam_of(m);
+        let fam_cnt = corder
+            .iter()
+            .filter(|&&k| fam_of(&app.catalog[k]) == fam)
+            .count();
+        if fam != clast_fam {
+            if fam_cnt > 1 {
+                cl.push(Line::from(vec![
+                    Span::styled("▪ ", Style::default().fg(C_ACC())),
+                    Span::styled(
+                        fam.clone(),
+                        Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+            clast_fam = fam.clone();
         }
-        for (k, devs) in &by_kind {
-            sp.push(Span::styled(format!("{} ", k), Style::default().fg(C_DIM())));
-            sp.push(Span::styled("[", Style::default().fg(C_TRACK())));
-            for a in devs {
-                let (g, c) = if !a.alive {
-                    ("✗", C_BAD())
-                } else if a.busy_model.is_empty() {
-                    ("○", C_TRACK())
-                } else {
-                    ("●", model_color(&a.busy_model))
-                };
-                sp.push(Span::styled(g, Style::default().fg(c)));
+        let any_ready = m.placements.iter().any(|p| {
+            matches!(
+                crate::catalog::solve(p, &app.snap.inventory).0,
+                crate::catalog::Ready::Ready
+            )
+        });
+        let needs = m.placements.iter().any(|p| {
+            matches!(
+                crate::catalog::solve(p, &app.snap.inventory).0,
+                crate::catalog::Ready::NeedsArtifact
+            )
+        });
+        let (g, c) = if any_ready {
+            ("✓", C_OK())
+        } else if needs {
+            ("⚙", C_WARN())
+        } else {
+            ("✗", C_BAD())
+        };
+        let indent = if fam_cnt > 1 { "  └ " } else { "" };
+        let selected = focus == 1 && pos == app.selected;
+        if selected {
+            csel_line = cl.len();
+        }
+        let mut sp = vec![
+            Span::styled(indent.to_string(), Style::default().fg(C_TRACK())),
+            Span::styled(format!("{} ", g), Style::default().fg(c)),
+            Span::styled(
+                format!("{:<22} ", truncw(&m.id, 22)),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!("{:<10} ", truncw(&m.role, 10)),
+                Style::default().fg(C_DIM()),
+            ),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for p in &m.placements {
+            let sig = format!("{} {} {} {}", p.engine, p.accel, p.resource, p.uri).to_lowercase();
+            let (lbl, col) = if sig.contains("rbln")
+                || sig.contains("rebellions")
+                || sig.contains("atom")
+            {
+                ("RBLN", Color::Magenta)
+            } else if sig.contains("furiosa") || sig.contains("rngd") {
+                ("RNGD", C_WARN())
+            } else {
+                ("GPU", C_ACC())
+            };
+            if seen.insert(lbl) {
+                sp.push(tag(lbl, col));
             }
-            sp.push(Span::styled("] ", Style::default().fg(C_TRACK())));
-            // 이 kind 를 점유한 모델 요약(모델명×점유수).
-            let mut hold: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
-            for a in devs.iter().filter(|a| !a.busy_model.is_empty()) {
-                *hold.entry(a.busy_model.as_str()).or_insert(0) += 1;
-            }
-            for (m, cnt) in &hold {
-                sp.push(Span::styled(format!("{}×{} ", truncw(m, 14), cnt), Style::default().fg(model_color(m))));
-            }
-            let free = devs.iter().filter(|a| a.alive && a.busy_model.is_empty()).count();
-            sp.push(Span::styled(format!("({} free)  ", free), Style::default().fg(if free > 0 { C_OK() } else { C_DIM() })));
         }
         let mut line = Line::from(sp);
-        if focus == 1 && app.selected == j {
-            line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
-        }
-        tl.push(line);
-    }
-    f.render_widget(Paragraph::new(tl).block(blk(&format!("deploy targets · device occupancy ●busy ○free per node{}", if focus == 1 { count_suffix(app.selected, nodes.len()) } else { String::new() }), focus == 1)), rows[1]);
-
-    // ── 3) 카탈로그(배포 가능 모델 × 재고 가능성)(focus 2 일 때 선택/강조) + 예정 액션 ──
-    let mut cl: Vec<Line> = Vec::new();
-    for (j, m) in app.catalog.iter().enumerate() {
-        let any_ready = m.placements.iter().any(|p| matches!(crate::catalog::solve(p, &app.snap.inventory).0, crate::catalog::Ready::Ready));
-        let needs = m.placements.iter().any(|p| matches!(crate::catalog::solve(p, &app.snap.inventory).0, crate::catalog::Ready::NeedsArtifact));
-        let (g, c) = if any_ready { ("✓", C_OK()) } else if needs { ("⚙", C_WARN()) } else { ("✗", C_BAD()) };
-        let mut line = Line::from(vec![
-            Span::styled(format!("{} ", g), Style::default().fg(c)),
-            Span::styled(format!("{:<24} ", truncw(&m.id, 24)), Style::default().fg(Color::White)),
-            Span::styled(m.role.clone(), Style::default().fg(C_DIM())),
-        ]);
-        if focus == 2 && app.selected == j {
+        if selected {
             line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
         }
         cl.push(line);
     }
     cl.push(Line::from(Span::styled(
-        "[c] compile (RBLN/Furiosa)   [d] deploy (ModelService)   — planned (Phase 2, gated)",
+        "a/⏎ actions · d deploy · c RBLN / f Furiosa compile (지원 모델)",
         Style::default().fg(C_DIM()),
     )));
-    let cscroll = if focus == 2 && app.selected + 3 > (rows[2].height as usize).saturating_sub(2) { (app.selected + 3).saturating_sub((rows[2].height as usize).saturating_sub(2)) as u16 } else { 0 };
+    let cvis = (rows[1].height as usize).saturating_sub(2);
+    let cscroll = if csel_line + 2 > cvis {
+        (csel_line + 3).saturating_sub(cvis) as u16
+    } else {
+        0
+    };
     f.render_widget(
-        Paragraph::new(cl).scroll((cscroll, 0)).block(blk(&format!("catalog · deployable ({}){}", app.catalog.len(), if focus == 2 { count_suffix(app.selected, app.catalog.len()) } else { String::new() }), focus == 2)),
-        rows[2],
+        Paragraph::new(cl).scroll((cscroll, 0)).block(blk(
+            &format!(
+                "catalog · 조직 제공 모델 (family › model › target) · {}{}",
+                app.catalog.len(),
+                if focus == 1 {
+                    count_suffix(app.selected, corder.len())
+                } else {
+                    String::new()
+                }
+            ),
+            focus == 1,
+        )),
+        rows[1],
     );
 
-    // ── 4) 진행 중/최근 컴파일 Job(focus 3) — 상태·경과·진행바·힌트. Job 은 완료 10분 후 자동정리(ttl). ──
+    // ── 3) 진행 중/최근 컴파일 Job(focus 2) — 상태·경과·진행바·힌트. 완료 1시간 후 자동정리. ──
     let mut jl: Vec<Line> = Vec::new();
     if app.snap.compiles.is_empty() {
         jl.push(Line::from(Span::styled(
-            "(no compile jobs) — Deploy 변형에서 [c] RBLN / [f] Furiosa 컴파일 시작 시 여기 표시",
+            "(진행 중 컴파일 없음) — 지원 모델에서 [c] RBLN · [f] Furiosa 로 컴파일하면 여기 표시",
             Style::default().fg(C_DIM()),
         )));
     }
@@ -2340,46 +3941,68 @@ fn view_deploy(f: &mut Frame, area: Rect, app: &App) {
             "RNGD" => tag("RNGD", C_WARN()),
             _ => tag("?", C_DIM()),
         };
-        // 시간: 진행 중=경과, 완료=소요.
         let timing = match (c.status.as_str(), c.duration_secs) {
             (_, Some(d)) => format!("{} elapsed", fmt_dur(d)),
             ("Running", _) => format!("{}…", fmt_dur(c.age_secs)),
             _ => fmt_dur(c.age_secs),
         };
-        // 진행 힌트 열: 완료는 "스토어 저장 → discovery 후 Deploy 반영" 안내(초록), 그 외는 phase 그대로.
         let (hint, hc) = if c.status == "Complete" {
-            ("→ 스토어 저장됨 · discovery 갱신 후 Deploy 목록 반영".to_string(), C_OK())
+            (
+                "→ stored; appears in 스토어 빌드 after discovery refresh".to_string(),
+                C_OK(),
+            )
         } else {
             (truncw(&c.phase, 44), C_ACC())
         };
         let mut spans = vec![
             Span::styled(format!("{} ", g), Style::default().fg(gc)),
             vbadge,
-            Span::styled(format!(" {:<20} ", truncw(&c.model, 20)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:<16} ", truncw(&c.target, 16)), Style::default().fg(C_WARN())),
+            Span::styled(
+                format!(" {:<20} ", truncw(&c.model, 20)),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<16} ", truncw(&c.target, 16)),
+                Style::default().fg(C_WARN()),
+            ),
             Span::styled(format!("{:<9} ", c.status), Style::default().fg(gc)),
             Span::styled(format!("{:<11} ", timing), Style::default().fg(C_DIM())),
         ];
-        // 진행 중이면 진행바(로그에서 %/스텝 파싱되면 실측, 아니면 살아있음 표시) + 짧은 로그 힌트.
         if c.status == "Running" {
             spans.extend(compile_progress_bar(c.progress, app.tick, 12));
-            spans.push(Span::styled(format!("  {}", truncw(&c.phase, 26)), Style::default().fg(C_ACC())));
+            spans.push(Span::styled(
+                format!("  {}", truncw(&c.phase, 26)),
+                Style::default().fg(C_ACC()),
+            ));
         } else {
             spans.push(Span::styled(hint, Style::default().fg(hc)));
         }
         let mut line = Line::from(spans);
-        if focus == 3 && app.selected == j {
+        if focus == 2 && app.selected == j {
             line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
         }
         jl.push(line);
     }
-    let jscroll = if focus == 3 && app.selected + 3 > (rows[3].height as usize).saturating_sub(2) { (app.selected + 3).saturating_sub((rows[3].height as usize).saturating_sub(2)) as u16 } else { 0 };
+    let jscroll = if focus == 2 && app.selected + 3 > (rows[2].height as usize).saturating_sub(2) {
+        (app.selected + 3).saturating_sub((rows[2].height as usize).saturating_sub(2)) as u16
+    } else {
+        0
+    };
     f.render_widget(
         Paragraph::new(jl).scroll((jscroll, 0)).block(blk(
-            &format!("compile jobs · ✓done ◑running ✗failed · ⏎ logs/delete · auto-clean 10m{}", if focus == 3 { count_suffix(app.selected, app.snap.compiles.len()) } else { String::new() }),
-            focus == 3,
+            &format!(
+                "compile jobs · ✓done ◑running ✗failed · ⏎ logs/delete · auto-clean 1h{}",
+                if focus == 2 {
+                    count_suffix(app.selected, app.snap.compiles.len())
+                } else {
+                    String::new()
+                }
+            ),
+            focus == 2,
         )),
-        rows[3],
+        rows[2],
     );
 }
 
@@ -2409,30 +4032,68 @@ fn node_status(n: &crate::collect::NodeInfo) -> (&'static str, Color) {
 
 /// 트리/상세용 디바이스 1줄. full=true 면 mem-bw/clock 도 붙임(상세).
 fn accel_brief(a: &crate::collect::Accel, branch: &str, full: bool) -> Line<'static> {
-    let mempct = if a.mem_total_gb > 0.0 { a.mem_used_gb / a.mem_total_gb * 100.0 } else { 0.0 };
-    let (hg, hc) = if !a.alive { ("✗", C_BAD()) } else if a.throttle > 0.0 { ("⚠", C_WARN()) } else { ("●", C_OK()) };
+    let mempct = if a.mem_total_gb > 0.0 {
+        a.mem_used_gb / a.mem_total_gb * 100.0
+    } else {
+        0.0
+    };
+    let (hg, hc) = if !a.alive {
+        ("✗", C_BAD())
+    } else if a.throttle > 0.0 {
+        ("⚠", C_WARN())
+    } else {
+        ("●", C_OK())
+    };
     let mut sp = vec![
         Span::styled(format!("   {} ", branch), Style::default().fg(C_TRACK())),
         Span::styled(format!("{} ", hg), Style::default().fg(hc)),
-        Span::styled(format!("{:<5}", a.disp()), Style::default().fg(kind_color(a.kind)).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{:<5}", a.disp()),
+            Style::default()
+                .fg(kind_color(a.kind))
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!("{:<6} ", a.id), Style::default().fg(C_DIM())),
     ];
     sp.extend(dot_bar(a.util, 8, util_color(a.util)).spans);
-    sp.push(Span::styled(format!(" {:>3.0}%", a.util), Style::default().fg(util_color(a.util))));
     sp.push(Span::styled(
-        format!("  {:>3.0}/{:>3.0}GB{} ", a.mem_used_gb, a.mem_total_gb, if a.unified_mem { "∪" } else { " " }),
+        format!(" {:>3.0}%", a.util),
+        Style::default().fg(util_color(a.util)),
+    ));
+    sp.push(Span::styled(
+        format!(
+            "  {:>3.0}/{:>3.0}GB{} ",
+            a.mem_used_gb,
+            a.mem_total_gb,
+            if a.unified_mem { "∪" } else { " " }
+        ),
         Style::default().fg(mem_color(mempct)),
     ));
-    sp.push(Span::styled(format!("  {:.0}°C", a.temp), Style::default().fg(temp_color(a.temp))));
-    sp.push(Span::styled(format!("  {:>3.0}W", a.power), Style::default().fg(C_DIM())));
+    sp.push(Span::styled(
+        format!("  {:.0}°C", a.temp),
+        Style::default().fg(temp_color(a.temp)),
+    ));
+    sp.push(Span::styled(
+        format!("  {:>3.0}W", a.power),
+        Style::default().fg(C_DIM()),
+    ));
     if full && !a.mem_bw.is_nan() {
-        sp.push(Span::styled(format!("  bw {:>3.0}%", a.mem_bw), Style::default().fg(grad_color(a.mem_bw))));
+        sp.push(Span::styled(
+            format!("  bw {:>3.0}%", a.mem_bw),
+            Style::default().fg(grad_color(a.mem_bw)),
+        ));
         if !a.clock_mhz.is_nan() {
-            sp.push(Span::styled(format!("  {:.0}MHz", a.clock_mhz), Style::default().fg(C_DIM())));
+            sp.push(Span::styled(
+                format!("  {:.0}MHz", a.clock_mhz),
+                Style::default().fg(C_DIM()),
+            ));
         }
     }
     if !a.busy_model.is_empty() {
-        sp.push(Span::styled(format!("  {}", truncw(&a.busy_model, if full { 40 } else { 26 })), Style::default().fg(C_ACC())));
+        sp.push(Span::styled(
+            format!("  {}", truncw(&a.busy_model, if full { 40 } else { 26 })),
+            Style::default().fg(C_ACC()),
+        ));
     }
     Line::from(sp)
 }
@@ -2449,28 +4110,67 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
             sel_line = lines.len();
         }
         let (glyph, gc) = node_status(n);
-        let memp = if n.mem_total_gb > 0.0 { n.mem_used_gb / n.mem_total_gb * 100.0 } else { 0.0 };
+        let memp = if n.mem_total_gb > 0.0 {
+            n.mem_used_gb / n.mem_total_gb * 100.0
+        } else {
+            0.0
+        };
         let mut h = vec![
-            Span::styled(if selected { "▎" } else { " " }, Style::default().fg(C_ACC())),
+            Span::styled(
+                if selected { "▎" } else { " " },
+                Style::default().fg(C_ACC()),
+            ),
             Span::styled(format!("{} ", glyph), Style::default().fg(gc)),
-            Span::styled(format!("{:<20} ", truncw(&n.name, 20)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{:<20} ", truncw(&n.name, 20)),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ];
-        h.extend(dot_bar(if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct }, 8, util_color(n.cpu_pct.max(0.0))).spans);
+        h.extend(
+            dot_bar(
+                if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct },
+                8,
+                util_color(n.cpu_pct.max(0.0)),
+            )
+            .spans,
+        );
         h.push(Span::styled(
-            if n.cpu_pct.is_nan() { " cpu   –".into() } else { format!(" cpu{:>3.0}%", n.cpu_pct) },
+            if n.cpu_pct.is_nan() {
+                " cpu   –".into()
+            } else {
+                format!(" cpu{:>3.0}%", n.cpu_pct)
+            },
             Style::default().fg(C_DIM()),
         ));
         h.push(Span::styled(
-            if n.mem_total_gb <= 0.0 { "  mem       –   ".into() } else { format!("  mem {:>4.0}/{:>4.0}GB", n.mem_used_gb, n.mem_total_gb) },
+            if n.mem_total_gb <= 0.0 {
+                "  mem       –   ".into()
+            } else {
+                format!("  mem {:>4.0}/{:>4.0}GB", n.mem_used_gb, n.mem_total_gb)
+            },
             Style::default().fg(mem_color(memp)),
         ));
-        let diskp = if n.disk_total_gb > 0.0 { n.disk_used_gb / n.disk_total_gb * 100.0 } else { 0.0 };
+        let diskp = if n.disk_total_gb > 0.0 {
+            n.disk_used_gb / n.disk_total_gb * 100.0
+        } else {
+            0.0
+        };
         h.push(Span::styled(
-            if n.disk_total_gb <= 0.0 { "  disk      –  ".into() } else { format!("  disk {:>3.0}%", diskp) },
+            if n.disk_total_gb <= 0.0 {
+                "  disk      –  ".into()
+            } else {
+                format!("  disk {:>3.0}%", diskp)
+            },
             Style::default().fg(mem_color(diskp)),
         ));
         h.push(Span::styled(
-            if n.load1.is_nan() { "  load –".into() } else { format!("  load {:.1}", n.load1) },
+            if n.load1.is_nan() {
+                "  load –".into()
+            } else {
+                format!("  load {:.1}", n.load1)
+            },
             Style::default().fg(C_DIM()),
         ));
         let mut hline = Line::from(h);
@@ -2479,28 +4179,46 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
         }
         lines.push(hline);
         // 이 노드의 디바이스들(트리 자식)
-        let devs: Vec<&crate::collect::Accel> = app.snap.accel.iter().filter(|a| a.node == n.name).collect();
+        let devs: Vec<&crate::collect::Accel> =
+            app.snap.accel.iter().filter(|a| a.node == n.name).collect();
         if devs.is_empty() {
-            lines.push(Line::from(Span::styled("   └─ (no accelerators)", Style::default().fg(C_TRACK()))));
+            lines.push(Line::from(Span::styled(
+                "   └─ (no accelerators)",
+                Style::default().fg(C_TRACK()),
+            )));
         } else {
             let last = devs.len();
             for (j, a) in devs.iter().enumerate() {
-                lines.push(accel_brief(a, if j + 1 == last { "└─" } else { "├─" }, false));
+                lines.push(accel_brief(
+                    a,
+                    if j + 1 == last { "└─" } else { "├─" },
+                    false,
+                ));
             }
         }
     }
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled("(no nodes)", Style::default().fg(C_DIM()))));
+        lines.push(Line::from(Span::styled(
+            "(no nodes)",
+            Style::default().fg(C_DIM()),
+        )));
     }
     // 선택 노드가 화면에 보이도록 세로 스크롤.
     let vis = (area.height as usize).saturating_sub(2);
-    let scroll = if sel_line + 2 > vis { (sel_line + 3).saturating_sub(vis) as u16 } else { 0 };
+    let scroll = if sel_line + 2 > vis {
+        (sel_line + 3).saturating_sub(vis) as u16
+    } else {
+        0
+    };
     f.render_widget(
         Paragraph::new(lines)
             .scroll((scroll, 0))
             .block(block(&match app.agg_summary() {
                 Some(a) => format!("Nodes · ⏎ detail  —  {}", a),
-                None => format!("Nodes · node → devices · ⏎ detail{}", count_suffix(sel, order.len())),
+                None => format!(
+                    "Nodes · node → devices · ⏎ detail{}",
+                    count_suffix(sel, order.len())
+                ),
             })),
         area,
     );
@@ -2511,14 +4229,26 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
 fn view_topo(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::canvas::{Canvas, Line as CLine, Rectangle};
     // 노드(가속기 보유) 목록.
-    let mut node_names: Vec<String> = app.snap.accel.iter().map(|a| a.node.clone()).filter(|n| !n.is_empty()).collect();
+    let mut node_names: Vec<String> = app
+        .snap
+        .accel
+        .iter()
+        .map(|a| a.node.clone())
+        .filter(|n| !n.is_empty())
+        .collect();
     node_names.sort();
     node_names.dedup();
     let epp_present = app.snap.epp.is_some() || !app.snap.pools.is_empty();
     let gw = !app.snap.gw_addr.is_empty();
     // 노드 수에 맞춰 열/박스 크기 적응 — 많아도 캔버스(0..100) 안에 다 들어가게(겹침 방지).
     let ncount = node_names.len().max(1);
-    let cols = if ncount <= 2 { 1 } else if ncount <= 6 { 2 } else { 3 };
+    let cols = if ncount <= 2 {
+        1
+    } else if ncount <= 6 {
+        2
+    } else {
+        3
+    };
     let x0 = 16.0; // 노드 그리드 시작 x(왼쪽 flow 컬럼 뒤)
     let bw = (100.0 - x0) / cols as f64; // 열 폭(간격 포함)
     let nrows = ncount.div_ceil(cols);
@@ -2529,18 +4259,37 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
         .marker(ratatui::symbols::Marker::HalfBlock)
         .x_bounds([0.0, 100.0])
         .y_bounds([0.0, 100.0])
-        .block(block("Topology · request flow → device pressure · util heat ●busy ·free · w hub"))
+        .block(block(
+            "Topology · request flow → device pressure · util heat ●busy ·free · w hub",
+        ))
         .paint(move |ctx| {
             // ── 서빙 경로 체인(왼쪽 세로) ──
-            let chain = [("Gateway", gw, C_ACC()), ("EPP", epp_present, C_OK()), ("Pool", epp_present, C_OK())];
+            let chain = [
+                ("Gateway", gw, C_ACC()),
+                ("EPP", epp_present, C_OK()),
+                ("Pool", epp_present, C_OK()),
+            ];
             let mut cy = 80.0;
             let mut prev: Option<f64> = None;
             for (label, on, col) in chain {
                 let c = if on { col } else { C_DIM() };
                 let g = if on { "●" } else { "○" };
-                ctx.print(2.0, cy, Line::from(Span::styled(format!("{} {}", g, label), Style::default().fg(c).add_modifier(Modifier::BOLD))));
+                ctx.print(
+                    2.0,
+                    cy,
+                    Line::from(Span::styled(
+                        format!("{} {}", g, label),
+                        Style::default().fg(c).add_modifier(Modifier::BOLD),
+                    )),
+                );
                 if let Some(py) = prev {
-                    ctx.draw(&CLine { x1: 3.0, y1: py - 2.0, x2: 3.0, y2: cy + 1.0, color: C_TRACK() });
+                    ctx.draw(&CLine {
+                        x1: 3.0,
+                        y1: py - 2.0,
+                        x2: 3.0,
+                        y2: cy + 1.0,
+                        color: C_TRACK(),
+                    });
                 }
                 prev = Some(cy);
                 cy -= 14.0;
@@ -2548,9 +4297,14 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
             // Pool 앵커(서빙 흐름선 시작점).
             let pool_x = 4.0;
             let pool_y = 80.0 - 2.0 * 14.0; // 체인 3번째(Pool) y
-            // ── 서빙 흐름선(Pool → 실제 서빙 중인 노드), 모델색 — 박스보다 먼저 그려 아래 깔림 ──
+                                            // ── 서빙 흐름선(Pool → 실제 서빙 중인 노드), 모델색 — 박스보다 먼저 그려 아래 깔림 ──
             for (i, node) in node_names.iter().enumerate() {
-                let busy: Vec<&crate::collect::Accel> = app.snap.accel.iter().filter(|a| &a.node == node && !a.busy_model.is_empty()).collect();
+                let busy: Vec<&crate::collect::Accel> = app
+                    .snap
+                    .accel
+                    .iter()
+                    .filter(|a| &a.node == node && !a.busy_model.is_empty())
+                    .collect();
                 if busy.is_empty() {
                     continue;
                 }
@@ -2558,19 +4312,42 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
                 let by = y_top - (i / cols) as f64 * row_h;
                 let col = model_color(&busy[0].busy_model);
                 if epp_present {
-                    ctx.draw(&CLine { x1: pool_x, y1: pool_y, x2: bx, y2: by - bh / 2.0, color: col });
+                    ctx.draw(&CLine {
+                        x1: pool_x,
+                        y1: pool_y,
+                        x2: bx,
+                        y2: by - bh / 2.0,
+                        color: col,
+                    });
                 }
             }
             // ── 노드 박스 + 디바이스 pressure ──
             for (i, node) in node_names.iter().enumerate() {
                 let bx = x0 + (i % cols) as f64 * bw;
                 let by = y_top - (i / cols) as f64 * row_h;
-                ctx.draw(&Rectangle { x: bx, y: by - bh, width: bw - 3.0, height: bh, color: C_TRACK() });
+                ctx.draw(&Rectangle {
+                    x: bx,
+                    y: by - bh,
+                    width: bw - 3.0,
+                    height: bh,
+                    color: C_TRACK(),
+                });
                 // 노드명.
-                ctx.print(bx + 1.0, by - 2.0, Line::from(Span::styled(truncw(node, 18), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))));
+                ctx.print(
+                    bx + 1.0,
+                    by - 2.0,
+                    Line::from(Span::styled(
+                        truncw(node, 18),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                );
                 // 디바이스들 — kind 별 줄, 각 디바이스는 util 히트 블록.
-                let devs: Vec<&crate::collect::Accel> = app.snap.accel.iter().filter(|a| &a.node == node).collect();
-                let mut by_kind: std::collections::BTreeMap<&str, Vec<&crate::collect::Accel>> = std::collections::BTreeMap::new();
+                let devs: Vec<&crate::collect::Accel> =
+                    app.snap.accel.iter().filter(|a| &a.node == node).collect();
+                let mut by_kind: std::collections::BTreeMap<&str, Vec<&crate::collect::Accel>> =
+                    std::collections::BTreeMap::new();
                 for d in &devs {
                     by_kind.entry(d.kind.label()).or_default().push(d);
                 }
@@ -2581,7 +4358,10 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
                     if ry < by - bh + 1.5 {
                         break; // 박스 바닥 넘어가면 중단(오버플로 방지)
                     }
-                    let mut sp = vec![Span::styled(format!("{:<5} ", k), Style::default().fg(C_DIM()))];
+                    let mut sp = vec![Span::styled(
+                        format!("{:<5} ", k),
+                        Style::default().fg(C_DIM()),
+                    )];
                     for d in ds {
                         let (g, c) = if !d.alive {
                             ("✗", C_BAD())
@@ -2592,27 +4372,52 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
                         };
                         sp.push(Span::styled(g, Style::default().fg(c)));
                     }
-                    let live: Vec<&&crate::collect::Accel> = ds.iter().filter(|d| d.alive).collect();
-                    let avg = if live.is_empty() { 0.0 } else { live.iter().map(|d| d.util).sum::<f64>() / live.len() as f64 };
-                    let free = ds.iter().filter(|d| d.alive && d.busy_model.is_empty()).count();
-                    sp.push(Span::styled(format!("  {:>3.0}%  {}free", avg, free), Style::default().fg(C_DIM())));
+                    let live: Vec<&&crate::collect::Accel> =
+                        ds.iter().filter(|d| d.alive).collect();
+                    let avg = if live.is_empty() {
+                        0.0
+                    } else {
+                        live.iter().map(|d| d.util).sum::<f64>() / live.len() as f64
+                    };
+                    let free = ds
+                        .iter()
+                        .filter(|d| d.alive && d.busy_model.is_empty())
+                        .count();
+                    sp.push(Span::styled(
+                        format!("  {:>3.0}%  {}free", avg, free),
+                        Style::default().fg(C_DIM()),
+                    ));
                     ctx.print(bx + 1.0, ry, Line::from(sp));
                     ry -= 3.5;
                 }
                 // 서빙 중인 모델명(어느 pod/모델이 이 노드를 점유하는지) — 이름 바로 아래(by-5).
-                let mut serving: Vec<&str> = devs.iter().filter(|d| !d.busy_model.is_empty()).map(|d| d.busy_model.as_str()).collect();
+                let mut serving: Vec<&str> = devs
+                    .iter()
+                    .filter(|d| !d.busy_model.is_empty())
+                    .map(|d| d.busy_model.as_str())
+                    .collect();
                 serving.sort();
                 serving.dedup();
                 if !serving.is_empty() {
                     let mut msp: Vec<Span> = vec![Span::styled("⇢ ", Style::default().fg(C_DIM()))];
                     for m in serving.iter().take(2) {
-                        msp.push(Span::styled(format!("{} ", truncw(m, 14)), Style::default().fg(model_color(m))));
+                        msp.push(Span::styled(
+                            format!("{} ", truncw(m, 14)),
+                            Style::default().fg(model_color(m)),
+                        ));
                     }
                     ctx.print(bx + 1.0, by - 5.0, Line::from(msp));
                 }
             }
             if node_names.is_empty() {
-                ctx.print(20.0, 50.0, Line::from(Span::styled("(no accelerators detected)", Style::default().fg(C_DIM()))));
+                ctx.print(
+                    20.0,
+                    50.0,
+                    Line::from(Span::styled(
+                        "(no accelerators detected)",
+                        Style::default().fg(C_DIM()),
+                    )),
+                );
             }
         });
     f.render_widget(canvas, area);
@@ -2625,13 +4430,27 @@ fn view_events(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|&i| {
             let e = &app.snap.events[i];
-            let tc = if e.typ == "Warning" { C_WARN() } else { C_DIM() };
+            let tc = if e.typ == "Warning" {
+                C_WARN()
+            } else {
+                C_DIM()
+            };
             Row::new(vec![
                 Cell::from(Span::styled(e.typ.clone(), Style::default().fg(tc))),
                 cellw(e.reason.clone(), 20),
                 cellw(e.object.clone(), 28),
-                cellw(if e.count > 1 { format!("x{}", e.count) } else { String::new() }, 5),
-                Cell::from(Span::styled(e.message.clone(), Style::default().fg(Color::White))),
+                cellw(
+                    if e.count > 1 {
+                        format!("x{}", e.count)
+                    } else {
+                        String::new()
+                    },
+                    5,
+                ),
+                Cell::from(Span::styled(
+                    e.message.clone(),
+                    Style::default().fg(Color::White),
+                )),
             ])
         })
         .collect();
@@ -2643,16 +4462,26 @@ fn view_events(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Min(20),
     ];
     render_list_table(
-        f, area, rows, &widths,
+        f,
+        area,
+        rows,
+        &widths,
         &["TYPE", "REASON", "OBJECT", "CNT", "MESSAGE"],
-        "Events (k8s + llm-d, newest first)", app.selected, order.len(),
+        "Events (k8s + llm-d, newest first)",
+        app.selected,
+        order.len(),
+        app.sort_header_label(),
+        app.sort_arrow(),
     );
 }
 
 // ── Models artifacts 관점 헬퍼 ───────────
 /// 변형 한 줄에 넣을 컴파일 옵션 요약 — 중요 순으로 몇 개만.
 fn opts_summary(a: &crate::collect::ModelArtifact) -> String {
-    const PRI: [&str; 12] = ["tp", "pp", "dp", "max-len", "batch", "bucket", "quant", "dtype", "kv-dtype", "npu", "devices", "device"];
+    const PRI: [&str; 12] = [
+        "tp", "pp", "dp", "max-len", "batch", "bucket", "quant", "dtype", "kv-dtype", "npu",
+        "devices", "device",
+    ];
     let mut out: Vec<String> = Vec::new();
     for k in PRI {
         if let Some((_, v)) = a.opts.iter().find(|(kk, _)| kk == k) {
@@ -2664,13 +4493,15 @@ fn opts_summary(a: &crate::collect::ModelArtifact) -> String {
     }
     // NPU 벤더 특유 키(rbln_*/furiosa_*)도 하나 끌어올림.
     if out.len() < 6 {
-        if let Some((k, v)) = a.opts.iter().find(|(k, _)| { let l = k.to_lowercase(); l.starts_with("rbln") || l.starts_with("furiosa") }) {
+        if let Some((k, v)) = a.opts.iter().find(|(k, _)| {
+            let l = k.to_lowercase();
+            l.starts_with("rbln") || l.starts_with("furiosa")
+        }) {
             out.push(format!("{}={}", k, truncw(v, 14)));
         }
     }
     out.join(" ")
 }
-
 
 // ── 진단 ───────────────────────────────────────────────
 // 판정 로직은 app::diagnose(agent JSON 과 공유). 여기선 글리프+색만 입힌다.

@@ -25,23 +25,24 @@ Kubernetes; it stores no data of its own.
 - **Four layers on one screen.** The Gateway, EPP/InferencePool, model servers, and hardware are correlated, so you can answer *which model runs where, how requests are routed, and how load is distributed* without switching tools.
 - **Heterogeneous accelerators, unified.** NVIDIA GPU, Rebellions RBLN, and Furiosa RNGD sit side by side. The exact GPU model and its VRAM are auto-detected, unified-memory parts (GB10, GH200) are recognized and marked `∪`, and per-node disk usage is tracked too.
 - **EPP-aware.** It reads the EPP `ConfigMap` (active scorers, weights, and picker), visualizes routing decisions and per-pod queues, and diagnoses whether an HTTPRoute actually flows through the InferencePool or bypasses it.
-- **Deployment lifecycle.** The Deploy view groups each model's compiled variants (tensor/pipeline parallelism, quantization, RBLN/Furiosa NPU options), shows which node and disk they live on, and highlights where there is free capacity to place them.
+- **Deployment lifecycle.** The Deploy section splits into two lenses over one `family › version › target` tree: **Serving** (what is running now — compiled target, replicas, node, throughput) and **Library** (what you can deploy — catalog feasibility, placement capacity, RBLN/Furiosa compile jobs). Same tree, one `Tab` apart.
 - **A rich terminal UI.** An LED device grid, a stacked VRAM bar, braille timelines, active alerting, log tailing, and a `scale` action — with four themes and understated animations, all in a single static Rust binary that has no C dependencies.
 
 ## Views
 
-Switch views with the number keys `0`–`7`, or cycle with `Tab` / `Shift+Tab`.
+Navigation has two axes that mirror the request path (Gateway → EPP → Model → Infra):
+pick a **section** with the number keys `0`–`5` (or cycle with `Tab` / `Shift+Tab`), then cycle
+its **sub-tabs** with `←` / `→` (or `[` / `]`). In multi-panel views, `Ctrl+w` enters panel-focus
+mode (then `h`/`j`/`k`/`l` or arrows move focus, `Esc` exits) — the vi/tmux window model.
 
-| # | View | Shows |
-|---|---|---|
-| 0 | **Overview** | Cluster summary, LED device grid, VRAM bar, accelerators by kind/node, EPP path, models, and a one-line diagnosis |
-| 1 | **Nodes** hub | Node health (CPU/mem/disk/load + devices). Press `w` to cycle the hub: **nodes → devices** (per-device util/VRAM/temp/power) **→ serving** (per-model p95 latency QUEUE→PREFILL→DECODE→TPOT→E2E, tok/s, + SLO advisor) **→ map** (Canvas topology: Gateway→EPP→Pool flow + device pressure heatmap) |
-| 2 | **Models** | Per-model accelerator/node, ready, running/waiting, KV%, tok/s, route, status. `⏎` opens the action menu (Info/Compile/Deploy/Stop/Scale/Restart/Logs/YAML/Objective) |
-| 3 | **EPP** | Scorers and weights, the picker, InferencePool endpoints, and request distribution |
-| 4 | **Flow** | Gateway → HTTPRoute → backend → pods, with InferencePool/EPP/SLO and the EPP-bypass diagnosis; `⏎` jumps to the backend model |
-| 5 | **Pods** | `llm-serving` pods (ready / phase / node / restarts); `⏎` actions (Info/Logs/YAML/Delete) |
-| 6 | **Deploy** | Model lifecycle: compiled variants (family → build, options, `@node /path`), device occupancy per node, and catalog feasibility. `⏎` acts on the selection (Compile→RBLN/Furiosa · Deploy · node Cordon · …) |
-| 7 | **Events** | Kubernetes + llm-d events, newest first; `⏎` shows the full message |
+| # | Section | Sub-tabs | Shows |
+|---|---|---|---|
+| 0 | **Overview** | — | Cluster summary, LED device grid, VRAM bar, accelerators by kind/node, EPP path, models, and a one-line diagnosis |
+| 1 | **Traffic** | Flow · EPP | **Flow**: Gateway → HTTPRoute → backend → pods, with InferencePool/EPP/SLO and the EPP-bypass diagnosis (`⏎` jumps to the backend model). **EPP**: scorers/weights, the picker, InferencePool endpoints, and request distribution |
+| 2 | **Models** | Models · Perf · Pods | **Models**: per-model accel/node, ready, running/waiting, KV%, tok/s, route, status. **Perf**: p95 latency QUEUE→PREFILL→DECODE→TPOT→E2E, tok/s, + SLO advisor. **Pods**: `llm-serving` pods (ready/phase/node/restarts). `⏎` opens the action menu |
+| 3 | **Infra** | Nodes · Devices · Topology | **Nodes**: health (CPU/mem/disk/load + devices). **Devices**: per-device util/VRAM/temp/power. **Topology**: Canvas Gateway→EPP→Pool flow + device pressure heatmap |
+| 4 | **Deploy** | Serving · Library | Two lenses over one `family › version › target` tree. **Serving**: what is running now — state, compiled target, replicas, `@node`, tok/s (`⏎` → Stop/Scale/Restart/YAML/Logs). **Library**: what you can deploy — catalog feasibility (`✓ ready` / `⚙ needs-compile` / `✗ no-capacity`) + placement targets, with in-flight compile jobs (`⏎` → Deploy/Compile). Single-child version tiers collapse automatically |
+| 5 | **Events** | — | Kubernetes + llm-d events, newest first; `⏎` shows the full message |
 
 List headers show a `Σ` aggregate of the shown rows (all rows, or just the filtered ones). `y` shows any selected resource's live YAML (read-only).
 
@@ -97,9 +98,9 @@ action, target, and result — view it with `lmd-top --audit`.
 
 | | |
 |---|---|
-| Navigate | `↑↓`/`kj` select · `⏎` action menu (or drill) · `w` Nodes-hub / panel focus · `←→` step · `p i r e m` cross-layer pivot |
-| Act | `/` filter · `:` command palette (fuzzy-jump to any view/display action) · `o`/`O` column sort (cycle column / toggle ▲▼) · `y` live YAML · `l` logs · action menu → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (mode-gated, default-No confirm) |
-| Display | `t` theme · `f` animations · `z` zoom · `Space` pause · `g` Grafana · `A` alerts · `?` help · `q` quit |
+| Navigate | `0-5`/`Tab` section · `←`/`→` (`[ ]`) sub-tab · `Ctrl+w` then `hjkl`/arrows panel focus · `↑↓`/`kj` select · `g`/`G` top/bottom · `Ctrl+u`/`Ctrl+d` half-page · `Esc` back |
+| Act | `⏎`/`a` action menu (drill when none) · `p i r e m` cross-layer pivot (also in the menu as **Go: …**) · `/` filter · `:` command palette (jump to any view / run any display action) · `o`/`O` sort column / direction · `y` live YAML · `l` logs · menu → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (mode-gated `⊘`, default-No confirm) |
+| Display | `t` theme · `f` animations · `z` zoom · `Space` pause · `A` alerts · `?` help · `q` quit · `:graf` Grafana · `R` reset session energy |
 
 **Environment.**
 
@@ -133,10 +134,10 @@ HTTP/1.0, and Kubernetes through `kubectl`.
 
 ## Status & roadmap
 
-**Works today, with no traffic required.** All ten views; GPU/RBLN/RNGD and node/disk
+**Works today, with no traffic required.** All eleven views; GPU/RBLN/RNGD and node/disk
 monitoring with auto-detection and unified memory; the Flow topology and EPP-bypass
 diagnosis; EPP ConfigMap introspection; active alerting; the `scale` and `logs` actions; the
-Deploy view (compiled variants, storage node, deploy targets); the headless `--json`,
+Deploy section's Serving/Library lenses (running deployments, catalog feasibility, compile jobs); the headless `--json`,
 `--doctor`, `--snapshot`, and `--cast` modes; and themes, animation, zoom, and permission modes.
 
 **Fills in once real traffic flows through the EPP and vLLM exposes metrics.** Per-model p95

@@ -1,5 +1,5 @@
-//! 모델 카탈로그 — 배포 가능한 모델 × 가속기 배치 후보(읽기전용).
-//! 기본 카탈로그는 바이너리에 임베드(catalog/models.yaml). LMD_CATALOG 로 오버라이드 가능.
+//! Model catalog — deployable models × accelerator placement candidates (read-only).
+//! The default catalog is embedded in the binary (catalog/models.yaml). Override with LMD_CATALOG.
 
 use serde::Deserialize;
 
@@ -47,7 +47,9 @@ pub fn load() -> Vec<CatModel> {
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_else(|| DEFAULT.to_string());
-    serde_yaml::from_str::<Root>(&txt).map(|r| r.models).unwrap_or_default()
+    serde_yaml::from_str::<Root>(&txt)
+        .map(|r| r.models)
+        .unwrap_or_default()
 }
 
 /// 배치 준비 상태.
