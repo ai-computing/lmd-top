@@ -51,7 +51,7 @@ impl App {
                 .get(i)
                 .map(|a| format!("{} {} {}", a.model, a.family, a.source))
                 .unwrap_or_default(),
-            View::Activity => self
+            View::Library if self.panel_focus == 1 => self
                 .activity_rows()
                 .get(i)
                 .map(|r| r.label.clone())

@@ -153,7 +153,6 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
             View::Perf => view_perf(f, body, app),
             View::Serving => view_serving(f, body, app),
             View::Library => view_library(f, body, app),
-            View::Activity => view_activity(f, body, app),
             View::Events => view_events(f, body, app),
             View::Nodes => view_nodes(f, body, app),
             View::Topo => view_topo(f, body, app),
@@ -874,7 +873,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
     }
     if matches!(
         v,
-        Accel | Overview | Pods | Serving | Library | Activity | Epp | Events | Nodes
+        Accel | Overview | Pods | Serving | Library | Epp | Events | Nodes
     ) {
         parts.push("/ filter".into());
     }
@@ -900,7 +899,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
         parts.push(format!("←→ {}", strip.join("·")));
     }
     // Enter/action behavior: views with action menus expose a single compact hint.
-    let has_menu = matches!(v, Overview | Pods | Serving | Library | Activity | Routing);
+    let has_menu = matches!(v, Overview | Pods | Serving | Library | Routing);
     if has_menu {
         parts.push("a/⏎ actions".into());
     }
@@ -3718,9 +3717,9 @@ fn view_serving(f: &mut Frame, area: Rect, app: &App) {
     list_scrollbar(f, area, order.len(), app.selected, 1);
 }
 
-// ── Deploy▸Activity — compile Job + deploy rollout 을 한 목록으로(통합 작업 피드). ──
-// compile(빌드 진행률)과 deploy rollout(시도/실패)을 상태와 함께 최신순으로. ⏎ actions · l logs · D delete.
-fn view_activity(f: &mut Frame, area: Rect, app: &App) {
+// ── Activity 패널 — compile Job + deploy rollout 통합 작업 피드(진행률 %/바 포함). ──
+// Deploy 뷰 하단 패널로 렌더. active(포커스) 면 선택 하이라이트 + 활성 테두리.
+fn activity_panel(f: &mut Frame, area: Rect, app: &App, active: bool) {
     let data = app.activity_rows();
     let rows: Vec<Row> = data
         .iter()
@@ -3735,9 +3734,9 @@ fn view_activity(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 Span::styled("deploy", Style::default().fg(C_OK()))
             };
-            // STATUS 셀: 상태 텍스트 + (진행 중 compile 이면) 진행바.
+            // STATUS 셀: 상태 텍스트(% 포함) + (진행 중 compile 이면) 진행바.
             let mut status_spans = vec![Span::styled(
-                format!("{:<11}", truncw(&r.status, 11)),
+                format!("{:<14} ", truncw(&r.status, 14)),
                 Style::default().fg(color),
             )];
             if r.running_compile {
@@ -3753,27 +3752,50 @@ fn view_activity(f: &mut Frame, area: Rect, app: &App) {
     let widths = [
         Constraint::Length(8),  // KIND
         Constraint::Min(20),    // TARGET
-        Constraint::Length(28), // STATUS (+bar)
+        Constraint::Length(32), // STATUS (%+bar)
     ];
-    render_list_table(
-        f,
-        area,
-        rows,
-        &widths,
-        &["KIND", "TARGET", "STATUS"],
-        "Activity · compile + deploy · ⏎ actions · l logs · D delete",
-        app.selected,
-        data.len(),
-        app.sort_header_label(),
-        app.sort_arrow(),
+    let title = format!(
+        "Activity · compile + deploy · l logs · D delete{}",
+        if active {
+            count_suffix(app.selected, data.len())
+        } else {
+            String::new()
+        }
     );
+    let blk = if active {
+        block_active(&title)
+    } else {
+        block(&title)
+    };
+    let table = Table::new(rows, widths)
+        .header(hrow_sorted(&["KIND", "TARGET", "STATUS"], "", ""))
+        .column_spacing(1)
+        .block(blk);
+    if active {
+        let mut st = TableState::default();
+        st.select(Some(app.selected));
+        f.render_stateful_widget(
+            table.row_highlight_style(hl_style()).highlight_symbol("▎"),
+            area,
+            &mut st,
+        );
+        list_scrollbar(f, area, data.len(), app.selected, 1);
+    } else {
+        f.render_widget(table, area);
+    }
 }
 
 // ── Deploy▸Model List — 배포 가능한 모델(카탈로그 조직정의 + 스토어 컴파일본, family 로 묶음). ──
 // 단일 패널: 배포 가능한 모든 것을 한 곳에서 고른다(진행 중 작업은 Activity 탭에서).
 fn view_library(f: &mut Frame, area: Rect, app: &App) {
     use crate::app::LibItem;
-    let focus = 0usize; // 단일 패널(Model List) — 진행 중 작업은 Activity 탭.
+    // Deploy = 2패널 세로 배치: 위 Model List(포커스 0) · 아래 Activity(포커스 1). Ctrl+w 로 전환.
+    let focus = app.panel_focus;
+    let panes = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(6), Constraint::Length(9)])
+        .split(area);
+    let list_area = panes[0];
 
     // ── 통합 배포 트리: family › (카탈로그 모델 · 스토어 컴파일본). 재고 가능성 ✓⚙✗ / ◇ 스토어 빌드. ──
     let items = app.library_items();
@@ -3940,22 +3962,35 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
         ll.push(line);
     }
     ll.push(Line::from(Span::styled(
-        "⏎/a actions · d deploy · c RBLN / f Furiosa compile (지원 모델) · ◇=스토어 실재 빌드 · 진행 중 작업은 Activity[→]",
+        "⏎/a actions · d deploy · c RBLN / f Furiosa compile (지원 모델) · ◇=스토어 실재 빌드 · 아래 Activity 패널은 ^w",
         Style::default().fg(C_DIM()),
     )));
-    let lvis = (area.height as usize).saturating_sub(2);
+    let lvis = (list_area.height as usize).saturating_sub(2);
     let lscroll = if lsel_line + 2 > lvis {
         (lsel_line + 3).saturating_sub(lvis) as u16
     } else {
         0
     };
-    f.render_widget(
-        Paragraph::new(ll).scroll((lscroll, 0)).block(block_active(&format!(
-            "Model List · 배포 가능 (family › model/build › target){}",
+    let list_title = format!(
+        "Model List · 배포 가능 (family › model/build › target){}",
+        if focus == 0 {
             count_suffix(app.selected, items.len())
-        ))),
-        area,
+        } else {
+            String::new()
+        }
     );
+    let list_blk = if focus == 0 {
+        block_active(&list_title)
+    } else {
+        block(&list_title)
+    };
+    f.render_widget(
+        Paragraph::new(ll).scroll((lscroll, 0)).block(list_blk),
+        list_area,
+    );
+
+    // 아래 패널: 통합 Activity 피드(compile + deploy 상태·진행률).
+    activity_panel(f, panes[1], app, focus == 1);
 }
 
 // ── Nodes (health / placement) — all-smi 식 트리: node → devices ──────

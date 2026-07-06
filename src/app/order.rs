@@ -150,10 +150,9 @@ impl App {
                 });
                 idx
             }
-            // Deploy▸Model List: 배포 가능한 것 통합 트리(카탈로그+스토어), 단일 패널.
+            // Deploy: 위=Model List(패널0) · 아래=Activity 피드(패널1).
+            View::Library if self.panel_focus == 1 => (0..self.activity_rows().len()).collect(),
             View::Library => (0..self.library_items().len()).collect(),
-            // Deploy▸Activity: compile Job + deploy rollout 통합 피드.
-            View::Activity => (0..self.activity_rows().len()).collect(),
             View::Epp if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
             View::Epp => {
                 (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect()

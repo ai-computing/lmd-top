@@ -1312,7 +1312,7 @@ fn ui_loop(
                                 open_actions_or_detail(&mut app, false);
                             } else if matches!(
                                 app.view,
-                                View::Serving | View::Library | View::Activity | View::Overview | View::Pods
+                                View::Serving | View::Library | View::Overview | View::Pods
                             ) {
                                 open_actions_or_detail(&mut app, true);
                             } else {

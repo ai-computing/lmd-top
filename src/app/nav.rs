@@ -230,7 +230,7 @@ impl App {
     /// 현재 뷰의 포커스 가능한 패널 수(멀티패널 뷰만 >1).
     pub fn panel_count(&self) -> usize {
         match self.view {
-            View::Library => 1, // Deploy▸Model List: 배포 가능 트리(단일 패널)
+            View::Library => 2, // Deploy: 위 Model List · 아래 Activity
             View::Serving => 1, // Serving: 라이브 배포 트리(단일 패널)
             View::Epp => 2,     // scorers / InferencePool
             View::Routing => 2, // routes / InferencePool

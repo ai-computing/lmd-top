@@ -261,8 +261,7 @@ pub enum View {
     Pods,
     Perf,
     Serving,  // Serving 섹션 랜딩: 현재 서빙 중인 배포(라이브 아티팩트 트리) + 라이프사이클
-    Library,  // Deploy 섹션 ①: 배포 가능한 모델(카탈로그 · 스토어 빌드) — "Model List"
-    Activity, // Deploy 섹션 ②: 통합 작업 피드(compile Job + deploy rollout 상태)
+    Library,  // Deploy 섹션: 위=Model List(배포 가능) · 아래=Activity(compile/deploy 작업) 2패널
     Events,
     Nodes,
     Topo, // Nodes hub's topology / device pressure map (Canvas)
@@ -270,7 +269,7 @@ pub enum View {
 
 impl View {
     /// Every view — for headless render coverage and exhaustive iteration (not a nav order).
-    pub const EVERY: [View; 12] = [
+    pub const EVERY: [View; 11] = [
         View::Overview,
         View::Routing,
         View::Epp,
@@ -281,7 +280,6 @@ impl View {
         View::Accel,
         View::Topo,
         View::Library,
-        View::Activity,
         View::Events,
     ];
     /// Which top-level section this view belongs to (a view is one sub-tab of its section).
@@ -291,7 +289,7 @@ impl View {
             View::Routing | View::Epp => Section::Traffic,
             View::Serving | View::Perf | View::Pods => Section::Serving,
             View::Nodes | View::Accel | View::Topo => Section::Infra,
-            View::Library | View::Activity => Section::Deploy,
+            View::Library => Section::Deploy,
             View::Events => Section::Events,
         }
     }
@@ -304,9 +302,8 @@ impl View {
             View::Routing => "Flow",
             View::Pods => "Pods",
             View::Perf => "Perf",
-            View::Serving => "Serving",     // 현재 서빙 중인 배포(라이프사이클)
-            View::Library => "Model List",  // 배포 가능한 모델(프로비저닝)
-            View::Activity => "Activity",   // 통합 작업 피드(compile + deploy)
+            View::Serving => "Serving",  // 현재 서빙 중인 배포(라이프사이클)
+            View::Library => "Deploy",   // Model List + Activity (2패널)
             View::Events => "Events",
             View::Nodes => "Nodes",
             View::Topo => "Topology",
@@ -356,8 +353,8 @@ impl Section {
             // Serving: 현재 서빙 중인 배포(랜딩) → Perf → Pods.
             Section::Serving => &[View::Serving, View::Perf, View::Pods],
             Section::Infra => &[View::Nodes, View::Accel, View::Topo],
-            // Deploy: Model List(배포 가능, 랜딩) → Tab → Activity(통합 작업 피드).
-            Section::Deploy => &[View::Library, View::Activity],
+            // Deploy: 단일 뷰(위=Model List · 아래=Activity 2패널, Ctrl+w 로 포커스 전환).
+            Section::Deploy => &[View::Library],
             Section::Events => &[View::Events],
         }
     }
@@ -895,9 +892,9 @@ mod tests {
         assert_eq!(a.selected, 0, "패널 전환 시 선택 리셋");
         a.cycle_panel_dir(1);
         assert_eq!(a.panel_focus, 0, "2패널 순환");
-        // Deploy▸Model List 와 Serving 은 단일 패널.
+        // Deploy(Library)는 2패널(Model List / Activity), Serving 은 단일 패널.
         a.goto_view(View::Library);
-        assert_eq!(a.panel_count(), 1);
+        assert_eq!(a.panel_count(), 2);
         a.goto_view(View::Serving);
         assert_eq!(a.panel_count(), 1);
         // 단일 패널 뷰는 순환 무시.
@@ -1591,7 +1588,8 @@ mod tests {
             ],
             ..Default::default()
         };
-        a.view = View::Activity; // Deploy▸Activity 통합 작업 피드 — compile 진행바 표시
+        a.view = View::Library; // Deploy 하단 Activity 패널 — compile 진행바 표시
+        a.panel_focus = 1; // 하단 Activity 패널 포커스
         let mut fx = crate::ui::FxState::disabled();
         let mut t = Terminal::new(TestBackend::new(140, 30)).unwrap();
         t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
