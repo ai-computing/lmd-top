@@ -753,7 +753,7 @@ pub fn snapshot_alerts(snap: &Snapshot) -> Vec<Alert> {
 
 /// 크로스레이어 1줄 진단 → (문구, 심각도). None = 정상(healthy). UI diagnosis 와 agent JSON 공유.
 pub fn diagnose(s: &Snapshot) -> (String, Option<Sev>) {
-    let serving = s.models.iter().filter(|m| m.ready > 0).count();
+    let serving = s.serving_count();
     if s.accel.is_empty() && serving == 0 {
         return (
             "no accelerator metrics + no serving models — check Prometheus / model state".into(),

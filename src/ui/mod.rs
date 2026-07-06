@@ -601,7 +601,7 @@ fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
         pw += a.power;
     }
     let nacc = s.accel.len();
-    let serving = s.models.iter().filter(|m| m.ready > 0).count();
+    let serving = s.serving_count();
     let total = s.models.len();
     let mempct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
     let err = p.err_rate;
@@ -1836,7 +1836,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         let avg = usum / ncnt as f64;
         let avg_temp = tsum / ncnt as f64;
         let mempct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
-        let ready = s.models.iter().filter(|m| m.ready > 0).count();
+        let ready = s.serving_count();
         // 인벤토리 라벨(GB10×2 …) + 라벨된 집계(util·temp·VRAM·W·models). req/s·TTFT 는 상단바에 있어 생략.
         let mut sp = vec![Span::styled(
             format!("{} accel  ", s.accel.len()),
