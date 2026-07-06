@@ -427,6 +427,7 @@ pub struct App {
     pub preview_apply: bool, // true=generated manifest (v to verify, a to apply), false=read-only (describe/yaml)
     pub compile_form: Option<CompileForm>, // NPU compile options edit form (c → edit → Enter → preview)
     pub deploy_form: Option<DeployForm>, // deploy (serving) options edit form (d → edit → Enter → preview)
+    pub prefetch_form: Option<CompileForm>, // zoo prefetch(다운로드) 대상 저장소/경로 선택 폼
     pub place_picker: Option<PlacePick>, // deploy 폼의 place 필드 → 후보 노드 상태 목록에서 선택
     pub action_menu: Option<ActionMenu>, // Enter context action menu (Info/Compile/Deploy/Stop…)
     pub objectives: HashMap<String, Objective>, // per-model serving objective (SLO) — user input
@@ -520,6 +521,7 @@ impl App {
             preview_apply: false,
             compile_form: None,
             deploy_form: None,
+            prefetch_form: None,
             place_picker: None,
             action_menu: None,
             objectives: HashMap::new(),
@@ -1798,7 +1800,7 @@ mod tests {
     fn overlay_precedence_single_source() {
         use crate::ui::Overlay;
         // PRECEDENCE must include every variant exactly once; missing entries are not drawn/consumed.
-        assert_eq!(Overlay::PRECEDENCE.len(), 13);
+        assert_eq!(Overlay::PRECEDENCE.len(), 14);
         let mut seen = std::collections::HashSet::new();
         for ov in Overlay::PRECEDENCE {
             assert!(

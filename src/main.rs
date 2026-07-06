@@ -609,7 +609,7 @@ fn dispatch_action(
         }
         Action::Prefetch => {
             if require_action(app, action) {
-                app.prefetch_selected_zoo();
+                app.open_prefetch_form();
             }
         }
         Action::Stop => {
@@ -1173,6 +1173,10 @@ fn ui_loop(
                     // NPU compile options form overlay.
                     if app.compile_form.is_some() {
                         handle_edit_form!(app, compile_form, compile_form_submit, k.code);
+                        continue;
+                    }
+                    if app.prefetch_form.is_some() {
+                        handle_edit_form!(app, prefetch_form, prefetch_form_submit, k.code);
                         continue;
                     }
                     // Placement picker (deploy 폼의 place 필드에서 드릴) — 후보 노드 상태 목록.
