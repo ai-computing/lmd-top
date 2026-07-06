@@ -2229,4 +2229,70 @@ mod tests {
         );
         assert!(a.alerts.len() > before);
     }
+
+    #[test]
+    fn deploy_phase_reflects_replicas_and_pods() {
+        let mut a = App::new();
+        let p = |name: &str, restarts: i64| crate::collect::PodRow {
+            name: name.into(),
+            phase: "Running".into(),
+            ready: "1/1".into(),
+            node: "n1".into(),
+            restarts,
+        };
+        a.snap = Snapshot {
+            pods: vec![p("healthy-abc", 0), p("crash-xyz", 5)],
+            ..Default::default()
+        };
+        assert_eq!(a.deploy_phase("healthy", 0, 0).label(), "Scaled-0");
+        assert_eq!(a.deploy_phase("healthy", 2, 2).label(), "Serving");
+        assert_eq!(a.deploy_phase("healthy", 2, 0).label(), "Starting");
+        // 크래시 파드(restarts≥3): ready 0 → Failed, ready>0 → Degraded.
+        assert_eq!(a.deploy_phase("crash", 2, 0).label(), "Failed");
+        assert_eq!(a.deploy_phase("crash", 2, 1).label(), "Degraded");
+    }
+
+    #[test]
+    fn activity_rows_unify_compile_and_troubled_deploys() {
+        use crate::collect::CompileJob;
+        let mut a = App::new();
+        let mut steady = model("steady");
+        steady.ready = 1;
+        steady.desired = 1; // Serving → 조용한 정상, Activity 에서 제외
+        let mut starting = model("starting");
+        starting.ready = 0;
+        starting.desired = 2; // Starting → Activity 에 노출
+        a.snap = Snapshot {
+            compiles: vec![CompileJob {
+                name: "compile-x".into(),
+                model: "x".into(),
+                vendor: "RBLN".into(),
+                target: "tp4".into(),
+                status: "Running".into(),
+                age_secs: 5,
+                duration_secs: None,
+                phase: "compiling".into(),
+                progress: Some(0.5),
+            }],
+            models: vec![steady, starting],
+            ..Default::default()
+        };
+        let rows = a.activity_rows();
+        assert!(
+            rows.iter().any(|r| r.label.starts_with("compile ·")),
+            "compile Job 이 피드에 있어야"
+        );
+        assert!(
+            rows.iter().any(|r| r.label.contains("deploy · starting")),
+            "시도 중(Starting) 배포는 노출"
+        );
+        assert!(
+            !rows.iter().any(|r| r.label.contains("steady")),
+            "정상 서빙(Serving) 배포는 피드에서 제외"
+        );
+        assert!(
+            rows.iter().any(|r| r.running_compile && r.progress == Some(0.5)),
+            "진행 중 compile 은 진행률을 싣는다"
+        );
+    }
 }

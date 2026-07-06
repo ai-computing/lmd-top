@@ -24,7 +24,7 @@
 - **네 계층을 한 화면에.** Gateway, EPP/InferencePool, 모델 서버, 하드웨어를 서로 엮어 보여주므로, 도구를 옮겨 다니지 않고도 *어떤 모델이 어디서 돌고, 요청이 어떻게 라우팅되며, 부하가 어떻게 분산되는지* 알 수 있습니다.
 - **이종 가속기를 통합해서.** NVIDIA GPU, Rebellions RBLN, Furiosa RNGD 를 나란히 표시합니다. GPU 모델과 VRAM 은 자동으로 감지하고, 통합 메모리(GB10, GH200) 는 `∪` 로 표시하며, 노드별 디스크 사용량도 함께 봅니다.
 - **EPP 를 이해합니다.** EPP `ConfigMap`(활성 scorer, 가중치, picker) 을 읽어 라우팅 결정과 파드별 큐를 시각화하고, HTTPRoute 가 실제로 InferencePool 을 거치는지 아니면 우회하는지를 진단합니다.
-- **배포 라이프사이클.** Deploy 섹션은 하나의 `family › version › target` 트리를 두 렌즈로 나눕니다: **Serving**(지금 서빙 중 — 컴파일 타깃·replica·노드·처리량)과 **Library**(배포 가능 — 카탈로그 가능성·배치 용량·RBLN/Furiosa 컴파일 Job). 같은 트리, `Tab` 하나 차이.
+- **생애주기 분리 — 올리기 vs 돌보기.** **Serving**(섹션 2)은 돌아가는 쪽: 배포를 `family › version › target` 트리로 보고, pods 교차로 상태(서빙/시도 중/degraded/실패)를 판정해 "서빙 중인지·시도 중인지·실패인지"를 바로 보여주며 scale/restart/stop 을 제공. **Deploy**(섹션 4)는 올리는 쪽: 배포 가능한 것들의 **Model List**(카탈로그 가능성 + 스토어 빌드)와, compile Job·deploy rollout 을 상태·진행률과 함께 묶은 **Activity** 피드.
 - **풍부한 터미널 UI.** LED 디바이스 그리드, 스택형 VRAM 바, braille 타임라인, 능동 알림, 로그 조회, `scale` 액션을 제공하고, 네 가지 테마와 은은한 애니메이션을 갖췄습니다. 이 모든 것이 C 의존성 없는 단일 정적 Rust 바이너리 하나에 들어 있습니다.
 
 ## 뷰
@@ -37,9 +37,9 @@
 |---|---|---|---|
 | 0 | **Overview** | — | 클러스터 요약, LED 그리드, VRAM 바, 종류/노드별 가속기, EPP 경로, 모델, 한 줄 진단 |
 | 1 | **Traffic** | Flow · EPP | **Flow**: Gateway → HTTPRoute → backend → 파드, InferencePool/EPP/SLO 와 EPP 우회 진단(`⏎` backend 모델). **EPP**: scorer/가중치, picker, InferencePool 엔드포인트, 요청 분배 |
-| 2 | **Models** | Models · Perf · Pods | **Models**: 모델별 가속기/노드·ready·running/waiting·KV%·tok/s·경로·상태. **Perf**: p95 QUEUE→PREFILL→DECODE→TPOT→E2E·tok/s·SLO advisor. **Pods**: `llm-serving` 파드. `⏎` 액션 메뉴 |
+| 2 | **Serving** | Serving · Perf · Pods | **Serving**: 돌아가는 배포를 `family › version › target` 트리로 — 상태(`● 서빙`/`◑ 시도 중`/`⚠ degraded`/`✗ 실패`/`○ 정지`, pods 교차)·replica·`@노드`·tok/s; `⏎` → Scale/Restart/Stop/Objective/YAML/Logs. **Perf**: p95 QUEUE→PREFILL→DECODE→TPOT→E2E·tok/s·SLO advisor. **Pods**: `llm-serving` 파드 |
 | 3 | **Infra** | Nodes · Devices · Topology | **Nodes**: 노드 헬스(CPU/메모리/디스크/load). **Devices**: 디바이스별 util/VRAM/온도/전력. **Topology**: Canvas Gateway→EPP→Pool 흐름 + pressure 히트맵 |
-| 4 | **Deploy** | Serving · Library | 하나의 `family › version › target` 트리를 두 렌즈로. **Serving**: 지금 서빙 중 — 상태·컴파일 타깃·replica·`@노드`·tok/s (`⏎` → Stop/Scale/Restart/YAML/Logs). **Library**: 배포 가능 — 카탈로그 가능성(`✓ ready`/`⚙ needs-compile`/`✗ no-capacity`) + 배치 타깃, 진행 중 컴파일 Job (`⏎` → Deploy/Compile). 자식이 하나인 version 티어는 자동 접힘 |
+| 4 | **Deploy** | Model List · Activity | 런타임이 아니라 프로비저닝. **Model List**: 배포 가능한 모든 것 — 카탈로그 가능성(`✓ ready`/`⚙ needs-compile`/`✗ no-capacity`) + 배치 타깃·스토어 빌드, family 로 묶음; `⏎` → Deploy/Compile. **Activity**: 진행 중 compile Job(진행률)과 시도 중·실패한 deploy rollout 을 한 피드로; `⏎` → Logs/Delete |
 | 5 | **Events** | — | Kubernetes + llm-d 이벤트(최신순). `⏎` 로 전체 메시지 |
 
 리스트 헤더에 보이는 행(전체 또는 필터된 것)의 `Σ` 통합 메트릭이 표시됩니다. `y` 로 선택 리소스의 live YAML(읽기전용)을 봅니다.
@@ -132,8 +132,9 @@ Kubernetes 는 `kubectl` 로 조회합니다.
 
 **지금 바로 되는 것 (트래픽 불필요).** 12개 뷰 전부, 자동 감지·통합 메모리를 포함한 GPU/RBLN/RNGD
 및 노드/디스크 모니터링, Flow 토폴로지와 EPP 우회 진단, EPP ConfigMap 조회, 능동 알림,
-`scale`·`logs` 액션, Deploy 섹션의 Serving/Library 렌즈(서빙 중 배포·카탈로그 가능성·RBLN/Furiosa
-컴파일·배포 매니페스트 생성 + 권한 모드 게이팅 apply), 헤드리스 `--json`·`--doctor`·
+`scale`·`logs` 액션, Serving 섹션(서빙/시도 중/실패 상태의 돌아가는 배포)과 Deploy 섹션의
+Model List + Activity(카탈로그 가능성 · RBLN/Furiosa 컴파일·배포 매니페스트 생성 + 권한 모드
+게이팅 apply 를 한 작업 피드로), 헤드리스 `--json`·`--doctor`·
 `--snapshot`·`--cast`, 그리고 테마·애니메이션·zoom·권한 모드.
 
 **실제 트래픽이 EPP 를 거치고 vLLM 이 지표를 내보내면 채워지는 것.** 모델별 p95 지연 분해, tok/s,
