@@ -180,8 +180,12 @@ impl App {
              \x20           - |-\n\
              \x20             set -e\n\
              \x20             pip install -q --no-cache-dir huggingface_hub\n\
-             \x20             python -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id='{source}'{rev_arg})\"\n\
-             \x20             echo PREFETCH_DONE {source} -> {hf_home}\n\
+             \x20             pip install -q --no-cache-dir hf_transfer && export HF_HUB_ENABLE_HF_TRANSFER=1 || true\n\
+             \x20             python -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id='{source}'{rev_arg})\" &\n\
+             \x20             DL=$!\n\
+             \x20             while kill -0 $DL 2>/dev/null; do sz=$(du -sh {hf_home} 2>/dev/null | cut -f1); echo \"downloading {source}: ${{sz:-0}} on disk\"; sleep 15; done\n\
+             \x20             wait $DL\n\
+             \x20             echo PREFETCH_DONE {source} -> {hf_home} ($(du -sh {hf_home} 2>/dev/null | cut -f1))\n\
              \x20         volumeMounts:\n\
              \x20           - {{ name: store, mountPath: /mnt/store }}\n",
             source = source,

@@ -79,6 +79,7 @@ pub struct ActivityRow {
     pub job: Option<String>,   // compile Job name to delete (Delete action); None for deploys
     pub running_compile: bool, // a compile Job still in progress → show a progress bar
     pub progress: Option<f32>, // compile progress 0.0..1.0 (None = indeterminate)
+    pub phase: String,         // live hint (pod log tail) — e.g. "downloading … 17G on disk"
 }
 
 impl ActivityRow {
@@ -178,6 +179,7 @@ impl App {
                 job: Some(c.name.clone()),
                 running_compile: running,
                 progress: c.progress,
+                phase: if running { c.phase.clone() } else { String::new() },
             });
         }
 
@@ -227,6 +229,7 @@ impl App {
                     job: None,
                     running_compile: false,
                     progress: None,
+                    phase: String::new(),
                 },
             ));
         }
