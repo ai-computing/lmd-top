@@ -133,6 +133,13 @@ impl App {
         self.toast_bad = false;
     }
 
+    /// 빨강(critical) 토스트 — 차단된 액션/실패 피드백용.
+    pub fn notify_bad(&mut self, msg: String) {
+        self.toast = Some(msg);
+        self.toast_until = crate::collect::now_secs() + 5;
+        self.toast_bad = true;
+    }
+
     /// 뷰의 표시 컬럼 순서(설정 없으면 default 반환). 설정의 미지 키는 무시(default에서 교집합).
     pub fn columns<'a>(&'a self, view: &str, default: &'a [&'a str]) -> Vec<&'a str> {
         match self.cols.get(view) {
