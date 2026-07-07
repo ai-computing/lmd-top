@@ -68,11 +68,13 @@ impl App {
         let Some(z) = self.selected_zoo() else {
             return;
         };
-        // 후보 PVC — 스토어 PVC 는 항상, 그 외 관측된 PVC 이름이 있으면 추가(없으면 model-store 만).
+        // 후보 PVC — 스토어 PVC 는 항상, 그 외 "클러스터에 실존하는" PVC 만 추가.
+        // (예전엔 rbln-artifacts/furiosa-artifacts 를 실존 여부와 무관하게 넣어, 없는 PVC 로 Job 을 만들면
+        //  pod 가 영구 Pending(FailedScheduling)이 됐다. 이제 관측된 PVC 만 제시한다.)
         let mut pvcs = vec!["model-store".to_string()];
-        for extra in ["rbln-artifacts", "furiosa-artifacts", "model-pvc"] {
-            if !pvcs.iter().any(|p| p == extra) {
-                pvcs.push(extra.to_string());
+        for name in &self.snap.pvcs {
+            if !pvcs.iter().any(|p| p == name) {
+                pvcs.push(name.clone());
             }
         }
         let field = |key: &str, label: &str, value: &str, choices: Vec<String>, help: &str| {
@@ -133,6 +135,15 @@ impl App {
                 p
             }
         };
+        // PVC 존재 검증 — 없는 PVC 로 Job 을 만들면 pod 가 영구 Pending(FailedScheduling: "pvc not found")이 되고
+        // Warning 이벤트를 계속 뿜는다. 관측된 목록이 있을 때만 검증(빈 목록=미관측 → 오탐 방지 위해 통과).
+        if !self.snap.pvcs.is_empty() && !self.snap.pvcs.iter().any(|p| p == &pvc) {
+            self.notify_bad(format!(
+                "PVC '{}' 없음 — prefetch 취소. 존재하는 PVC를 고르거나 먼저 생성하세요.",
+                pvc
+            ));
+            return;
+        }
         let dir = {
             let d = form.get("dir");
             if d.trim().is_empty() {
@@ -256,6 +267,52 @@ mod zoo_tests {
             }
             _ => panic!("prefetch should stage a Pending::Apply Job"),
         }
+    }
+
+    #[test]
+    fn prefetch_blocks_nonexistent_pvc() {
+        // 관측된 PVC 목록이 있는데 그 안에 없는 PVC 로 prefetch 하면 Job 을 만들지 않고 빨강 토스트로 차단.
+        // (없는 PVC 로 만든 pod 는 영구 Pending → FailedScheduling Warning 이벤트를 뿜는 회귀를 방지.)
+        let mut a = App::new();
+        a.view = View::Zoo;
+        a.selected = 0;
+        a.snap.pvcs = vec!["model-store".into()]; // 클러스터에 model-store 만 실존
+        a.open_prefetch_form();
+        // 존재하지 않는 PVC 를 직접 입력(사용자가 e 로 타이핑한 상황).
+        if let Some(f) = a.prefetch_form.as_mut() {
+            if let Some(p) = f.fields.iter_mut().find(|x| x.key == "pvc") {
+                p.value = "furiosa-artifacts".into();
+            }
+        }
+        a.prefetch_form_submit();
+        assert!(a.confirm.is_none(), "없는 PVC 는 Job 을 staging 하지 않아야 한다");
+        assert!(a.toast_bad, "차단은 빨강 토스트로 알린다");
+        assert!(
+            a.toast.as_deref().unwrap_or("").contains("furiosa-artifacts"),
+            "토스트에 문제 PVC 이름이 보여야 한다"
+        );
+    }
+
+    #[test]
+    fn prefetch_form_offers_only_observed_pvcs() {
+        // 폼 후보는 model-store(항상) + 관측된 PVC 만. 실존하지 않는 이름을 하드코딩하지 않는다.
+        let mut a = App::new();
+        a.view = View::Zoo;
+        a.selected = 0;
+        a.snap.pvcs = vec!["model-store".into(), "rbln-artifacts".into()];
+        a.open_prefetch_form();
+        let choices = a
+            .prefetch_form
+            .as_ref()
+            .and_then(|f| f.fields.iter().find(|x| x.key == "pvc"))
+            .map(|f| f.choices.clone())
+            .unwrap_or_default();
+        assert!(choices.contains(&"model-store".to_string()));
+        assert!(choices.contains(&"rbln-artifacts".to_string()), "관측된 PVC 는 후보에 포함");
+        assert!(
+            !choices.contains(&"furiosa-artifacts".to_string()),
+            "관측되지 않은 PVC 는 후보에 없어야 한다"
+        );
     }
 
     #[test]

@@ -253,6 +253,7 @@ pub struct Snapshot {
     pub warnings: Vec<String>,
     pub prom_ok: bool, // Prometheus 도달 가능 여부(false 면 "가속기 없음"이 아니라 연결 문제)
     pub setup: SetupProbe, // 플랫폼 부트스트랩 전제조건(Setup 뷰)
+    pub pvcs: Vec<String>, // 대상 ns 에 실존하는 PVC 이름들 — prefetch/compile 대상 검증에 사용(빈 벡터=미관측)
 }
 
 impl Snapshot {
@@ -1370,6 +1371,18 @@ pub async fn collect(cfg: &Config) -> Snapshot {
 
     // ---------- 플랫폼 부트스트랩 전제조건(Setup 뷰) ----------
     snap.setup = collect_setup(&cfg.ns).await;
+
+    // ---------- 대상 ns 실존 PVC 목록(prefetch/compile 대상 검증용) ----------
+    // 없는 PVC 로 Job 을 만들면 pod 가 영구 Pending(FailedScheduling)이 되므로, 폼이 실존 PVC 만 제시하고
+    // submit 이 검증하도록 이름을 수집. 미도달/비어있으면 빈 벡터(검증 skip → 오탐 방지).
+    if let Some(list) = kube::get_jsonpath(
+        &["get", "pvc", "-n", &cfg.ns],
+        "{range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+    )
+    .await
+    {
+        snap.pvcs = list.split_whitespace().map(|s| s.to_string()).collect();
+    }
 
     snap.warnings = warn;
     snap
