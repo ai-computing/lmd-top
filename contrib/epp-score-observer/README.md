@@ -33,22 +33,40 @@ Selection behavior is **identical** to before (it delegates to max-score).
 `plugin.Register("endpoint-score-observer", Factory)` before `Run()`. All stock
 flags and plugins are unchanged; we just add one plugin type to the registry.
 
-## Build (needs Go 1.25 + docker; this repo's dev box, not the cluster)
+## Status — validated
 
-1. **Pin the router version to your running EPP image.** The image
-   `ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:main` is a moving target;
-   the plugin must compile against the *same* `github.com/llm-d/llm-d-router`:
-   ```bash
-   cd epp-score-observer
-   go get github.com/llm-d/llm-d-router@<commit-or-tag>   # match your EPP
-   go mod tidy
-   ```
-2. **Build & push:**
-   ```bash
-   docker build -t <registry>/epp-score-observer:v1 .
-   docker push  <registry>/epp-score-observer:v1
-   ```
-   Use a registry the cluster can pull (ghcr anon is 403 here — use the internal registry).
+- **Compiles** against `github.com/llm-d/llm-d-router@main` (pinned in `go.mod`/`go.sum`
+  to `v0.4.0-rc.1.0.20260707084645-e194457dc507`).
+- **Unit-tested** (`pkg/scoreobserver/picker_test.go`): a reconstructed Pick cycle
+  exports the real scores as gauges and delegates the max-score selection.
+- **Config-load verified**: running the built EPP binary with `deploy/default-plugins.yaml`
+  loads the plugin and makes it the active Picker
+  (`Picker: endpoint-score-observer/endpoint-score-observer`).
+- **Not yet run in-cluster** with live traffic — that needs the image in a pullable
+  registry (below) and requests through a gateway route.
+
+## Build
+
+`go.mod`/`go.sum` are committed and pinned, so a plain build is reproducible.
+To match a *different* running EPP image, re-pin: `go get github.com/llm-d/llm-d-router@<commit>; go mod tidy`.
+
+```bash
+cd contrib/epp-score-observer
+docker build -t <registry>/epp-score-observer:v1 .     # multi-stage; CGO_ENABLED=0 static
+docker push  <registry>/epp-score-observer:v1
+```
+Use a registry the cluster can pull (ghcr anon is 403 here — use an internal/authed registry).
+
+### No local docker? Build in-cluster with kaniko (pushes to your registry)
+```bash
+# context = this dir uploaded to a PVC/git; then a kaniko Job runs the Dockerfile.
+# (kaniko does the go build itself — no Go/docker needed locally.)
+```
+
+### No registry at all? Run the static binary via the shared store PVC
+Mirrors the cluster's host-stack pattern (see lmd-top e2e notes): build the static
+binary, `kubectl cp` it onto the `model-store` PVC, and run a Deployment on a minimal
+base image whose command is the mounted binary. Avoids images/registries entirely.
 
 ## Deploy
 
