@@ -733,16 +733,58 @@ pub(super) fn place_picker_overlay(f: &mut Frame, app: &App) {
     let w = full.width.saturating_sub(6).clamp(74, 110);
     let area = centered(full, w, h.min(full.height.saturating_sub(2)));
     f.render_widget(Clear, area);
+    // 목적지 종류(2단계 picker 라우팅과 동일): compile=실행 노드, prefetch=저장 PVC, 그 외 deploy 배치.
+    let (name_hdr, kind_label) = if app.compile_form.is_some() {
+        ("NODE", "compile node")
+    } else if app.prefetch_form.is_some() {
+        ("PVC", "store PVC")
+    } else {
+        ("NODE", "placement")
+    };
+    // info_only picker(디바이스 예약 없음)면 디바이스 열을 숨기고 이름+설명만.
+    let info_picker = p.rows.iter().all(|r| r.info_only);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        format!(
-            "  {:<20} {:>7}  {:>5}  {:>13}  {}",
-            "NODE", "FREE", "UTIL", "MEM(GB)", "STATUS"
-        ),
+        if info_picker {
+            format!("  {:<24} {}", name_hdr, "DETAIL")
+        } else {
+            format!("  {:<20} {:>7}  {:>5}  {:>13}  {}", name_hdr, "FREE", "UTIL", "MEM(GB)", "STATUS")
+        },
         Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
     )));
     for (i, r) in p.rows.iter().enumerate() {
         let sel = i == p.cursor;
+        // info_only 행(PVC·컴파일 노드): 디바이스 열 없이 이름 + 설명만 깔끔하게.
+        if r.info_only {
+            let name_c = if !r.schedulable {
+                C_BAD()
+            } else if r.value == "any" {
+                C_ACC()
+            } else {
+                Color::White
+            };
+            let (note_s, note_c) = if r.schedulable {
+                (r.note.clone(), C_DIM())
+            } else {
+                (format!("✗ {}", r.note), C_BAD())
+            };
+            let mut line = Line::from(vec![
+                Span::styled(
+                    format!("{} {:<24} ", if sel { "▎" } else { " " }, truncw(&r.label, 24)),
+                    Style::default().fg(name_c).add_modifier(if sel {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+                ),
+                Span::styled(note_s, Style::default().fg(note_c)),
+            ]);
+            if sel {
+                line.style = Style::default().bg(C_HL());
+            }
+            lines.push(line);
+            continue;
+        }
         let pseudo = r.value == "any" || r.value == "spread";
         let name_c = if !r.schedulable {
             C_BAD()
@@ -813,8 +855,10 @@ pub(super) fn place_picker_overlay(f: &mut Frame, app: &App) {
         lines.push(line);
     }
     f.render_widget(
-        Paragraph::new(lines)
-            .block(block_active("placement · ↑↓ 노드 선택 · Enter 적용 · Esc 취소")),
+        Paragraph::new(lines).block(block_active(&format!(
+            "{} · ↑↓ 선택 · Enter 적용 · Esc 취소",
+            kind_label
+        ))),
         area,
     );
 }

@@ -87,20 +87,14 @@ impl App {
                 help: help.into(),
             }
         };
+        let _ = &pvcs; // 목적지 PVC 는 폼 필드가 아니라 2단계 picker(open_prefetch_dest_picker)에서 고른다
         let fields = vec![
-            field(
-                "pvc",
-                "store PVC",
-                "model-store",
-                pvcs,
-                "Destination PVC (RWX). Weights land here and are reused by compile/serve. e to type another.",
-            ),
             field(
                 "dir",
                 "cache dir",
                 "hub",
                 ["hub", "models", "prefetch"].iter().map(|s| s.to_string()).collect(),
-                "Sub-path under the PVC for the HF cache (HF_HOME=/mnt/store/<dir>). e to edit.",
+                "Sub-path under the chosen PVC for the HF cache (HF_HOME=/mnt/store/<dir>). e to edit.",
             ),
             field(
                 "revision",
@@ -118,7 +112,46 @@ impl App {
             fields,
             cursor: 0,
             editing: false,
+            dest: String::new(),
         });
+    }
+
+    /// Prefetch 목적지(저장 PVC) picker — 2단계. model-store(항상) + 관측된 RWX PVC.
+    pub fn open_prefetch_dest_picker(&mut self) {
+        if self.prefetch_form.is_none() {
+            return;
+        }
+        let mut pvcs = vec!["model-store".to_string()];
+        for name in &self.snap.pvcs {
+            if !pvcs.iter().any(|p| p == name) {
+                pvcs.push(name.clone());
+            }
+        }
+        let observed = &self.snap.pvcs;
+        let rows: Vec<PlaceRow> = pvcs
+            .iter()
+            .map(|name| {
+                // 관측 목록이 있으면 실존 여부 표시(없으면 미관측 → 통과, prefetch_form_submit 이 최종 검증).
+                let exists = observed.is_empty() || observed.iter().any(|p| p == name);
+                PlaceRow {
+                    value: name.clone(),
+                    label: name.clone(),
+                    free: 0,
+                    total: 0,
+                    util: f64::NAN,
+                    mem_used: 0.0,
+                    mem_total: 0.0,
+                    schedulable: exists,
+                    note: if exists {
+                        "RWX store — 가중치 저장, compile/serve 재사용".to_string()
+                    } else {
+                        "관측되지 않은 PVC (없으면 prefetch 차단)".to_string()
+                    },
+                    info_only: true,
+                }
+            })
+            .collect();
+        self.place_picker = Some(PlacePick { cursor: 0, rows });
     }
 
     /// Prefetch 폼 확정 → 선택 PVC/경로로 HF 가중치를 받는 Job 생성(확인 팝업).
@@ -127,8 +160,9 @@ impl App {
             return;
         };
         let source = form.model_id.clone();
+        // 목적지 PVC 는 2단계 picker(form.dest)에서 옴. 빈 값이면 기본 store.
         let pvc = {
-            let p = form.get("pvc");
+            let p = form.dest.clone();
             if p.trim().is_empty() {
                 "model-store".to_string()
             } else {
@@ -278,11 +312,9 @@ mod zoo_tests {
         a.selected = 0;
         a.snap.pvcs = vec!["model-store".into()]; // 클러스터에 model-store 만 실존
         a.open_prefetch_form();
-        // 존재하지 않는 PVC 를 직접 입력(사용자가 e 로 타이핑한 상황).
+        // 목적지 picker(2단계)에서 존재하지 않는 PVC 를 dest 로 선택한 상황.
         if let Some(f) = a.prefetch_form.as_mut() {
-            if let Some(p) = f.fields.iter_mut().find(|x| x.key == "pvc") {
-                p.value = "furiosa-artifacts".into();
-            }
+            f.dest = "furiosa-artifacts".into();
         }
         a.prefetch_form_submit();
         assert!(a.confirm.is_none(), "없는 PVC 는 Job 을 staging 하지 않아야 한다");
@@ -294,23 +326,23 @@ mod zoo_tests {
     }
 
     #[test]
-    fn prefetch_form_offers_only_observed_pvcs() {
-        // 폼 후보는 model-store(항상) + 관측된 PVC 만. 실존하지 않는 이름을 하드코딩하지 않는다.
+    fn prefetch_dest_picker_offers_only_observed_pvcs() {
+        // 목적지 picker(2단계) 후보는 model-store(항상) + 관측된 PVC 만. 하드코딩된 이름 없음.
         let mut a = App::new();
         a.view = View::Zoo;
         a.selected = 0;
         a.snap.pvcs = vec!["model-store".into(), "rbln-artifacts".into()];
         a.open_prefetch_form();
-        let choices = a
-            .prefetch_form
+        a.open_prefetch_dest_picker();
+        let rows: Vec<String> = a
+            .place_picker
             .as_ref()
-            .and_then(|f| f.fields.iter().find(|x| x.key == "pvc"))
-            .map(|f| f.choices.clone())
+            .map(|p| p.rows.iter().map(|r| r.value.clone()).collect())
             .unwrap_or_default();
-        assert!(choices.contains(&"model-store".to_string()));
-        assert!(choices.contains(&"rbln-artifacts".to_string()), "관측된 PVC 는 후보에 포함");
+        assert!(rows.contains(&"model-store".to_string()));
+        assert!(rows.contains(&"rbln-artifacts".to_string()), "관측된 PVC 는 후보에 포함");
         assert!(
-            !choices.contains(&"furiosa-artifacts".to_string()),
+            !rows.contains(&"furiosa-artifacts".to_string()),
             "관측되지 않은 PVC 는 후보에 없어야 한다"
         );
     }
