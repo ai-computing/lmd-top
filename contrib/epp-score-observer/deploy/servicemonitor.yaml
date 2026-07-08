@@ -1,0 +1,25 @@
+# Only needed if your Prometheus does NOT already scrape EPP metrics (:9090).
+# Many llm-d installs already do (kube-prometheus-stack + an existing ServiceMonitor);
+# in that case epp_endpoint_score shows up automatically once the picker is injected.
+#
+# This PodMonitor scrapes every EPP pod's metrics port. Adjust the selector to match
+# how your EPP pods are labeled. Requires the Prometheus Operator (monitoring.coreos.com).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: epp-score-observer
+  namespace: llm-serving
+  labels: { app.kubernetes.io/part-of: llm-d }
+spec:
+  namespaceSelector:
+    matchNames: [llm-serving]
+  selector:
+    # EPP pods commonly carry a component/name label; broaden or narrow as needed.
+    matchExpressions:
+      - { key: app, operator: Exists }
+  podMetricsEndpoints:
+    - port: metrics          # EPP metrics container port is named "metrics" (9090)
+      path: /metrics
+      interval: 15s
+      scheme: http           # score-observer metrics are plaintext on :9090
+      # If your EPP runs with --metrics-endpoint-auth=true, add a bearerTokenSecret here.

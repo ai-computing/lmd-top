@@ -68,34 +68,58 @@ Mirrors the cluster's host-stack pattern (see lmd-top e2e notes): build the stat
 binary, `kubectl cp` it onto the `model-store` PVC, and run a Deployment on a minimal
 base image whose command is the mounted binary. Avoids images/registries entirely.
 
-## Deploy
+## Deploy — attach to an EXISTING llm-d environment (recommended)
 
-1. **Enable the picker in the EPP config** (`deploy/default-plugins.yaml` — adds the
-   plugin type + picker ref to the mounted ConfigMap):
-   ```bash
-   kubectl create cm llmd-router-epp -n llm-serving \
-     --from-file=default-plugins.yaml=deploy/default-plugins.yaml \
-     --dry-run=client -o yaml | kubectl apply -f -
-   ```
-   (Repeat per-serving EPP ConfigMap if you run more than one, e.g.
-   `serve-*-epp`, `gemma4-rbln-epp`.)
-2. **Swap the image** (reversible — re-run with the original image to roll back):
-   ```bash
-   deploy/swap-image.sh <registry>/epp-score-observer:v1 llm-serving
-   ```
-3. **Verify** the metric appears (needs traffic through the gateway to populate scores):
-   ```bash
-   kubectl port-forward deploy/llmd-router-epp -n llm-serving 9090:9090 &
-   curl -sk https://localhost:9090/metrics | grep epp_endpoint_score
-   ```
-   Then in `lmd-top` the EPP view's `score` column fills in per endpoint.
+The natural way to add this to any llm-d install: **swap the EPP image + inject the
+picker into that EPP's existing config**. `deploy/install.sh` does both, for one or all
+EPPs in a namespace, without assuming any names or a fixed config:
+
+```bash
+deploy/install.sh --image <registry>/epp-score-observer:<tag> --ns llm-serving
+# --epp d1,d2   target specific EPP deployments (default: auto-discover by image)
+# --dry-run     print the config diff + image change, mutate nothing
+```
+
+What it does per EPP (see `inject_picker.py`):
+- resolves the EPP's own `--config-file` → its ConfigMap + key (handles per-env names),
+- injects `endpoint-score-observer` into `plugins` and makes it the profile picker
+  (removing any explicit max-score/random picker; **idempotent**, preserves the rest —
+  including env-specific bits like Furiosa's `furiosa_llm_*` metric specs),
+- swaps the image and `rollout restart`s.
+
+Requirements: `kubectl`, `python3` + PyYAML, and an image the cluster can pull.
+
+**Metrics scraping.** The metrics live on each EPP's existing `:9090` (plaintext HTTP).
+If your Prometheus already scrapes EPP metrics (typical for kube-prometheus-stack based
+llm-d installs), `epp_endpoint_score` appears automatically. If not, apply
+`deploy/servicemonitor.yaml` (a PodMonitor).
+
+**Verify** (scores populate once traffic flows through the gateway):
+```bash
+kubectl port-forward deploy/<epp> -n llm-serving 9090:9090 &
+curl -s http://localhost:9090/metrics | grep epp_endpoint_score
+```
 
 ## Rollback
 
 ```bash
-deploy/swap-image.sh ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:main llm-serving
-# and restore the original ConfigMap (drop the endpoint-score-observer lines).
+deploy/install.sh --image ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:main --ns llm-serving
+# then drop the picker: kubectl edit cm <epp-cm> -n llm-serving  (remove the two
+# endpoint-score-observer lines) — an unknown plugin type would otherwise fail config load.
 ```
+
+## Verified in-cluster (2026-07-08)
+
+Exercised end-to-end on a live llm-d cluster **without docker or a registry**: built the
+static binary with Go, `kubectl cp`'d it onto the shared `model-store` PVC, ran it as an
+EPP (busybox base, binary from PVC), wired a test gateway route, and sent requests —
+`epp_endpoint_score` / `epp_endpoint_picked_total` populated with real per-endpoint values.
+Notes that shaped the tooling:
+- EPP ext-proc (`:9002`) is **TLS** — keep `--secure-serving` on (default); a plaintext
+  ext-proc makes the gateway FailClose (500/503).
+- Metrics (`:9090`) are **plaintext HTTP** even with secure-serving on.
+- GIE won't let a pod belong to two InferencePools — a parallel test pool needs its own
+  backend pods (or repoint an existing EPP in place, which is what `install.sh` does).
 
 ## lmd-top side
 
