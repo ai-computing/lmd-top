@@ -442,6 +442,12 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             Action::Restart,
             true,
         );
+        push_action(
+            format!("rollback:{}", m.name),
+            format!("rollout undo {} (previous revision)", m.name),
+            Action::Rollback,
+            true,
+        );
         if m.desired > 0 {
             push_action(
                 format!("stop:{}", m.name),

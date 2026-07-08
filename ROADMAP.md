@@ -60,10 +60,17 @@ lmd-top 이 배포 안 된(스토어) 모델·컴파일본까지 Deploy 에 표�
 
 ---
 
-## ▶ 다음 앵커 마일스톤 — Track A: Control plane
+## Track A: Control plane — ✅ 핵심 완료 (v0.35)
 
-Phase 1 이 "보는 것"을 끝냈으니, 다음은 **안전하게 조정하는 콘솔 + 기계가독 상태**다.
-인프라 조건에 안 걸려 **지금 바로** 진행 가능하고, "운영 콘솔" 명제와 human-in-the-loop/agent 방향을 직접 전진시킨다.
+Phase 1 이 "보는 것"을 끝냈고, Track A 의 앵커 3개(M1/M2/M3)는 **출시됨**:
+- **M1 권한 모드** ✅ `--mode observe|debug|admin|danger` + 헤더 상시 표시 + 모든 변경 작업 모드 게이트/confirm + audit 로그(`src/audit.rs`).
+- **M2 agent JSON** ✅ `--json`(스키마 `lmd-top/agent-state/v2`) — 상태·진단·가능 액션(`actions[]`, risk/confirm 포함). CLI 계약 테스트.
+- **M3 safe actions** ✅ scale · stop · rollout **restart/undo(rollback)** · **endpoint drain**(라우팅 relabel 제외→in-flight stream 종료) · cordon/uncordon · route rename/retarget/delete · delete pod/job. 전부 dry-run/confirm→apply→audit.
+  - *잔여*: **traffic/policy weight** 는 이 클러스터가 단일 백엔드 InferencePool(카나리 backendRef weight 없음)이라 실질 노브가 **EPP scorer weight** 뿐 → 뮤테이션이 아닌 **what-if 시뮬**(Track B EPP debugger)로 귀속.
+
+**다음 앵커는 Track B(아래).** occupancy 정확화(노드별 총−requests 스케줄가능 유휴)도 반영됨.
+
+<details><summary>M1/M2/M3 원래 기획(참고용)</summary>
 
 ### M1 — 권한 모드 (안전장치 먼저)
 기동 시 모드 선택(`--mode observe|debug|admin|danger`), 헤더에 상시 표시. 모든 변경 작업은 모드 게이트 + confirmation.
@@ -94,12 +101,14 @@ scale 를 넘어 **endpoint drain**(즉시 kill 아님: 신규 라우팅 제외 
 
 > **M1→M2→M3 순서 이유**: 안전장치(모드) 없이 액션(M3)을 늘리면 사고 위험. M2(JSON)는 M1의 권한/액션 모델을 그대로 직렬화하므로 중간에 둔다.
 
+</details>
+
 ---
 
-## Track B 백로그 (인프라 충족 시, 스켈레톤 선행)
+## ▶ 다음 앵커 — Track B: LLM-native depth (스켈레톤 선행)
 
 1. **PD 뷰** — prefill/decode pod 역할·queue·P/D ratio·KV transfer latency·imbalance → replica 권장. (Perf 의 P/D p95 를 뷰로 승격)
-2. **EPP decision trace + score table** — endpoint별 cache/queue/load/health score + pick 이유 + what-if(weight 시뮬).
+2. **EPP decision debugger** — 🟡 **스켈레톤 착수(v0.35)**: EPP 뷰 하단이 per-endpoint 표(pick%·queue 관측값 + kv/score 는 EPP 노출 대기 `–`) + "왜 이 pick" 추론 힌트. scorer weight **what-if(`+/-`)** 는 이미 동작. *남은 것*: EPP 가 per-endpoint score 를 노출하면 kv/score 열 자동 충전.
 3. **Cache locality 뷰** — pod별 KV/prefix hit·hot prefix·eviction.
 4. **SLO/goodput 진단 확장** — 아래 규칙표를 Overview 1줄 진단에서 전용 뷰로.
 
@@ -140,9 +149,11 @@ Models/Launch 를 ModelService 인지로 전환하면 (a) 배포 스펙·프리�
 
 ---
 
-## 요약: 다음 3스텝
-1. **M1 권한 모드** — 변경 작업 안전장치(observe/debug/admin/danger + confirm). ⚡
-2. **M2 agent JSON** — `--snapshot --json` 스키마(상태+가능 액션). ⚡
-3. **M3 safe actions** — drain/weight/rollout(dry-run→confirm→apply + audit). ⚡
+## 요약: 어디까지 왔나 · 다음
+- **Track A(컨트롤 플레인) ✅** — M1 권한모드 · M2 agent JSON · M3 safe actions(scale/stop/restart/**rollback**/**drain**/cordon/route\*/delete) 전부 출시. occupancy 스케줄가능 유휴 정확화 반영.
+- **다음(Track B, 스켈레톤 선행)**:
+  1. **EPP decision debugger** — 🟡 스켈레톤 착수. EPP 가 per-endpoint score 노출하면 kv/score 자동 충전.
+  2. **PD 뷰** — Perf 의 prefill/decode p95 를 전용 뷰로 승격(P/D ratio·imbalance).
+  3. **Cache locality 뷰** · **SLO/goodput 진단 확장**(진단 규칙표 → 전용 뷰).
 
-> 이후 인프라(EPP-in-path·tracing) 켜지면 Track B(PD·decision trace·cache·SLO) 를 스켈레톤부터 채운다.
+> Track B 대부분은 인프라(EPP-in-path·vLLM 메트릭·disagg·tracing) 선행 필요 → "스켈레톤 먼저, 데이터 오면 자동 표시".

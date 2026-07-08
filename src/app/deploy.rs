@@ -307,37 +307,59 @@ impl App {
             .filter(|x| x.kind == want_kind)
             .collect();
         let total = devs.len() as i64;
-        // 노드별 유휴(살아있고 미점유) — replica 는 한 노드에 per 개가 모여야 배치 가능(패킹).
-        let mut free_by_node: std::collections::BTreeMap<&str, i64> =
-            std::collections::BTreeMap::new();
-        for d in &devs {
-            if !d.node.is_empty() {
-                let e = free_by_node.entry(d.node.as_str()).or_insert(0);
-                if d.alive && d.busy_model.is_empty() {
-                    *e += 1;
-                }
-            }
-        }
-        let free: i64 = free_by_node.values().sum();
-        let nodes = free_by_node.len() as i64;
-        let max_node_free = free_by_node.values().copied().max().unwrap_or(0);
-        let replicas = form.get("replicas").parse::<i64>().unwrap_or(1).max(1);
-        let per = form.get("devices").parse::<i64>().unwrap_or(1).max(1);
-        let demand = replicas * per;
-        // k8s 리소스 관점 유휴 = allocatable - requested (스케줄러가 실제로 보는 값).
-        // metric busy_model 로는 유휴여도, 다른 배포가 리소스를 예약(request)했으면 스케줄 불가.
         let res_key = match form.vendor {
             "rbln" => "rebellions.ai/ATOM",
             "furiosa" => "furiosa.ai/rngd",
             _ => "nvidia.com/gpu",
         };
+        // 노드별 총 디바이스(살아있는) 수.
+        let mut total_by_node: std::collections::BTreeMap<&str, i64> =
+            std::collections::BTreeMap::new();
+        // 노드별 metric 유휴(busy_model 미점유) — 정보용(idle 이지만 예약됐을 수 있음).
+        let mut metric_free_by_node: std::collections::BTreeMap<&str, i64> =
+            std::collections::BTreeMap::new();
+        for d in &devs {
+            if !d.node.is_empty() && d.alive {
+                *total_by_node.entry(d.node.as_str()).or_insert(0) += 1;
+                if d.busy_model.is_empty() {
+                    *metric_free_by_node.entry(d.node.as_str()).or_insert(0) += 1;
+                }
+            }
+        }
+        // 노드별 스케줄가능 유휴 = 노드 디바이스 수 − 리소스 예약(node_alloc requests).
+        // 스케줄러가 실제로 보는 값 — metric 유휴여도 예약(request)돼 있으면 배치 불가.
+        // (node_alloc 없으면 metric 유휴로 폴백.)
+        let free_by_node: std::collections::BTreeMap<&str, i64> = total_by_node
+            .iter()
+            .map(|(&node, &tot)| {
+                let req = self
+                    .snap
+                    .node_alloc
+                    .get(node)
+                    .and_then(|m| m.get(res_key))
+                    .copied();
+                let free = match req {
+                    Some(r) => (tot - r).max(0),
+                    None => metric_free_by_node.get(node).copied().unwrap_or(0),
+                };
+                (node, free)
+            })
+            .collect();
+        let free: i64 = free_by_node.values().sum();
+        let metric_free: i64 = metric_free_by_node.values().sum();
+        let nodes = free_by_node.len() as i64;
+        let max_node_free = free_by_node.values().copied().max().unwrap_or(0);
+        let replicas = form.get("replicas").parse::<i64>().unwrap_or(1).max(1);
+        let per = form.get("devices").parse::<i64>().unwrap_or(1).max(1);
+        let demand = replicas * per;
+        // 클러스터 리소스 관점 유휴 = allocatable - requested (인벤토리 집계, 위 노드별 합과 일치해야 함).
         let resource_free = self
             .snap
             .inventory
             .iter()
             .find(|(k, _, _)| k == res_key)
             .map(|(_, alloc, req)| (alloc - req).max(0))
-            .unwrap_or(free); // inventory 없으면 metric 값으로 폴백
+            .unwrap_or(free); // inventory 없으면 노드별 합으로 폴백
                               // 실제 배치 가능 replica 수 = Σ floor(node_free / per) (한 노드 안에 per 개가 모여야).
         let placeable: i64 = free_by_node.values().map(|f| f / per).sum();
         let verdict = if total == 0 {
@@ -363,11 +385,11 @@ impl App {
         } else if matches!(verdict, FitVerdict::Tight) {
             tips.push(format!("노드 패킹상 {}/{} replica 만 배치 가능(유휴 {}, 노드별 조각) — replicas↓ 또는 노드 확보", placeable, replicas, free));
         }
-        // metric 유휴와 리소스 유휴가 어긋나면 명시(오해 방지).
-        if resource_free != free {
+        // metric 유휴(idle)와 리소스 유휴(예약)가 어긋나면 명시(오해 방지).
+        if metric_free != free {
             tips.push(format!(
-                "(metric 유휴 {} ≠ 리소스 유휴 {} — 예약됐지만 idle 인 디바이스 있음)",
-                free, resource_free
+                "(metric idle {} ≠ 스케줄가능 {} — 예약됐지만 idle 인 디바이스 있음)",
+                metric_free, free
             ));
         }
         if form.place == "spread" && replicas > nodes && nodes > 0 {
@@ -383,6 +405,7 @@ impl App {
             demand,
             total,
             free,
+            metric_free,
             resource_free,
             nodes,
             verdict,

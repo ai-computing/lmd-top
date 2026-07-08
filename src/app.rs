@@ -83,6 +83,12 @@ pub enum Pending {
     Restart {
         name: String,
     },
+    Rollback {
+        name: String,
+    }, // rollout undo = 직전 ReplicaSet 으로 되돌리기
+    Drain {
+        pod: String,
+    }, // endpoint drain = 라우팅 제외(relabel), in-flight stream 은 종료까지 유지
     Stop {
         name: String,
     }, // stop serving = replicas to 0 (frees devices, reversible)
@@ -126,6 +132,13 @@ impl Pending {
         match self {
             Pending::Scale { name, target } => format!("scale {} → {} replica(s)?", name, target),
             Pending::Restart { name } => format!("rollout restart {} (rolling)?", name),
+            Pending::Rollback { name } => {
+                format!("rollout undo {} (revert to previous revision)?", name)
+            }
+            Pending::Drain { pod } => format!(
+                "drain endpoint {} (relabel out of routing; in-flight streams finish)?",
+                pod
+            ),
             Pending::Stop { name } => format!("stop serving {} (scale → 0, frees devices)?", name),
             Pending::Apply { title, .. } => format!("apply manifest to cluster — {}?", title),
             Pending::ApplyUrl { title, url } => {
@@ -155,6 +168,16 @@ impl Pending {
                 format!("delete route {} from {}?", path, route)
             }
         }
+    }
+}
+
+/// Char-based truncation with an ellipsis — for short inline pod names in hint text (ui has its own width-aware truncw).
+fn short_pod(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let keep = max.saturating_sub(1);
+        format!("{}…", s.chars().take(keep).collect::<String>())
     }
 }
 
@@ -600,6 +623,84 @@ impl App {
     /// Effective scorer weight (the override if present, otherwise base).
     pub fn epp_weight(&self, name: &str, base: f64) -> f64 {
         *self.epp_weights.get(name).unwrap_or(&base)
+    }
+
+    /// EPP decision debugger — per-endpoint 행(picks/share/queue + score 스켈레톤).
+    /// 관측 신호(decisions=픽 횟수, pod_queues=큐 깊이)를 pod 기준으로 조인한다.
+    /// score(kv/종합)는 EPP 가 per-endpoint 로 노출하기 전까지 None. 픽 많은 순 정렬.
+    pub fn epp_endpoints(&self) -> Vec<EndpointDecision> {
+        let total: f64 = self.snap.decisions.iter().map(|(_, c)| c).sum();
+        let qmap: std::collections::HashMap<&str, f64> = self
+            .snap
+            .pod_queues
+            .iter()
+            .map(|(p, q)| (p.as_str(), *q))
+            .collect();
+        let mut rows: Vec<EndpointDecision> = self
+            .snap
+            .decisions
+            .iter()
+            .map(|(pod, picks)| EndpointDecision {
+                pod: pod.clone(),
+                picks: *picks,
+                share: if total > 0.0 { picks / total * 100.0 } else { 0.0 },
+                queue: qmap.get(pod.as_str()).copied(),
+                kv: None,
+                score: None,
+            })
+            .collect();
+        // decisions 는 이미 픽 내림차순이지만, pod_queues 만 있고 decision 이 없는 endpoint 도
+        // 후보로 보이도록 큐만 있는 pod 를 뒤에 덧붙인다(픽 0 = 라우팅 안 받음).
+        for (pod, q) in &self.snap.pod_queues {
+            if !rows.iter().any(|r| &r.pod == pod) {
+                rows.push(EndpointDecision {
+                    pod: pod.clone(),
+                    picks: 0.0,
+                    share: 0.0,
+                    queue: Some(*q),
+                    kv: None,
+                    score: None,
+                });
+            }
+        }
+        rows
+    }
+
+    /// 관측 신호만으로 "왜 이 pick" 을 추론(EPP score 부재 시 근사 설명). 데이터 없으면 None.
+    /// 픽 최다 endpoint 와 큐 최소 endpoint 를 비교 — 일치하면 큐 기반 라우팅과 정합.
+    pub fn epp_decision_hint(&self) -> Option<String> {
+        let rows = self.epp_endpoints();
+        let top = rows.iter().max_by(|a, b| {
+            a.picks
+                .partial_cmp(&b.picks)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+        if top.picks <= 0.0 {
+            return None; // 관측된 라우팅 없음
+        }
+        let lowq = rows
+            .iter()
+            .filter(|r| r.queue.is_some())
+            .min_by(|a, b| {
+                a.queue
+                    .partial_cmp(&b.queue)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        match lowq {
+            Some(lq) if lq.pod == top.pod => Some(format!(
+                "picked-most {} also has the shortest queue — consistent with load/queue scoring",
+                short_pod(&top.pod, 24)
+            )),
+            Some(lq) => Some(format!(
+                "picked-most {} ≠ shortest-queue {} — pick likely driven by cache/prefix locality",
+                short_pod(&top.pod, 20),
+                short_pod(&lq.pod, 20)
+            )),
+            None => Some(format!(
+                "picked-most {} — per-endpoint scores not exposed (queue/kv unavailable)",
+                short_pod(&top.pod, 24)
+            )),
+        }
     }
 
     /// Backend (model) name of the route selected in Flow(Topo) — for pivoting to a layer from the path.
@@ -2135,6 +2236,51 @@ mod tests {
     }
 
     #[test]
+    fn epp_endpoints_join_and_hint() {
+        // decisions(픽) + pod_queues(큐) 를 pod 기준 조인. 픽 최다 == 큐 최소 → "consistent" 힌트.
+        let a = App {
+            snap: Snapshot {
+                decisions: vec![("podA".into(), 30.0), ("podB".into(), 10.0)],
+                pod_queues: vec![("podA".into(), 1.0), ("podB".into(), 5.0)],
+                ..Default::default()
+            },
+            ..App::new()
+        };
+        let eps = a.epp_endpoints();
+        assert_eq!(eps.len(), 2);
+        assert_eq!(eps[0].pod, "podA");
+        assert!((eps[0].share - 75.0).abs() < 1e-6, "30/40 = 75%");
+        assert_eq!(eps[0].queue, Some(1.0));
+        assert_eq!(eps[0].kv, None, "per-endpoint score 는 스켈레톤(EPP 노출 대기)");
+        let hint = a.epp_decision_hint().expect("hint present");
+        assert!(hint.contains("consistent"), "픽최다=큐최소 → 정합 힌트: {hint}");
+
+        // 픽 최다 ≠ 큐 최소 → cache/prefix locality 로 설명.
+        let b = App {
+            snap: Snapshot {
+                decisions: vec![("podA".into(), 30.0), ("podB".into(), 10.0)],
+                pod_queues: vec![("podA".into(), 9.0), ("podB".into(), 1.0)],
+                ..Default::default()
+            },
+            ..App::new()
+        };
+        assert!(b.epp_decision_hint().unwrap().contains("locality"));
+
+        // 큐만 있고 픽 없는 pod 도 후보로 포함(픽 0). 관측 라우팅 없으면 힌트 None.
+        let c = App {
+            snap: Snapshot {
+                pod_queues: vec![("podC".into(), 2.0)],
+                ..Default::default()
+            },
+            ..App::new()
+        };
+        let eps = c.epp_endpoints();
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].picks, 0.0);
+        assert!(c.epp_decision_hint().is_none(), "관측된 픽 없음 → 힌트 없음");
+    }
+
+    #[test]
     fn deploy_fit_capacity_verdicts() {
         use crate::collect::AccelKind::Gpu;
         let mk = |accel: Vec<crate::collect::Accel>, inv_free: i64| App {
@@ -2160,21 +2306,27 @@ mod tests {
         assert_eq!(fit.demand, 2);
         assert_eq!(fit.verdict, FitVerdict::Fits);
 
-        // Oom(리소스 예약): metric 은 2 유휴지만 인벤토리 예약으로 resource_free=0.
+        // Oom(리소스 예약): metric 은 2 유휴지만 노드가 2개 다 예약(request)해 스케줄가능 0.
         let b = App {
             snap: Snapshot {
                 accel: vec![accel(Gpu, "n1", true, ""), accel(Gpu, "n1", true, "")],
-                inventory: vec![("nvidia.com/gpu".to_string(), 2, 2)], // free = 0
+                inventory: vec![("nvidia.com/gpu".to_string(), 2, 2)], // 클러스터 free = 0
+                node_alloc: std::collections::BTreeMap::from([(
+                    "n1".to_string(),
+                    std::collections::BTreeMap::from([("nvidia.com/gpu".to_string(), 2)]),
+                )]),
                 ..Default::default()
             },
             ..App::new()
         };
         let bfit = b.deploy_fit(&deploy_form("gpu", "1", "1", "any"));
         assert_eq!(bfit.verdict, FitVerdict::Oom);
+        assert_eq!(bfit.free, 0, "노드별 총2−예약2 → 스케줄가능 0");
+        assert_eq!(bfit.metric_free, 2, "metric idle 은 여전히 2");
         assert!(bfit.tips.iter().any(|t| t.contains("예약")), "리소스 예약 부족 안내");
         assert!(
-            bfit.tips.iter().any(|t| t.contains("metric 유휴")),
-            "metric 유휴 ≠ 리소스 유휴 불일치 안내"
+            bfit.tips.iter().any(|t| t.contains("idle")),
+            "metric idle ≠ 스케줄가능 불일치 안내"
         );
 
         // Tight: 총량은 되지만 노드 패킹으로 일부만(n1=3, n2=1, per=2 → placeable=1 < 2).
