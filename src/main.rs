@@ -1204,12 +1204,23 @@ fn ui_loop(
                         }
                         continue;
                     }
-                    // NPU compile options form overlay.
+                    // NPU compile options form overlay. Enter(옵션 확정) → 목적지 노드 picker(2단계).
                     if app.compile_form.is_some() {
+                        let editing = app.compile_form.as_ref().unwrap().editing;
+                        if !editing && matches!(k.code, KeyCode::Enter) {
+                            app.open_compile_dest_picker();
+                            continue;
+                        }
                         handle_edit_form!(app, compile_form, compile_form_submit, k.code);
                         continue;
                     }
+                    // Prefetch form. Enter(옵션 확정) → 목적지 PVC picker(2단계).
                     if app.prefetch_form.is_some() {
+                        let editing = app.prefetch_form.as_ref().unwrap().editing;
+                        if !editing && matches!(k.code, KeyCode::Enter) {
+                            app.open_prefetch_dest_picker();
+                            continue;
+                        }
                         handle_edit_form!(app, prefetch_form, prefetch_form_submit, k.code);
                         continue;
                     }

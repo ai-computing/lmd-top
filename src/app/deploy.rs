@@ -222,6 +222,7 @@ impl App {
             mem_total: 0.0,
             schedulable: true,
             note: note.into(),
+            info_only: false,
         };
         let mut rows = vec![
             pseudo("any", "제약 없음 — 스케줄러가 유휴 리소스로 배치"),
@@ -264,6 +265,7 @@ impl App {
                 mem_total: mt,
                 schedulable: ready && has_drv,
                 note,
+                info_only: false,
             });
         }
         self.place_picker = Some(PlacePick { cursor: 0, rows });
@@ -279,7 +281,8 @@ impl App {
         }
     }
 
-    /// 선택한 노드를 배치로 확정 → 매니페스트 생성(제출)까지 진행. placement 는 제출 직전 단계.
+    /// 선택한 목적지를 확정 → 매니페스트 생성(제출)까지 진행. deploy/compile/prefetch 공용 2단계 마지막.
+    /// 활성 폼에 따라 라우팅: deploy→place, compile→실행 노드, prefetch→저장 PVC.
     pub fn place_pick_apply(&mut self) {
         let Some(p) = self.place_picker.take() else {
             return;
@@ -287,10 +290,95 @@ impl App {
         let Some(value) = p.rows.get(p.cursor).map(|r| r.value.clone()) else {
             return;
         };
-        if let Some(form) = self.deploy_form.as_mut() {
-            form.place = value;
+        if self.compile_form.is_some() {
+            if let Some(form) = self.compile_form.as_mut() {
+                form.dest = value;
+            }
+            self.compile_form_submit();
+        } else if self.prefetch_form.is_some() {
+            if let Some(form) = self.prefetch_form.as_mut() {
+                form.dest = value;
+            }
+            self.prefetch_form_submit();
+        } else {
+            if let Some(form) = self.deploy_form.as_mut() {
+                form.place = value;
+            }
+            self.deploy_form_submit(); // placement 확정 후 바로 매니페스트 미리보기
         }
-        self.deploy_form_submit(); // placement 확정 후 바로 매니페스트 미리보기
+    }
+
+    /// Compile 목적지(실행 노드) picker — 2단계. RBLN=rebel-compiler 노드, Furiosa=아무 노드(AOT).
+    pub fn open_compile_dest_picker(&mut self) {
+        let Some(form) = self.compile_form.as_ref() else {
+            return;
+        };
+        let vendor = form.vendor;
+        let want = match vendor {
+            "rbln" => Some("RBLN"),
+            "furiosa" => Some("RNGD"),
+            _ => None,
+        };
+        let kind = match vendor {
+            "rbln" => crate::collect::AccelKind::Rbln,
+            "furiosa" => crate::collect::AccelKind::Rngd,
+            _ => crate::collect::AccelKind::Gpu,
+        };
+        let mut per_node: std::collections::BTreeMap<String, i64> = Default::default();
+        for a in self.snap.accel.iter().filter(|a| a.kind == kind && !a.node.is_empty()) {
+            *per_node.entry(a.node.clone()).or_insert(0) += 1;
+        }
+        let note_auto = if vendor == "rbln" {
+            "자동 — rebel-compiler 설치 노드에 고정(hostPath)"
+        } else {
+            "자동 — AOT, 아무 노드(CPU 포함)에서 실행"
+        };
+        let mut rows = vec![PlaceRow {
+            value: "any".into(),
+            label: "any".into(),
+            free: 0,
+            total: 0,
+            util: f64::NAN,
+            mem_used: 0.0,
+            mem_total: 0.0,
+            schedulable: true,
+            note: note_auto.into(),
+            info_only: true,
+        }];
+        // 후보 노드: RBLN 은 드라이버 보유 노드만 실행 가능(호스트 스택), Furiosa 는 Ready 아무 노드.
+        let mut nodes: Vec<&crate::collect::NodeInfo> = self.snap.nodes.iter().collect();
+        nodes.sort_by(|a, b| a.name.cmp(&b.name));
+        for nd in nodes {
+            let ready = nd.ready && !nd.cordoned;
+            let has_drv = want
+                .map(|w| nd.npu.to_uppercase().contains(w))
+                .unwrap_or(true);
+            // Furiosa(AOT)는 드라이버 불필요 → Ready 면 가능. RBLN 은 드라이버(=호스트 스택) 필요.
+            let ok = ready && (vendor != "rbln" || has_drv);
+            let dev = per_node.get(&nd.name).copied().unwrap_or(0);
+            let note = if !ready {
+                "NotReady/cordon".to_string()
+            } else if vendor == "rbln" && !has_drv {
+                "no rebel-compiler (RBLN 드라이버 없음)".to_string()
+            } else if !nd.npu.is_empty() {
+                nd.npu.clone()
+            } else {
+                "CPU only".to_string()
+            };
+            rows.push(PlaceRow {
+                value: nd.name.clone(),
+                label: nd.name.clone(),
+                free: dev,
+                total: dev,
+                util: f64::NAN,
+                mem_used: 0.0,
+                mem_total: 0.0,
+                schedulable: ok,
+                note,
+                info_only: true, // 컴파일은 디바이스 예약 안 함 → 노드+드라이버만 보여줌
+            });
+        }
+        self.place_picker = Some(PlacePick { cursor: 0, rows });
     }
 
     /// 배포 용량 판정 — 총 디바이스 수요 대 클러스터 동종 가속기(총/유휴).

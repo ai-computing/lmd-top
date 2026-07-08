@@ -94,7 +94,7 @@ impl App {
                 mkf("max-len", "max-seq-len", "8192", &["2048", "4096", "8192", "16384", "32768"], true, "Compile-time maximum context length (rbln_max_seq_len). Larger values use more memory and compile time."),
                 mkf("batch", "batch-size", "1", &["1", "2", "4", "8", "16"], true, "Static batch size (rbln_batch_size). RBLN fixes this at compile time."),
                 mkf("attn", "attn-impl", "flash_attn", &["flash_attn", "eager"], false, "Attention implementation: flash_attn for SRAM optimized path, eager for PagedAttention."),
-                mkf("kvpart", "kvcache-partition", "8192", &["4096", "8192", "16384", "32768"], true, "flash_attn only: KV tokens per SRAM partition. Must be a power of two AND divide max-seq-len (e.g. max-len 8192 → 4096/8192)."),
+                mkf("kvpart", "kvcache-partition", "4096", &["2048", "4096", "8192", "16384"], true, "flash_attn only: KV tokens per SRAM partition. Must divide max-seq-len AND be strictly smaller (≥2 partitions) — e.g. max-len 8192 → kvpart 4096 (2 partitions), NOT 8192."),
                 mkf("quant", "quantization", "none", &["none", "w8a8", "w4a16"], false, "Weight/activation quantization format (RBLNQuantizationConfig); model support varies."),
                 mkf("npu", "npu-chip", "RBLN-CA22", &["RBLN-CA22"], false, "Target RBLN chip (rbln_npu), detected from the cluster."),
             ]
@@ -158,31 +158,9 @@ impl App {
             numeric: true,
             help: "Requested accelerator device count (resources.limits). Usually TP for Rebellions or ceil(TP/8)×PP for Furiosa.".into(),
         });
-        // Add driver/SDK summaries to node choices.
-        let node_drv = |n: &str| -> String {
-            self.snap
-                .nodes
-                .iter()
-                .find(|x| x.name == n)
-                .map(|x| x.npu.clone())
-                .filter(|s| !s.is_empty())
-                .map(|s| format!(" {}", s))
-                .unwrap_or_default()
-        };
-        let mut node_choices = vec!["any".to_string()];
-        node_choices.extend(
-            cand_nodes
-                .iter()
-                .map(|n| format!("{}({}){}", n, per_node[n], node_drv(n))),
-        );
-        fields.push(CompileField {
-            key: "node".into(),
-            label: "target-node".into(),
-            value: "any".into(),
-            choices: node_choices,
-            numeric: false,
-            help: "Compile execution node. any matches the product label; parentheses show device count and driver summary.".into(),
-        });
+        // target-node 는 폼 필드가 아니라 제출 직전 목적지 picker(open_compile_dest_picker)에서 고른다
+        // (deploy 의 placement 와 동일한 2단계 UX). dest="" 면 submit 이 자동 선정으로 폴백.
+        let _ = (&cand_nodes, &per_node); // 후보는 picker 가 스냅샷에서 재계산
         CompileForm {
             model: a.model.clone(),
             model_id,
@@ -191,6 +169,7 @@ impl App {
             fields,
             cursor: 0,
             editing: false,
+            dest: String::new(),
         }
     }
 
@@ -217,14 +196,16 @@ impl App {
                     kvpart
                 ));
             }
-            if max_len < kvpart || max_len % kvpart != 0 {
-                // 표준 후보 중 max_len 을 나누는 가장 큰 값을 권장.
-                let fix = [32768i64, 16384, 8192, 4096]
+            // flash_attn 은 파티션이 2개 이상이어야 함 → kvpart 는 max_len 을 나누되 *엄격히 작아야* 한다.
+            // (max_len == kvpart 는 1파티션 → 실기 ValueError. 예전엔 max_len<kvpart 만 걸러 이 조합이 통과했었다.)
+            if max_len <= kvpart || max_len % kvpart != 0 {
+                // 표준 후보 중 max_len 을 나누는(그리고 더 작은) 가장 큰 값을 권장.
+                let fix = [16384i64, 8192, 4096, 2048]
                     .into_iter()
-                    .find(|&k| k <= max_len && max_len % k == 0);
+                    .find(|&k| k < max_len && max_len % k == 0);
                 return Some(match fix {
                     Some(k) => format!(
-                        "flash_attn needs max-seq-len ({}) to be a multiple of kvcache-partition ({}) → set kvcache-partition to {}",
+                        "flash_attn needs max-seq-len ({}) to be a multiple of a *smaller* kvcache-partition (≥2 partitions); {} is invalid → set kvcache-partition to {}",
                         max_len, kvpart, k
                     ),
                     None => format!(
@@ -291,7 +272,12 @@ impl App {
                 d
             }
         };
-        let node_pick = form.get("node");
+        // 목적지 노드는 2단계 picker(form.dest)에서 옴. "(dev)…" 접미어 제거. 빈 값이면 "any"(자동 선정).
+        let node_pick = if form.dest.is_empty() {
+            "any".to_string()
+        } else {
+            form.dest.clone()
+        };
         let node_host = node_pick
             .split('(')
             .next()
@@ -406,15 +392,21 @@ impl App {
             //    furiosa-llm serve 이미지엔 없어 apt 로 설치(또는 build-complete 이미지 사용).
             //  - SMB 스토어는 컴파일 작업 I/O(mmap 등) 미지원(os error 95) → 로컬 emptyDir 에 빌드 후 스토어로 복사.
             //  - fxb 는 .fxb 아카이브 → {target}/model.fxb 로 디렉터리 안에 두어 discovery 레이아웃 유지.
+            // HF_HOME 은 로컬 emptyDir(/work/hub) — fxb 의 다운로더가 SMB 스토어에 쓰면 os error 95(EOPNOTSUPP)로
+            // 즉시 실패한다(실기 확인). 스토어에 prefetch 된 사본이 있으면 로컬로 복사해 재사용(read 는 SMB OK) +
+            // HF_HUB_OFFLINE 로 재다운로드 없이 진행. 없으면 로컬로 새로 받아 컴파일 → 산출물만 스토어로 복사.
+            let dashes = model_id.replace('/', "--");
             let cmd = format!(
                 "set -e; apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq gcc-aarch64-linux-gnu build-essential >/dev/null 2>&1; \
+                 mkdir -p /work/hub/hub; \
+                 if [ -d /mnt/store/hub/hub/models--{dashes} ]; then echo 'reuse prefetched weights from store'; cp -r /mnt/store/hub/hub/models--{dashes} /work/hub/hub/ && export HF_HUB_OFFLINE=1; fi; \
                  mkdir -p /work/out; fxb build {model_id} /work/out/model -tp {tp} -pp {pp} --max-model-len {ml} --concurrency 8; \
                  mkdir -p {outdir}; cp -r /work/out/. {outdir}/; echo COMPILE_DONE; ls -la {outdir}",
-                outdir = outdir, model_id = model_id, tp = tp, pp = pp, ml = ml
+                outdir = outdir, model_id = model_id, tp = tp, pp = pp, ml = ml, dashes = dashes
             );
             (
                 "        - { name: work, emptyDir: {} }\n".to_string(),
-                "            - { name: HF_HOME, value: /mnt/store/hub }\n            - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true } } }\n".to_string(),
+                "            - { name: HF_HOME, value: /work/hub }\n            - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true } } }\n".to_string(),
                 "            - { name: work, mountPath: /work }\n".to_string(),
                 format!("[\"sh\", \"-c\", \"{}\"]", cmd),
                 "# Furiosa: run fxb build directly for furiosa-ai quantized checkpoints. Installs aarch64 cross-compiler, builds locally, then copies to model-store.",
@@ -849,7 +841,7 @@ impl App {
             }
         }
         // 선택 노드가 이 NPU 드라이버를 갖고 있는지 — 컴파일은 드라이버 설치 노드에서만 가능.
-        let node_host = form.get("node");
+        let node_host = if form.dest.is_empty() { "any" } else { &form.dest };
         let node_host = node_host.split('(').next().unwrap_or("any").trim();
         if node_host != "any" && !node_host.is_empty() {
             if let Some(nd) = self.snap.nodes.iter().find(|n| n.name == node_host) {

@@ -37,6 +37,7 @@ pub struct CompileForm {
     pub fields: Vec<CompileField>,
     pub cursor: usize,
     pub editing: bool, // 활성 필드 자유 입력(커스텀 값) 모드 — `e` 토글
+    pub dest: String, // 목적지(2단계 picker 에서 선택) — compile=실행 노드, prefetch=저장 PVC. deploy 의 place 와 동형.
 }
 
 // ── 필드 편집 폼 공용 로직(CompileForm·DeployForm 공유) ──
@@ -163,6 +164,7 @@ pub struct PlaceRow {
     pub mem_total: f64,
     pub schedulable: bool, // ready & !cordoned & 드라이버 존재
     pub note: String,      // "any"/"spread" 설명 또는 스케줄 불가 사유
+    pub info_only: bool,   // true 면 디바이스 열 없이 label + note 만 렌더(PVC 등 비-노드 목적지)
 }
 
 /// replicas·replica당 디바이스·노드 배치를 고른다(컴파일 폼과 대칭).
