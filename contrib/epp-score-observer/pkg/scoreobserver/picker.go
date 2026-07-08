@@ -47,7 +47,7 @@ var (
 	registerOnce sync.Once
 )
 
-// var _ fwksched.Picker = (*Observer)(nil) // compile-time interface check (uncomment on build box)
+var _ fwksched.Picker = (*Observer)(nil) // compile-time interface check (verified: builds against llm-d-router@main)
 
 // Factory is registered under PluginType. It registers the metrics on the EPP's
 // scraped registry (via handle.Metrics()) and returns a Picker that observes then delegates.
