@@ -6,7 +6,8 @@
 ### Added — Track A 마무리(drain·rollback) + Track B 착수(EPP decision debugger)
 - **endpoint drain** (killer #5): Pods▸Enter▸Drain. 파드를 라우팅 selector(`app`/`llm-d.ai/model`)에서 relabel(`<key>=<val>-drained`)로 이탈 → **신규 요청 차단·in-flight stream 유지**, ReplicaSet 이 대체본 생성. 되돌리려면 라벨 원복, 스트림 종료 후 Pods▸Delete. 실기 검증: 대체본 생성·drained 파드 Running 유지·Service 엔드포인트에서 제거 확인.
 - **rollback**: Serving/Overview▸Enter▸Rollback = `kubectl rollout undo`(직전 리비전). 기존 Restart 와 짝. 실기 검증(이미지 rev2→undo→rev1).
-- **EPP decision debugger 스켈레톤**: EPP 뷰 하단이 per-endpoint 표 — `pick%`·`queue`(관측값) + `kv`/`score`(EPP per-endpoint score 노출 시 자동 충전, 없으면 `–`) + "왜 이 pick" 추론 힌트(픽최다 vs 큐최소). scorer weight `+/-` what-if 는 기존 동작.
+- **EPP decision debugger**: EPP 뷰 하단이 per-endpoint 표 — `pick%`·`queue`(관측값) + **`score`**(아래 플러그인이 노출하는 실제 composite score, 없으면 `–`) + "왜 이 pick" 추론 힌트. scorer weight `+/-` what-if 는 기존 동작.
+- **`contrib/epp-score-observer`**: 커스텀 llm-d EPP picker 플러그인(Go). 라우터의 실제 per-endpoint composite score 를 `epp_endpoint_score{pod}` prometheus 메트릭으로 export 후 stock max-score-picker 로 위임(선택 동작 불변). 포크 없이 thin `main.go` 가 플러그인 등록 후 표준 runner 실행. lmd-top 이 PromQL 로 조인해 score 열 자동 충전. 빌드/배포 가이드 포함(Go 박스 필요).
 - 두 액션 모두 Admin 게이트 + confirm + audit. agent JSON(`--json`)에 `rollback:*` 액션 추가.
 ### Fixed — occupancy 스케줄가능 유휴 정확화
 - `deploy_fit` 의 노드별 패킹(`max_node_free`/`placeable`)이 metric `busy_model` 기반이라 **예약(request)됐지만 idle 인 디바이스를 유휴로 오산**하던 것 수정 → 노드별 유휴 = 노드 디바이스수 − `node_alloc`(k8s requests). metric idle 은 `metric_free` 로 분리 표시(다르면 `idle N ≠ 스케줄가능 M`). 실기 검증: etri-001 RNGD allocatable 4·requested 1(idle 서빙 예약)·metric-busy 0 → 유휴 3 판정(4 아님).

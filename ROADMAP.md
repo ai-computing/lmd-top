@@ -108,7 +108,7 @@ scale 를 넘어 **endpoint drain**(즉시 kill 아님: 신규 라우팅 제외 
 ## ▶ 다음 앵커 — Track B: LLM-native depth (스켈레톤 선행)
 
 1. **PD 뷰** — prefill/decode pod 역할·queue·P/D ratio·KV transfer latency·imbalance → replica 권장. (Perf 의 P/D p95 를 뷰로 승격)
-2. **EPP decision debugger** — 🟡 **스켈레톤 착수(v0.35)**: EPP 뷰 하단이 per-endpoint 표(pick%·queue 관측값 + kv/score 는 EPP 노출 대기 `–`) + "왜 이 pick" 추론 힌트. scorer weight **what-if(`+/-`)** 는 이미 동작. *남은 것*: EPP 가 per-endpoint score 를 노출하면 kv/score 열 자동 충전.
+2. **EPP decision debugger** — 🟢 **score 소스 확보(v0.36)**: EPP 뷰 하단 per-endpoint 표(pick%·queue 관측 + **score**) + "왜 이 pick" 추론 힌트. scorer weight **what-if(`+/-`)** 동작. **`contrib/epp-score-observer`** = 커스텀 EPP picker 플러그인(max-score 위임 + `epp_endpoint_score{pod}` prometheus export) → lmd-top 이 PromQL 로 조인해 score 열 채움. 플러그인 미배포 시 `–`(자동 폴백). *남은 것*: 플러그인 이미지 빌드/배포(Go 박스), per-scorer 분해(queue/kv/prefix 개별)는 scorer-레벨 계측 필요.
 3. **Cache locality 뷰** — pod별 KV/prefix hit·hot prefix·eviction.
 4. **SLO/goodput 진단 확장** — 아래 규칙표를 Overview 1줄 진단에서 전용 뷰로.
 

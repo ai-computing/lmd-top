@@ -239,6 +239,7 @@ pub struct Snapshot {
     pub objectives: Vec<Objective>,
     pub decisions: Vec<(String, f64)>, // (pod, 라우팅 픽 횟수) — 트래픽이 EPP 경유 시
     pub pod_queues: Vec<(String, f64)>, // per-pod 큐 깊이(요청 분배)
+    pub endpoint_scores: Vec<(String, f64)>, // per-pod EPP composite score(epp-score-observer 플러그인). 없으면 빈 값.
     pub perf: Perf,
     pub perf_rows: Vec<PerfRow>, // 모델(=하드웨어)별 성능
 
@@ -1147,7 +1148,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     // ---------- EPP pools (독립 쿼리 — 병렬 배칭으로 순차 라운드트립 제거) ----------
     let dec_q = "sum by (pod_name) (inference_extension_scheduler_attempts_total)";
     let pidx_q = "max(inference_extension_prefix_indexer_size)";
-    let (r_ready, r_q, r_kv, r_sat, r_dec, r_pidx, r_ppq) = tokio::join!(
+    let (r_ready, r_q, r_kv, r_sat, r_dec, r_pidx, r_ppq, r_score) = tokio::join!(
         prom::query(&cfg.prom, metrics::POOL_READY),
         prom::query(&cfg.prom, metrics::POOL_QUEUE),
         prom::query(&cfg.prom, metrics::POOL_KV),
@@ -1155,6 +1156,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         prom::query(&cfg.prom, dec_q),
         prom::query(&cfg.prom, pidx_q),
         prom::query(&cfg.prom, metrics::POOL_PER_POD_QUEUE),
+        prom::query(&cfg.prom, metrics::EPP_ENDPOINT_SCORE),
     );
     let p_ready = resolve(r_ready, metrics::POOL_READY, &mut warn);
     let p_q = map_by(resolve(r_q, metrics::POOL_QUEUE, &mut warn), "name");
@@ -1182,6 +1184,14 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     }
     snap.pod_queues
         .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // per-pod EPP composite score (epp-score-observer 플러그인 배포 시 채워짐; 없으면 빈 값 → '–')
+    for s in &resolve(r_score, metrics::EPP_ENDPOINT_SCORE, &mut warn) {
+        let pod = s.l("pod");
+        if !pod.is_empty() {
+            snap.endpoint_scores.push((pod.to_string(), s.value));
+        }
+    }
 
     // Perf: 구간별 지연 percentile·토큰분포·처리량 (EPP 정책용). 전부 graceful(NaN).
     let pp = &cfg.prom;
