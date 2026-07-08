@@ -1452,33 +1452,52 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(C_DIM()),
         ),
     ])];
-    let total: f64 = app.snap.decisions.iter().map(|(_, c)| c).sum();
-    if app.snap.decisions.is_empty() || total <= 0.0 {
+    let eps = app.epp_endpoints();
+    let observed = eps.iter().any(|e| e.picks > 0.0);
+    if !observed && !eps.iter().any(|e| e.queue.is_some()) {
         dl.push(Line::from(Span::styled(
             if app.snap.epp_in_path {
-                "no distribution data (waiting for traffic)"
+                "no endpoint data (waiting for traffic)"
             } else {
-                "no distribution data (EPP bypassed - see Topo)"
+                "no endpoint data (EPP bypassed - see Topo)"
             },
             Style::default().fg(C_DIM()),
         )));
     } else {
-        for (pod, cnt) in app.snap.decisions.iter().take(5) {
-            let share = cnt / total * 100.0;
+        // per-endpoint decision 표(스켈레톤): pod · share bar · queue(관측) · kv/score(EPP 노출 대기).
+        dl.push(Line::from(Span::styled(
+            format!("{:<20} {:>4}  {:>5} {:>4} {:>5}", "ENDPOINT", "pick", "queue", "kv", "score"),
+            Style::default().fg(C_DIM()),
+        )));
+        for e in eps.iter().take(4) {
             let mut sp = vec![Span::styled(
-                format!("{:<20} ", truncw(pod, 20)),
+                format!("{:<20} ", truncw(&e.pod, 20)),
                 Style::default().fg(Color::White),
             )];
-            sp.extend(bar_line(share, 8, C_ACC()).spans);
             sp.push(Span::styled(
-                format!(" {:>3.0}%", share),
-                Style::default().fg(C_DIM()),
+                format!("{:>3.0}% ", e.share),
+                Style::default().fg(C_ACC()),
             ));
+            let cell = |v: Option<f64>, dec: usize| match v {
+                Some(x) => Span::styled(format!("{:>5.*}", dec, x), Style::default().fg(Color::White)),
+                None => Span::styled(format!("{:>5}", "–"), Style::default().fg(C_DIM())),
+            };
+            sp.push(cell(e.queue, 0));
+            sp.push(Span::raw(" "));
+            sp.push(cell(e.kv, 2));
+            sp.push(Span::raw(" "));
+            sp.push(cell(e.score, 2));
             dl.push(Line::from(sp));
+        }
+        if let Some(hint) = app.epp_decision_hint() {
+            dl.push(Line::from(Span::styled(
+                format!("↳ {}", hint),
+                Style::default().fg(C_WARN()),
+            )));
         }
     }
     f.render_widget(
-        Paragraph::new(dl).block(block("request distribution (routing decisions)")),
+        Paragraph::new(dl).block(block("endpoint decisions · why this pick (kv/score = EPP-exposed)")),
         bottom_r,
     );
 }

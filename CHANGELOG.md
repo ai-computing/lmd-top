@@ -2,6 +2,26 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [0.36.0]
+### Added — Track A 마무리(drain·rollback) + Track B 착수(EPP decision debugger)
+- **endpoint drain** (killer #5): Pods▸Enter▸Drain. 파드를 라우팅 selector(`app`/`llm-d.ai/model`)에서 relabel(`<key>=<val>-drained`)로 이탈 → **신규 요청 차단·in-flight stream 유지**, ReplicaSet 이 대체본 생성. 되돌리려면 라벨 원복, 스트림 종료 후 Pods▸Delete. 실기 검증: 대체본 생성·drained 파드 Running 유지·Service 엔드포인트에서 제거 확인.
+- **rollback**: Serving/Overview▸Enter▸Rollback = `kubectl rollout undo`(직전 리비전). 기존 Restart 와 짝. 실기 검증(이미지 rev2→undo→rev1).
+- **EPP decision debugger 스켈레톤**: EPP 뷰 하단이 per-endpoint 표 — `pick%`·`queue`(관측값) + `kv`/`score`(EPP per-endpoint score 노출 시 자동 충전, 없으면 `–`) + "왜 이 pick" 추론 힌트(픽최다 vs 큐최소). scorer weight `+/-` what-if 는 기존 동작.
+- 두 액션 모두 Admin 게이트 + confirm + audit. agent JSON(`--json`)에 `rollback:*` 액션 추가.
+### Fixed — occupancy 스케줄가능 유휴 정확화
+- `deploy_fit` 의 노드별 패킹(`max_node_free`/`placeable`)이 metric `busy_model` 기반이라 **예약(request)됐지만 idle 인 디바이스를 유휴로 오산**하던 것 수정 → 노드별 유휴 = 노드 디바이스수 − `node_alloc`(k8s requests). metric idle 은 `metric_free` 로 분리 표시(다르면 `idle N ≠ 스케줄가능 M`). 실기 검증: etri-001 RNGD allocatable 4·requested 1(idle 서빙 예약)·metric-busy 0 → 유휴 3 판정(4 아님).
+### Docs
+- ROADMAP: Track A(M1/M2/M3) ✅ 완료 표기, 다음 앵커=Track B. traffic/policy weight 는 단일 백엔드 InferencePool 특성상 EPP scorer what-if 로 귀속.
+- 테스트 108개(occupancy 노드별·drain_label_key 우선순위·EPP endpoint 조인/힌트·action verb/mode).
+
+## [0.35.0]
+### Added — 벤더 모델 zoo(browse → prefetch/compile → deploy)
+- **Deploy▸Zoo 뷰**: Furiosa/Rebellions 공개 HF 모델(76+) 브라우징. `⏎` → Prefetch(가중치 사전 다운로드)·Compile→벤더. 컴파일 가능 벤더는 `npu-compat.json` 에서 자동 판정. 벤더 zoo 자동 수집(curl) + 정렬 + 상황별 STATUS(built/compiling/prefetch/gated/available).
+- **Prefetch 폼**: 대상 PVC(RWX)·캐시 경로·리비전 선택 → `snapshot_download` Job. **실 다운로드 % 표시**(downloaded/total bytes)·속도·live phase 를 Activity 패널에.
+- **PVC 검증**: 관측된 PVC 만 후보로 제시·없는 PVC 는 Job 생성 차단(영구 Pending/FailedScheduling 회귀 방지).
+### Fixed
+- compile: 잘못된 RBLN 파라미터 조합 예측·차단 + rbln-model-zoo fetch 정정. deploy: 생성 EPP 를 llm-d 표준(GIE)에 정렬(실 스코어링 활성).
+
 ## [0.34.0]
 ### Added — 관리(k9s 식) + SLO 어드바이저 + NPU 컴파일 가능성
 - **Enter 액션 메뉴**: Deploy 변형/노드/카탈로그·Models·Pods 에서 Enter → 컨텍스트 액션(Info/Compile→RBLN·Furiosa/Deploy/Stop/Scale/Restart/Logs/YAML/Delete/Cordon/Objective). 단축키를 몰라도 발견 가능.

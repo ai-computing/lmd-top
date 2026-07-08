@@ -3,6 +3,19 @@
 
 use crate::app::Mode;
 
+/// EPP decision debugger 의 한 endpoint(candidate pod) 행 — "라우터가 왜 이 pod 를?".
+/// picks/share/queue 는 관측 가능하면 실값, per-endpoint score(kv/prefix/load/health)는
+/// EPP 가 노출하기 전까지 None(스켈레톤 — 데이터 오면 자동 채워짐).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EndpointDecision {
+    pub pod: String,
+    pub picks: f64,          // 라우팅 픽 횟수(scheduler attempts) — 관측값
+    pub share: f64,          // 전체 대비 픽 점유율(%)
+    pub queue: Option<f64>,  // per-pod 큐 깊이 — 관측되면 실값
+    pub kv: Option<f64>,     // KV-cache usage score — EPP 노출 대기
+    pub score: Option<f64>,  // 종합 score — EPP 노출 대기
+}
+
 /// 컴파일 옵션 편집 폼의 필드 하나. NPU 컴파일 파라미터(TP/PP/seq/batch/dtype/quant/npu).
 #[derive(Clone)]
 pub struct CompileField {
@@ -197,6 +210,8 @@ pub enum Action {
     Logs,                  // 로그 tail
     Scale,                 // replicas 0/1 토글
     Restart,               // 롤아웃 재시작
+    Rollback,              // 롤아웃 되돌리기(직전 ReplicaSet)
+    Drain,                 // 엔드포인트 드레인(라우팅 제외 후 stream 종료 시 제거)
     Cordon,                // 노드 스케줄 차단
     Uncordon,              // 노드 스케줄 해제
     Yaml,                  // live YAML 보기(읽기전용)
@@ -222,6 +237,8 @@ impl Action {
             | Action::Stop
             | Action::Scale
             | Action::Restart
+            | Action::Rollback
+            | Action::Drain
             | Action::Cordon
             | Action::Uncordon
             | Action::RouteRename
@@ -244,6 +261,8 @@ impl Action {
             Action::Logs => "logs",
             Action::Scale => "scale",
             Action::Restart => "restart",
+            Action::Rollback => "rollback",
+            Action::Drain => "drain",
             Action::Cordon | Action::Uncordon => "cordon",
             Action::Yaml => "yaml",
             Action::Delete | Action::DeleteJob => "delete",
@@ -357,8 +376,9 @@ impl PerfAdvice {
 pub struct DeployFit {
     pub demand: i64,        // replicas × replica당 디바이스
     pub total: i64,         // 클러스터 동종 디바이스 총 수
-    pub free: i64,          // 유휴(metric busy_model 비어있음) 추정
-    pub resource_free: i64, // k8s 리소스 유휴 = allocatable - requested(스케줄러 관점)
+    pub free: i64,          // 스케줄가능 유휴(노드별 총−requests 합, 스케줄러 관점)
+    pub metric_free: i64,   // metric idle(busy_model 비어있음) — 예약됐지만 노는 디바이스 구분용
+    pub resource_free: i64, // k8s 리소스 유휴 = allocatable - requested(클러스터 인벤토리 집계)
     pub nodes: i64,         // 동종 디바이스 보유 노드 수
     pub verdict: FitVerdict,
     pub tips: Vec<String>,
@@ -410,6 +430,8 @@ mod tests {
         assert_eq!(Action::Logs.required_mode(), Mode::Debug);
         assert_eq!(Action::Deploy.required_mode(), Mode::Admin);
         assert_eq!(Action::Cordon.required_mode(), Mode::Admin);
+        assert_eq!(Action::Rollback.required_mode(), Mode::Admin);
+        assert_eq!(Action::Drain.required_mode(), Mode::Admin);
         assert_eq!(Action::Delete.required_mode(), Mode::Danger);
         assert_eq!(Action::RouteDelete.required_mode(), Mode::Danger);
         // risk_label 은 required_mode 의 이름과 일치.
@@ -426,6 +448,8 @@ mod tests {
         assert_eq!(Action::Logs.verb(), "logs");
         assert_eq!(Action::Scale.verb(), "scale");
         assert_eq!(Action::Restart.verb(), "restart");
+        assert_eq!(Action::Rollback.verb(), "rollback");
+        assert_eq!(Action::Drain.verb(), "drain");
         assert_eq!(Action::Cordon.verb(), "cordon");
         assert_eq!(Action::Uncordon.verb(), "cordon");
         assert_eq!(Action::Yaml.verb(), "yaml");

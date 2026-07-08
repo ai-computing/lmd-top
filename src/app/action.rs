@@ -79,6 +79,12 @@ impl App {
                     action: Action::Restart,
                 });
                 items.push(ActionItem {
+                    key: 'b',
+                    label: "Rollback",
+                    desc: "rollout undo → previous revision",
+                    action: Action::Rollback,
+                });
+                items.push(ActionItem {
                     key: 'O',
                     label: "Objective",
                     desc: "set SLO target (TTFT/TPOT/E2E/tok·s) — drives advisor",
@@ -316,6 +322,12 @@ impl App {
                     action: Action::Restart,
                 });
                 items.push(ActionItem {
+                    key: 'b',
+                    label: "Rollback",
+                    desc: "rollout undo → previous revision",
+                    action: Action::Rollback,
+                });
+                items.push(ActionItem {
                     key: 'O',
                     label: "Objective",
                     desc: "set SLO target (TTFT/TPOT/E2E/tok·s) — drives advisor",
@@ -350,6 +362,12 @@ impl App {
                     label: "YAML",
                     desc: "live Pod YAML (read-only)",
                     action: Action::Yaml,
+                });
+                items.push(ActionItem {
+                    key: 'r',
+                    label: "Drain",
+                    desc: "relabel out of routing — stop new requests, finish in-flight streams",
+                    action: Action::Drain,
                 });
                 items.push(ActionItem {
                     key: 'D',

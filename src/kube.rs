@@ -504,9 +504,120 @@ pub fn rollout_restart(ns: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Rollout undo (`kubectl rollout undo deploy/<name>`) — roll back to the previous ReplicaSet. admin action.
+pub fn rollout_undo(ns: &str, name: &str) -> Result<()> {
+    let out = std::process::Command::new("kubectl")
+        .args([
+            "rollout",
+            "undo",
+            "deployment",
+            name,
+            "-n",
+            ns,
+            "--request-timeout=8s",
+        ])
+        .output()?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "rollout undo failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Pick the routing/selector label to break for an endpoint drain, in priority order.
+/// Changing this label's value evicts the pod from the InferencePool/Service endpoints and from
+/// its owning ReplicaSet's selector (so a fresh replacement spins up), while the pod keeps serving
+/// in-flight requests. Returns the key present in `labels`, or None if no known selector label exists.
+pub fn drain_label_key(labels: &serde_json::Value) -> Option<String> {
+    const CANDIDATES: &[&str] = &[
+        "app",
+        "app.kubernetes.io/name",
+        "llm-d.ai/model",
+        "llm-d.ai/inferenceServing",
+    ];
+    let obj = labels.as_object()?;
+    CANDIDATES
+        .iter()
+        .find(|k| obj.get(**k).and_then(|v| v.as_str()).is_some())
+        .map(|k| k.to_string())
+}
+
+/// Endpoint drain — relabel `<key>=<val>-drained` so the pod leaves routing (new requests stop)
+/// while finishing in-flight streams. Reversible: relabel back to `<val>`. Returns "(key=old→new)".
+/// Reads the pod's labels live to find the selector label; errors if the pod has none we recognize.
+pub fn drain_pod(ns: &str, pod: &str) -> Result<String> {
+    let get = std::process::Command::new("kubectl")
+        .args([
+            "get",
+            "pod",
+            pod,
+            "-n",
+            ns,
+            "-o",
+            "jsonpath={.metadata.labels}",
+            "--request-timeout=8s",
+        ])
+        .output()?;
+    if !get.status.success() {
+        return Err(anyhow!(
+            "read pod labels failed: {}",
+            String::from_utf8_lossy(&get.stderr).trim()
+        ));
+    }
+    let raw = String::from_utf8_lossy(&get.stdout);
+    let labels: serde_json::Value = serde_json::from_str(raw.trim()).unwrap_or(serde_json::Value::Null);
+    let key = drain_label_key(&labels)
+        .ok_or_else(|| anyhow!("no routing label (app / llm-d.ai/model) to drain on {}", pod))?;
+    let old = labels
+        .get(&key)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if old.ends_with("-drained") {
+        return Err(anyhow!("{} already drained ({}={})", pod, key, old));
+    }
+    let new = format!("{}-drained", old);
+    let out = std::process::Command::new("kubectl")
+        .args([
+            "label",
+            "pod",
+            pod,
+            "-n",
+            ns,
+            &format!("{}={}", key, new),
+            "--overwrite",
+            "--request-timeout=8s",
+        ])
+        .output()?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "drain (relabel) failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(format!("({}={}→{})", key, old, new))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drain_label_key_priority_and_absence() {
+        // app 우선.
+        let l = serde_json::json!({"app": "gemma4-rbln", "role": "decode"});
+        assert_eq!(drain_label_key(&l).as_deref(), Some("app"));
+        // app 없으면 llm-d.ai/model 로 폴백.
+        let l2 = serde_json::json!({"llm-d.ai/model": "k-exaone-236b", "role": "decode"});
+        assert_eq!(drain_label_key(&l2).as_deref(), Some("llm-d.ai/model"));
+        // 알 수 없는 라벨만 있으면 None(드레인 대상 없음).
+        let l3 = serde_json::json!({"pod-template-hash": "abc123"});
+        assert_eq!(drain_label_key(&l3), None);
+        // 라벨 객체 아님 → None.
+        assert_eq!(drain_label_key(&serde_json::Value::Null), None);
+    }
 
     #[test]
     fn job_names_extracts_only_jobs() {

@@ -384,6 +384,26 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                 .map_err(|e| e.to_string());
             mk("rollout-restart".into(), name, "restart", r)
         }
+        Pending::Rollback { name } => {
+            let r = kube::rollout_undo(ns, &name)
+                .map(|_| OkInfo {
+                    audit_detail: "rolled back".into(),
+                    notify: format!("rollout undo {} (previous revision)", name),
+                    clear_preview: false,
+                })
+                .map_err(|e| e.to_string());
+            mk("rollout-undo".into(), name, "rollback", r)
+        }
+        Pending::Drain { pod } => {
+            let r = kube::drain_pod(ns, &pod)
+                .map(|detail| OkInfo {
+                    audit_detail: format!("drained {}", detail),
+                    notify: format!("drained {} {} — in-flight streams finish", pod, detail),
+                    clear_preview: false,
+                })
+                .map_err(|e| e.to_string());
+            mk("drain".into(), pod, "drain", r)
+        }
         Pending::Stop { name } => {
             let r = kube::scale_deploy(ns, &name, 0)
                 .map(|_| OkInfo {
@@ -635,6 +655,20 @@ fn dispatch_action(
             if require_action(app, action) {
                 app.confirm = Some(Pending::Restart {
                     name: subject.to_string(),
+                });
+            }
+        }
+        Action::Rollback => {
+            if require_action(app, action) {
+                app.confirm = Some(Pending::Rollback {
+                    name: subject.to_string(),
+                });
+            }
+        }
+        Action::Drain => {
+            if require_action(app, action) {
+                app.confirm = Some(Pending::Drain {
+                    pod: subject.to_string(),
                 });
             }
         }

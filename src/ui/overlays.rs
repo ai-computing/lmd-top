@@ -275,8 +275,16 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
         ),
         Span::styled(
             format!(
-                "   demand {} dev   free {} (res {}) / {} over {} node",
-                fit.demand, fit.free, fit.resource_free, fit.total, fit.nodes
+                "   demand {} dev   free {}{} / {} over {} node",
+                fit.demand,
+                fit.free,
+                if fit.metric_free != fit.free {
+                    format!(" (idle {})", fit.metric_free)
+                } else {
+                    String::new()
+                },
+                fit.total,
+                fit.nodes
             ),
             Style::default().fg(C_DIM()),
         ),
