@@ -636,6 +636,13 @@ impl App {
             .iter()
             .map(|(p, q)| (p.as_str(), *q))
             .collect();
+        // per-pod composite score from the epp-score-observer plugin (empty until deployed).
+        let smap: std::collections::HashMap<&str, f64> = self
+            .snap
+            .endpoint_scores
+            .iter()
+            .map(|(p, s)| (p.as_str(), *s))
+            .collect();
         let mut rows: Vec<EndpointDecision> = self
             .snap
             .decisions
@@ -646,7 +653,7 @@ impl App {
                 share: if total > 0.0 { picks / total * 100.0 } else { 0.0 },
                 queue: qmap.get(pod.as_str()).copied(),
                 kv: None,
-                score: None,
+                score: smap.get(pod.as_str()).copied(),
             })
             .collect();
         // decisions 는 이미 픽 내림차순이지만, pod_queues 만 있고 decision 이 없는 endpoint 도
@@ -659,7 +666,20 @@ impl App {
                     share: 0.0,
                     queue: Some(*q),
                     kv: None,
-                    score: None,
+                    score: smap.get(pod.as_str()).copied(),
+                });
+            }
+        }
+        // scored-but-not-picked/queued candidates (e.g. score present, no traffic yet).
+        for (pod, s) in &self.snap.endpoint_scores {
+            if !rows.iter().any(|r| &r.pod == pod) {
+                rows.push(EndpointDecision {
+                    pod: pod.clone(),
+                    picks: 0.0,
+                    share: 0.0,
+                    queue: qmap.get(pod.as_str()).copied(),
+                    kv: None,
+                    score: Some(*s),
                 });
             }
         }
@@ -2242,6 +2262,8 @@ mod tests {
             snap: Snapshot {
                 decisions: vec![("podA".into(), 30.0), ("podB".into(), 10.0)],
                 pod_queues: vec![("podA".into(), 1.0), ("podB".into(), 5.0)],
+                // epp-score-observer 플러그인이 노출하는 composite score.
+                endpoint_scores: vec![("podA".into(), 0.82), ("podB".into(), 0.40)],
                 ..Default::default()
             },
             ..App::new()
@@ -2251,7 +2273,8 @@ mod tests {
         assert_eq!(eps[0].pod, "podA");
         assert!((eps[0].share - 75.0).abs() < 1e-6, "30/40 = 75%");
         assert_eq!(eps[0].queue, Some(1.0));
-        assert_eq!(eps[0].kv, None, "per-endpoint score 는 스켈레톤(EPP 노출 대기)");
+        assert_eq!(eps[0].score, Some(0.82), "epp_endpoint_score 조인");
+        assert_eq!(eps[0].kv, None, "kv 는 아직 미노출(스켈레톤)");
         let hint = a.epp_decision_hint().expect("hint present");
         assert!(hint.contains("consistent"), "픽최다=큐최소 → 정합 힌트: {hint}");
 

@@ -1454,7 +1454,7 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
     ])];
     let eps = app.epp_endpoints();
     let observed = eps.iter().any(|e| e.picks > 0.0);
-    if !observed && !eps.iter().any(|e| e.queue.is_some()) {
+    if !observed && !eps.iter().any(|e| e.queue.is_some() || e.score.is_some()) {
         dl.push(Line::from(Span::styled(
             if app.snap.epp_in_path {
                 "no endpoint data (waiting for traffic)"

@@ -59,6 +59,9 @@ pub const POOL_PER_POD_QUEUE: &str = "inference_pool_per_pod_queue_size";
 pub const POOL_SAT: &str = "inference_extension_flow_control_pool_saturation";
 pub const SCHED_ATTEMPTS: &str = "inference_extension_scheduler_attempts_total";
 pub const PREFIX_IDX: &str = "inference_extension_prefix_indexer_size";
+// per-endpoint composite scheduler score — exposed by the epp-score-observer picker plugin
+// (see contrib/epp-score-observer). Absent until that plugin is deployed → column shows '–'.
+pub const EPP_ENDPOINT_SCORE: &str = "epp_endpoint_score";
 
 /// doctor coverage targets: (family, metric, impact when absent). Same constants as the metrics collect reads.
 pub const DEPS: &[(&str, &str, &str)] = &[

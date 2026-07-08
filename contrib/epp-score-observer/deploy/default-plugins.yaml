@@ -1,0 +1,32 @@
+# EPP plugins config with the endpoint-score-observer picker enabled.
+# Diff vs the stock llmd-router-epp ConfigMap:
+#   + added `- type: endpoint-score-observer` to the plugins list
+#   + added `- {pluginRef: endpoint-score-observer}` as the explicit picker
+#     (replaces the implicit auto-added max-score-picker; the observer delegates to it)
+# Apply into the SAME ConfigMap key the EPP mounts (--config-file /config/default-plugins.yaml):
+#   kubectl create cm llmd-router-epp -n llm-serving \
+#     --from-file=default-plugins.yaml=./default-plugins.yaml --dry-run=client -o yaml \
+#     | kubectl apply -f -
+#   kubectl rollout restart deploy/llmd-router-epp -n llm-serving
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- type: queue-scorer
+- type: kv-cache-utilization-scorer
+- type: prefix-cache-scorer
+- type: no-hit-lru-scorer
+- type: metrics-data-source
+  parameters:
+    scheme: http
+    path: /metrics
+    insecureSkipVerify: true
+- type: core-metrics-extractor
+- type: endpoint-score-observer          # <-- our custom picker (exports epp_endpoint_score)
+schedulingProfiles:
+- name: default
+  plugins:
+  - {pluginRef: queue-scorer, weight: 2}
+  - {pluginRef: kv-cache-utilization-scorer, weight: 2}
+  - {pluginRef: prefix-cache-scorer, weight: 3}
+  - {pluginRef: no-hit-lru-scorer, weight: 2}
+  - {pluginRef: endpoint-score-observer}  # <-- picker (no weight); delegates to max-score
