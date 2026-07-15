@@ -172,7 +172,7 @@
 | REG-04 | 매니페스트 YAML 인터폴레이션 무이스케이프 (app.rs:1292-) | 폼 커스텀 입력에 `"` 포함 | 유효 YAML 생성 또는 입력 거부 | P1 |
 | REG-05 | `norm_pct`: 1% util → 100% (collect.rs:1114) | GPU 정확히 1% 사용 상태 관찰 | 1%로 표시 | P0 |
 | REG-06 | 형제 변형 메트릭 오귀속 (collect.rs:1476) | `x`·`x-fp8` 동시 서빙 | 각 행에 자기 메트릭(최장/정확 매치 우선) | P0 |
-| REG-07 | kubectl 외곽 타임아웃 부재 (kube.rs:9) | 응답 없는 API 서버 | full tick 유한 시간 내 오류·경고로 복귀 | P0 |
+| REG-07 | ✅ **수정됨** — kubectl 외곽 타임아웃 부재 (kube.rs) | 응답 없는 API 서버 | full tick 유한 시간 내 오류·경고로 복귀. tick 경로 async 호출을 `output_bounded`(tokio timeout + `kill_on_drop`)로 감쌈 — `--request-timeout` 이 못 막는 credential-plugin/DNS/connect 블로킹까지 벽시계 상한. (회귀 테스트: `output_bounded_times_out_a_hung_child`) | P0 |
 | REG-08 | 컬렉터 절반이 무경고 실패 (inferencepool/gateway 등) | RBAC 제한 계정 | 빈 뷰 대신 warnings 표기 | P1 |
 | REG-09 | deploy_fit이 k8s 리소스 requests 미반영 (실기 발견) | metric 유휴 + requests 만점 노드에 배치 시도 | 배치 불가로 판정(allocatable-requested 기준 병용) | P1 |
 | REG-10 | 오버레이 선택 항목 fg=`C_HL()`(배경색) — 비가시 의심 (overlays.rs:163,204) | 실기 터미널에서 액션 메뉴/폼 선택행 확인 | 선택 항목 텍스트 뚜렷하게 판독 | P1 |

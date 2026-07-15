@@ -2,15 +2,27 @@
 //! Phase 1 starts with kubectl shell-out (fast). Consider promoting to native kube-rs later.
 
 use anyhow::{anyhow, Result};
+use std::time::Duration;
 use tokio::process::Command;
+
+/// Wall-clock bound for a kubectl child on the collect (tick) path. `--request-timeout`
+/// only bounds the API HTTP request; it does NOT cover a hung exec credential plugin, DNS,
+/// or TCP connect — any of which would otherwise stall the whole tick indefinitely (REG-07).
+/// `kill_on_drop` reaps the child when the timeout future is dropped. `secs` should sit a
+/// little above the call's `--request-timeout` so that timeout wins on normal API slowness.
+async fn output_bounded(mut cmd: Command, secs: u64) -> Result<std::process::Output> {
+    cmd.kill_on_drop(true);
+    match tokio::time::timeout(Duration::from_secs(secs), cmd.output()).await {
+        Ok(r) => Ok(r?),
+        Err(_) => Err(anyhow!("kubectl timed out after {}s (unresponsive API server?)", secs)),
+    }
+}
 
 /// Run `kubectl <args...> -o json` → Value. (caller includes -o json in args)
 pub async fn get_json(args: &[&str]) -> Result<serde_json::Value> {
-    let out = Command::new("kubectl")
-        .args(args)
-        .arg("--request-timeout=15s")
-        .output()
-        .await?;
+    let mut cmd = Command::new("kubectl");
+    cmd.args(args).arg("--request-timeout=15s");
+    let out = output_bounded(cmd, 20).await?;
     if !out.status.success() {
         return Err(anyhow!(
             "kubectl {:?} failed: {}",
@@ -31,12 +43,10 @@ pub fn cm_data<'a>(cm: &'a serde_json::Value, key: &str) -> Option<&'a str> {
 /// `Some(true)`=object present, `Some(false)`=absent, `None`=kubectl error (kind/CRD missing or cluster unreachable).
 /// Read-only; used by the Setup(Doctor) view's prerequisite checks.
 pub async fn get_exists(args: &[&str]) -> Option<bool> {
-    let out = Command::new("kubectl")
-        .args(args)
-        .args(["--ignore-not-found", "-o", "name", "--request-timeout=8s"])
-        .output()
-        .await
-        .ok()?;
+    let mut cmd = Command::new("kubectl");
+    cmd.args(args)
+        .args(["--ignore-not-found", "-o", "name", "--request-timeout=8s"]);
+    let out = output_bounded(cmd, 12).await.ok()?;
     if !out.status.success() {
         return None;
     }
@@ -45,13 +55,11 @@ pub async fn get_exists(args: &[&str]) -> Option<bool> {
 
 /// `kubectl get <args> -o jsonpath=<jp>` → trimmed stdout, or `None` on kubectl error (object/kind absent).
 pub async fn get_jsonpath(args: &[&str], jp: &str) -> Option<String> {
-    let out = Command::new("kubectl")
-        .args(args)
+    let mut cmd = Command::new("kubectl");
+    cmd.args(args)
         .arg(format!("-o=jsonpath={}", jp))
-        .arg("--request-timeout=8s")
-        .output()
-        .await
-        .ok()?;
+        .arg("--request-timeout=8s");
+    let out = output_bounded(cmd, 12).await.ok()?;
     if !out.status.success() {
         return None;
     }
@@ -99,11 +107,9 @@ pub fn logs(ns: &str, pod: &str, tail: u32) -> Result<Vec<String>> {
 
 /// Last non-empty line of pod logs (for progress hints). async, short timeout. None on failure.
 pub async fn last_log_line(ns: &str, pod: &str) -> Option<String> {
-    let out = Command::new("kubectl")
-        .args(["logs", pod, "-n", ns, "--tail=5", "--request-timeout=4s"])
-        .output()
-        .await
-        .ok()?;
+    let mut cmd = Command::new("kubectl");
+    cmd.args(["logs", pod, "-n", ns, "--tail=5", "--request-timeout=4s"]);
+    let out = output_bounded(cmd, 6).await.ok()?;
     if !out.status.success() {
         return None;
     }
@@ -516,5 +522,29 @@ mod tests {
         // Manifest with no Job (Deployment, etc.) → empty list (no pre-deletion).
         let dep = "apiVersion: apps/v1\nkind: Deployment\nmetadata: { name: srv }\n";
         assert!(job_names(dep).is_empty());
+    }
+
+    // REG-07: a hung child must not stall the tick — output_bounded returns an error
+    // within the bound instead of waiting for the process to finish.
+    #[tokio::test]
+    async fn output_bounded_times_out_a_hung_child() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let start = std::time::Instant::now();
+        let r = output_bounded(cmd, 1).await;
+        assert!(r.is_err(), "hung child should time out");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "should return promptly at the bound, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn output_bounded_returns_fast_command() {
+        let mut cmd = Command::new("true");
+        cmd.arg("ignored");
+        let out = output_bounded(cmd, 5).await.expect("fast command ok");
+        assert!(out.status.success());
     }
 }
