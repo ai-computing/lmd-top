@@ -910,6 +910,7 @@ async fn collect_furiosa(p: &str) -> Vec<Accel> {
         prom::query(p, "max by (uuid) (furiosa_npu_throttling_events_count)"),
     );
     let util = util.unwrap_or_default();
+    let uscale = util_scale(&util);
     let temp = map_by(temp.unwrap_or_default(), "uuid");
     let pow = map_by(pow.unwrap_or_default(), "uuid");
     let du = map_by(du.unwrap_or_default(), "uuid");
@@ -924,7 +925,7 @@ async fn collect_furiosa(p: &str) -> Vec<Accel> {
                 model: String::new(),
                 id: s.l("device").to_string(),
                 node: s.l("hostname").to_string(),
-                util: norm_pct(s.value),
+                util: pct(s.value, uscale),
                 mem_used_gb: du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
                 mem_total_gb: dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
                 temp: temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
@@ -952,6 +953,7 @@ async fn collect_rbln(p: &str) -> Vec<Accel> {
         prom::query(p, metrics::RBLN_HEALTH),
     );
     let util = util.unwrap_or_default();
+    let uscale = util_scale(&util);
     let temp = map_by(temp.unwrap_or_default(), "uuid");
     let pow = map_by(pow.unwrap_or_default(), "uuid");
     let du = map_by(du.unwrap_or_default(), "uuid");
@@ -965,7 +967,7 @@ async fn collect_rbln(p: &str) -> Vec<Accel> {
                 model: String::new(),
                 id: s.l("name").to_string(),
                 node: s.l("node").to_string(),
-                util: norm_pct(s.value),
+                util: pct(s.value, uscale),
                 mem_used_gb: du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
                 mem_total_gb: dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
                 temp: temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
@@ -997,6 +999,7 @@ async fn collect_gpu(p: &str) -> Vec<Accel> {
         prom::query(p, metrics::DCGM_ENERGY),
     );
     let util = util.unwrap_or_default();
+    let uscale = util_scale(&util);
     let mu = map_by(mu.unwrap_or_default(), "gpu");
     let mt = map_by(mt.unwrap_or_default(), "gpu");
     let temp = map_by(temp.unwrap_or_default(), "gpu");
@@ -1015,7 +1018,7 @@ async fn collect_gpu(p: &str) -> Vec<Accel> {
                 model,
                 id: format!("gpu{}", gpu),
                 node: s.l("Hostname").to_string(),
-                util: norm_pct(s.value),
+                util: pct(s.value, uscale),
                 mem_used_gb: mu.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
                 mem_total_gb: mt.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
                 temp: temp.get(gpu).map(|x| x.value).unwrap_or(0.0),
@@ -1502,13 +1505,31 @@ async fn collect_inventory(
     }
 }
 
-fn norm_pct(v: f64) -> f64 {
+/// Decide a utilization metric's unit once per collected vector: NVIDIA DCGM reports
+/// 0..100 (percent) while some NPU exporters report a 0..1 fraction. If any device on the
+/// metric reads >1 the series is already in percent (scale 1.0); otherwise it's a fraction
+/// scaled ×100. Deciding this per-sample was the REG-05 bug — a genuine 1% reading (value
+/// 1.0) fell into the "0..1 fraction" branch and was blown up to 100%. A fleet-wide max
+/// keeps a lone 1%-busy device correct as long as any peer is busier than 1%.
+fn util_scale(samples: &[Series]) -> f64 {
+    let max = samples
+        .iter()
+        .map(|s| s.value)
+        .filter(|v| v.is_finite())
+        .fold(0.0f64, f64::max);
+    if max > 1.0 {
+        1.0
+    } else {
+        100.0
+    }
+}
+
+/// Apply a util scale, guarding NaN → 0 and clamping to a sane 0..100%.
+fn pct(v: f64, scale: f64) -> f64 {
     if v.is_nan() {
         0.0
-    } else if v <= 1.0 && v > 0.0 {
-        v * 100.0
     } else {
-        v
+        (v * scale).clamp(0.0, 100.0)
     }
 }
 
@@ -2297,13 +2318,30 @@ mod tests {
     }
 
     #[test]
-    fn to_gb_and_norm_pct() {
+    fn to_gb_and_util_scale() {
         assert_eq!(to_gb(2.0e9), 2.0);
         assert_eq!(to_gb(f64::NAN), 0.0); // NaN → 0
-        assert_eq!(norm_pct(0.82), 82.0); // 0..1 비율 → %
-        assert_eq!(norm_pct(82.0), 82.0); // 이미 % 면 그대로
-        assert_eq!(norm_pct(f64::NAN), 0.0);
-        assert_eq!(norm_pct(0.0), 0.0); // 0 은 0 (비율 확대 안 함)
+
+        let ser = |v: f64| Series {
+            labels: BTreeMap::new(),
+            value: v,
+        };
+        // Fraction series (all ≤1) → scale ×100.
+        let frac = [ser(0.82), ser(0.10)];
+        let s = util_scale(&frac);
+        assert_eq!(s, 100.0);
+        assert_eq!(pct(0.82, s), 82.0);
+        // Percent series (some device >1) → identity scale.
+        let percent = [ser(82.0), ser(1.0)];
+        let s = util_scale(&percent);
+        assert_eq!(s, 1.0);
+        assert_eq!(pct(82.0, s), 82.0);
+        // REG-05: a lone device at exactly 1% among busier peers stays 1%, not 100%.
+        assert_eq!(pct(1.0, s), 1.0);
+        // Guards.
+        assert_eq!(pct(f64::NAN, s), 0.0);
+        assert_eq!(pct(0.0, s), 0.0);
+        assert_eq!(pct(150.0, 1.0), 100.0); // clamped to 100%
     }
 
     #[test]
