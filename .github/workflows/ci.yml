@@ -1,0 +1,38 @@
+name: ci
+
+# push/PR 마다 품질 게이트를 돌린다: clippy(경고=에러) + 테스트는 반드시 통과해야 하고,
+# fmt 는 회귀를 드러내되(레포가 아직 rustfmt 표준을 채택 전) 빌드를 막지는 않는다(참고용).
+# release.yml 은 태그 시 바이너리만 굽는다 — 품질 검증은 여기서 담당.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update stable && rustup default stable && rustup component add clippy rustfmt
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Clippy (warnings = errors)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --all-targets
+      - name: Format (advisory)
+        run: cargo fmt --check
+        continue-on-error: true
