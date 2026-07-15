@@ -563,6 +563,38 @@ fn dispatch_palette(
     }
 }
 
+/// Route a mouse wheel scroll (dir: +1 down / -1 up) to whichever overlay owns input,
+/// falling back to the base list selection only when no overlay is open. This mirrors
+/// the keyboard input gate: an open action menu / confirm / form must not let a scroll
+/// silently move the underlying selection (which would retarget a pending action — REG-01).
+fn route_mouse_scroll(app: &mut App, dir: i64) {
+    match ui::Overlay::top(app) {
+        None => app.move_sel(dir),
+        Some(ui::Overlay::ActionMenu) => {
+            if let Some(menu) = app.action_menu.as_mut() {
+                menu.move_cursor(dir as i32);
+            }
+        }
+        Some(ui::Overlay::Preview) => {
+            app.preview_scroll = if dir > 0 {
+                app.preview_scroll.saturating_add(3)
+            } else {
+                app.preview_scroll.saturating_sub(1)
+            };
+        }
+        Some(ui::Overlay::Logs) => {
+            app.logs_scroll = if dir > 0 {
+                app.logs_scroll.saturating_add(3)
+            } else {
+                app.logs_scroll.saturating_sub(1)
+            };
+        }
+        // Forms / confirm / help / alerts — no scrollable body: swallow the scroll
+        // rather than leak it to the base selection.
+        Some(_) => {}
+    }
+}
+
 /// Run the action chosen in the action menu — includes permission gating. Forms/confirms as overlays, logs immediately.
 fn require_action(app: &mut App, action: app::Action) -> bool {
     let required = action.required_mode();
@@ -935,10 +967,19 @@ fn ui_loop(
             if event::poll(Duration::from_millis(poll_ms))? {
                 let ev = event::read()?;
                 if let Event::Mouse(m) = ev {
-                    match m.kind {
-                        MouseEventKind::ScrollDown => app.move_sel(1),
-                        MouseEventKind::ScrollUp => app.move_sel(-1),
-                        _ => {}
+                    // Mouse scroll must respect the same input gate as keys: when an
+                    // overlay owns input it also owns scrolling. Never fall through to the
+                    // base list selection while an overlay is open — otherwise a wheel
+                    // scroll silently retargets the subject of a pending action menu /
+                    // confirm (REG-01). Route to the topmost overlay that has a scrollable
+                    // body; overlays without one swallow the scroll.
+                    let dir: i64 = match m.kind {
+                        MouseEventKind::ScrollDown => 1,
+                        MouseEventKind::ScrollUp => -1,
+                        _ => 0,
+                    };
+                    if dir != 0 {
+                        route_mouse_scroll(&mut app, dir);
                     }
                     continue;
                 }
@@ -1685,6 +1726,60 @@ mod tests {
             .chain(v.iter().copied())
             .map(String::from)
             .collect()
+    }
+
+    // REG-01: a mouse wheel scroll while an overlay is open must be captured by that
+    // overlay and must NOT move the base list selection (which is the subject a pending
+    // action menu / confirm acts on).
+    #[test]
+    fn scroll_over_action_menu_moves_cursor_not_base_selection() {
+        use crate::app::Action;
+        use crate::ops::{ActionItem, ActionMenu};
+        let mut app = App::new();
+        app.selected = 0;
+        let item = |key: char| ActionItem {
+            key,
+            label: "x",
+            desc: "",
+            action: Action::Info,
+        };
+        app.action_menu = Some(ActionMenu {
+            title: "t".into(),
+            subject: "model-a".into(),
+            items: vec![item('a'), item('b'), item('c')],
+            cursor: 0,
+        });
+
+        super::route_mouse_scroll(&mut app, 1);
+        assert_eq!(app.action_menu.as_ref().unwrap().cursor, 1, "scroll routed to menu");
+        assert_eq!(app.selected, 0, "base selection must not move under overlay");
+        assert_eq!(
+            app.action_menu.as_ref().unwrap().subject,
+            "model-a",
+            "subject stays fixed"
+        );
+
+        super::route_mouse_scroll(&mut app, -1);
+        super::route_mouse_scroll(&mut app, -1);
+        assert_eq!(app.action_menu.as_ref().unwrap().cursor, 2, "wraps upward");
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn scroll_over_scrollable_overlays_moves_their_offset() {
+        let mut app = App::new();
+        app.logs_mode = true;
+        app.logs_scroll = 0;
+        super::route_mouse_scroll(&mut app, 1);
+        assert_eq!(app.logs_scroll, 3, "logs scroll down");
+        super::route_mouse_scroll(&mut app, -1);
+        assert_eq!(app.logs_scroll, 2, "logs scroll up");
+        app.logs_mode = false;
+
+        app.preview = Some(("t".into(), "body".into()));
+        app.preview_scroll = 0;
+        super::route_mouse_scroll(&mut app, 1);
+        assert_eq!(app.preview_scroll, 3, "preview scroll down");
     }
 
     #[test]

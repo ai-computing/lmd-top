@@ -166,7 +166,7 @@
 
 | ID | 결함 | 재현 절차 | 올바른 기대 동작 | 심각도 |
 |---|---|---|---|---|
-| REG-01 | 마우스 스크롤이 오버레이 게이트 우회 (main.rs:413) | 모델 A에 액션 메뉴 → 마우스 스크롤로 B 선택 → Scale | 실행 대상이 **A로 고정**되거나 오버레이 중 마우스 무시 | P0 |
+| REG-01 | ✅ **수정됨** — 마우스 스크롤이 오버레이 게이트 우회 (main.rs) | 모델 A에 액션 메뉴 → 마우스 스크롤로 B 선택 → Scale | 실행 대상이 **A로 고정**되거나 오버레이 중 마우스 무시. `route_mouse_scroll` 이 `Overlay::top` 으로 스크롤을 오버레이에 라우팅(회귀 테스트: `scroll_over_action_menu_moves_cursor_not_base_selection`) | P0 |
 | REG-02 | `Mode::Danger` 게이트 부재 — delete가 admin에서 허용 (main.rs:242) | `--mode admin` 으로 pod delete 시도 | 거부(danger 전용) 또는 문서/help 수정으로 정합 | P0 |
 | REG-03 | chunked 디코딩이 lossy 문자열 위에서 동작 (prom.rs:93-138) | 비ASCII 라벨 메트릭 노출 후 해당 쿼리 | JSON 정상 파싱(바이트 기준 디코딩) | P0 |
 | REG-04 | 매니페스트 YAML 인터폴레이션 무이스케이프 (app.rs:1292-) | 폼 커스텀 입력에 `"` 포함 | 유효 YAML 생성 또는 입력 거부 | P1 |
