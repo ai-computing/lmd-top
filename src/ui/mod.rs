@@ -983,7 +983,7 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
             ));
             let (hg, hc) = if !a.alive {
                 ("✗", C_BAD())
-            } else if a.throttle > 0.0 {
+            } else if a.throttling() == Some(true) {
                 ("⚠", C_WARN())
             } else {
                 ("●", C_OK())
@@ -1971,7 +1971,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
                 // 점 색 = util 히트(레인보우: 파랑 저부하 → 빨강 고부하) → fleet 핫스팟이 한눈에(all-smi식).
                 let (g, c) = if !a.alive {
                     ("✗", C_BAD())
-                } else if a.throttle > 0.0 {
+                } else if a.throttling() == Some(true) {
                     ("⚠", C_WARN())
                 } else if a.util > IDLE_UTIL {
                     ("●", util_color(a.util))
@@ -2035,7 +2035,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
             g.4 += a.mem_used_gb;
             g.5 += a.mem_total_gb;
             g.6 = g.6 && a.alive;
-            g.7 = g.7 || a.throttle > 0.0;
+            g.7 = g.7 || a.throttling() == Some(true);
         } else {
             groups.push((
                 a.kind,
@@ -2045,7 +2045,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
                 a.mem_used_gb,
                 a.mem_total_gb,
                 a.alive,
-                a.throttle > 0.0,
+                a.throttling() == Some(true),
                 a.disp().to_string(),
             ));
         }
@@ -2197,10 +2197,14 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         };
         let health = if !a.alive {
             ("✗ not alive", C_BAD())
-        } else if a.throttle > 0.0 {
-            ("⚠ throttling", C_WARN())
         } else {
-            ("● healthy", C_OK())
+            match a.throttling() {
+                Some(true) => ("⚠ throttling", C_WARN()),
+                Some(false) => ("● healthy", C_OK()),
+                // The hardware reports no throttling signal, so "healthy" would be a claim
+                // this tool cannot make. Say what is actually known.
+                None => ("● up · throttle n/a", C_OK()),
+            }
         };
         // 헤더 + 현재 포션 게이지(all-smi식)
         let barw = (rows[0].width as usize).saturating_sub(34).clamp(10, 46);
@@ -3335,7 +3339,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         };
         let (hg, hc) = if !a.alive {
             ("✗", C_BAD())
-        } else if a.throttle > 0.0 {
+        } else if a.throttling() == Some(true) {
             ("⚠", C_WARN())
         } else {
             ("●", C_OK())
@@ -4063,7 +4067,7 @@ fn accel_brief(a: &crate::collect::Accel, branch: &str, full: bool) -> Line<'sta
     };
     let (hg, hc) = if !a.alive {
         ("✗", C_BAD())
-    } else if a.throttle > 0.0 {
+    } else if a.throttling() == Some(true) {
         ("⚠", C_WARN())
     } else {
         ("●", C_OK())

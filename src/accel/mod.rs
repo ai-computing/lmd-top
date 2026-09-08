@@ -24,6 +24,10 @@ use crate::collect::AccelKind;
 /// Declared per series because guessing does not work: the old code inferred "a utilisation
 /// under 1.0 must be a ratio" and turned a GPU genuinely at 1 % into 100 % (BUG-04). All three
 /// accelerators here report percent; the type exists so the next one can say otherwise.
+// Ratio and the non-Max aggregations are extension points: no accelerator here reports a
+// 0..1 utilisation or needs summing, but declaring the unit is precisely what stops the next
+// one from being guessed at (BUG-04). Kept deliberately, not dead by accident.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Unit {
     /// 0–100.
@@ -59,6 +63,7 @@ impl Unit {
 }
 
 /// How several samples for one device collapse into a value.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Agg {
     Max,

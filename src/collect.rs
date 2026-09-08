@@ -59,6 +59,21 @@ pub struct Accel {
     pub energy_mj: f64,     // DCGM TOTAL_ENERGY_CONSUMPTION 누적(mJ), NaN=미지원
 }
 impl Accel {
+    /// Is this device throttling? `None` when the hardware reports no throttling signal at
+    /// all, which is not the same as "not throttling" — the field carries 0.0 either way, so
+    /// callers that want to say "unknown" rather than "fine" need this distinction.
+    pub fn throttling(&self) -> Option<bool> {
+        crate::accel::by_kind(self.kind)
+            .caps
+            .throttle
+            .then(|| self.throttle > 0.0)
+    }
+
+    /// Does this accelerator report cumulative energy (so session Wh is meaningful)?
+    pub fn reports_energy(&self) -> bool {
+        crate::accel::by_kind(self.kind).caps.energy
+    }
+
     /// 표시용 계열/모델 라벨 — 감지된 모델이 있으면 그것, 없으면 벤더 라벨.
     pub fn disp(&self) -> &str {
         if self.model.is_empty() {
