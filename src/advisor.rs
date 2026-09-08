@@ -62,6 +62,10 @@ pub struct Advice {
     pub best: Option<Suggestion>,
     /// Option sets known to fail, most relevant first.
     pub avoid: Vec<Suggestion>,
+    /// When nothing is known to work but something is known to fail: the next thing to try,
+    /// derived by applying the failure's remedy to the options that failed. This is the part
+    /// that makes progress possible — "avoid X" alone leaves you where you started.
+    pub next: Option<Suggestion>,
     /// How many compile records informed this.
     pub compiles_seen: usize,
     /// How many serving observations informed this.
@@ -72,10 +76,11 @@ impl Advice {
     /// One-line summary for the compile form. Empty when there is nothing to say — silence is
     /// better than a confident-looking recommendation drawn from no data.
     pub fn line(&self) -> String {
-        match (&self.best, self.avoid.first()) {
-            (Some(b), _) => format!("↺ history: try {} — {}", b.options_line(), b.reason),
-            (None, Some(a)) => format!("↺ history: avoid {} — {}", a.options_line(), a.reason),
-            (None, None) => String::new(),
+        match (&self.best, &self.next, self.avoid.first()) {
+            (Some(b), _, _) => format!("↺ history: try {} — {}", b.options_line(), b.reason),
+            (None, Some(n), _) => format!("↺ history: try {} — {}", n.options_line(), n.reason),
+            (None, None, Some(a)) => format!("↺ history: avoid {} — {}", a.options_line(), a.reason),
+            (None, None, None) => String::new(),
         }
     }
 }
@@ -200,7 +205,97 @@ pub fn advise(history: &[Record], model: &str, vendor: &str) -> Advice {
         });
         break;
     }
+    // Nothing known to work, but something known to fail: propose the next experiment by
+    // applying that failure's remedy. Derived, not observed — the reason says so.
+    if advice.best.is_none() {
+        if let Some((rel, rec)) = bad.first() {
+            if let Some((opts, change)) = next_experiment(&build_options(rec), &rec.failure_kind) {
+                // Only worth proposing if we have not already seen it fail.
+                if !failed_keys.contains_key(&options_key(&opts)) {
+                    advice.next = Some(Suggestion {
+                        options: opts,
+                        reason: format!(
+                            "untried — {} failed on {} ({}), so {}",
+                            build_options(rec)
+                                .get(change.0)
+                                .map(|v| format!("{}={}", change.0, v))
+                                .unwrap_or_else(|| change.0.to_string()),
+                            rel.label(),
+                            if rec.failure_kind.is_empty() {
+                                "failed".to_string()
+                            } else {
+                                rec.failure_kind.clone()
+                            },
+                            change.1
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     advice
+}
+
+/// Given options that failed and why, produce the next combination to try.
+///
+/// Each remedy changes exactly one parameter, so a failure is narrowed rather than replaced by
+/// a different unknown. Returns the new options plus (the key changed, how it changed) for the
+/// explanation. `None` when the cause is environmental — no option set fixes a missing token.
+fn next_experiment(
+    failed: &BTreeMap<String, String>,
+    failure_kind: &str,
+) -> Option<(BTreeMap<String, String>, (&'static str, String))> {
+    let mut opts = failed.clone();
+    let halve = |v: Option<&String>| -> Option<i64> {
+        let n = v?.parse::<i64>().ok()?;
+        (n >= 2048).then_some(n / 2)
+    };
+    match failure_kind {
+        // Codegen and device-memory failures respond to a smaller compile-time context first:
+        // it is the cheapest parameter to change and the fastest to rebuild.
+        "rbln-codegen" | "furiosa-build" | "device-oom" => {
+            if let Some(half) = halve(opts.get("max-len")) {
+                // flash_attn partitions must keep dividing the new length.
+                if let Some(kv) = opts.get("kvpart").and_then(|v| v.parse::<i64>().ok()) {
+                    if half % kv != 0 || half <= kv {
+                        opts.insert("attn".into(), "eager".into());
+                        opts.remove("kvpart");
+                        opts.insert("max-len".into(), half.to_string());
+                        return Some((
+                            opts,
+                            ("max-len", format!("halve it to {} and drop flash_attn", half)),
+                        ));
+                    }
+                }
+                opts.insert("max-len".into(), half.to_string());
+                return Some((opts, ("max-len", format!("halve it to {}", half))));
+            }
+            // No room left in max-len: fall back to the simpler attention path.
+            if opts.get("attn").map(String::as_str) == Some("flash_attn") {
+                opts.insert("attn".into(), "eager".into());
+                opts.remove("kvpart");
+                return Some((opts, ("attn", "switch to eager".to_string())));
+            }
+            None
+        }
+        // The parameter combination itself is invalid — take the constraint out of play.
+        "rbln-kvpart" | "rbln-attn" => {
+            opts.insert("attn".into(), "eager".into());
+            opts.remove("kvpart");
+            Some((opts, ("attn", "switch to eager".to_string())))
+        }
+        // Container memory is a Job resource, not a compile option, but a narrower build needs
+        // less of it.
+        "oom" => {
+            let half = halve(opts.get("max-len"))?;
+            opts.insert("max-len".into(), half.to_string());
+            Some((opts, ("max-len", format!("halve it to {}", half))))
+        }
+        // hf-auth, hf-missing, network, disk-full, store-io, unsupported-model: no option set
+        // fixes these, and pretending otherwise wastes another build.
+        _ => None,
+    }
 }
 
 /// Canonical string for an option set, so two records with the same options compare equal.
@@ -339,6 +434,80 @@ mod tests {
         assert_eq!(a.line(), "");
         // But it still counts as evidence that the model compiles at all.
         assert_eq!(a.compiles_seen, 1);
+    }
+
+    /// The point of the feature: after a failure, say what to try next — not just what to
+    /// avoid. This is the real Qwen3-4B/RBLN case from this cluster.
+    #[test]
+    fn proposes_the_next_experiment_after_a_failure() {
+        let h = vec![compile(
+            "j1",
+            "Qwen/Qwen3-4B",
+            "rbln",
+            Outcome::Fail,
+            &[("tp", "4"), ("max-len", "8192"), ("kvpart", "4096"), ("attn", "flash_attn")],
+            100,
+        )];
+        let a = advise(&h, "Qwen/Qwen3-4B", "rbln");
+        assert!(a.best.is_none(), "nothing has worked yet");
+        let next = a.next.clone().expect("a next experiment");
+        // max-len halves; 4096 would no longer have ≥2 flash_attn partitions, so attention
+        // drops to eager and kvpart goes away rather than staying invalid.
+        assert_eq!(next.options.get("max-len").map(String::as_str), Some("4096"));
+        assert_eq!(next.options.get("attn").map(String::as_str), Some("eager"));
+        assert!(!next.options.contains_key("kvpart"));
+        assert_eq!(next.options.get("tp").map(String::as_str), Some("4"), "tp is unchanged");
+        assert!(next.reason.contains("untried"), "{}", next.reason);
+        assert!(a.line().contains("try "), "{}", a.line());
+    }
+
+    /// An invalid parameter combination is removed from play rather than shrunk.
+    #[test]
+    fn kvpart_failures_switch_attention_not_length() {
+        let h = vec![compile(
+            "j1", "m/x", "rbln", Outcome::Fail,
+            &[("tp", "4"), ("max-len", "8192"), ("kvpart", "16384"), ("attn", "flash_attn")], 100,
+        )];
+        let mut h = h;
+        h[0].failure_kind = "rbln-kvpart".into();
+        let next = advise(&h, "m/x", "rbln").next.expect("a next experiment");
+        assert_eq!(next.options.get("attn").map(String::as_str), Some("eager"));
+        assert_eq!(next.options.get("max-len").map(String::as_str), Some("8192"), "length kept");
+        assert!(!next.options.contains_key("kvpart"));
+    }
+
+    /// No option set fixes a missing token or a full disk — proposing one wastes a build.
+    #[test]
+    fn environmental_failures_get_no_experiment() {
+        for kind in ["hf-auth", "hf-missing", "network", "disk-full", "store-io", "unsupported-model"] {
+            let mut h = vec![compile(
+                "j1", "m/x", "rbln", Outcome::Fail, &[("tp", "4"), ("max-len", "8192")], 100,
+            )];
+            h[0].failure_kind = kind.to_string();
+            let a = advise(&h, "m/x", "rbln");
+            assert!(a.next.is_none(), "{} should not propose an option change", kind);
+            // But it must still be reported, so the operator knows what to fix.
+            assert_eq!(a.avoid.len(), 1);
+            assert!(a.line().contains("avoid"), "{}: {}", kind, a.line());
+        }
+    }
+
+    /// Never propose something already known to fail.
+    #[test]
+    fn does_not_propose_an_already_failed_combination() {
+        let mut h = vec![
+            compile("j1", "m/x", "rbln", Outcome::Fail, &[("max-len", "8192"), ("tp", "4")], 100),
+            compile("j2", "m/x", "rbln", Outcome::Fail, &[("max-len", "4096"), ("tp", "4")], 200),
+        ];
+        for r in &mut h {
+            r.failure_kind = "rbln-codegen".into();
+        }
+        let a = advise(&h, "m/x", "rbln");
+        // Halving 8192 gives 4096, which also failed → propose nothing rather than a repeat.
+        if let Some(n) = &a.next {
+            assert_ne!(n.options.get("max-len").map(String::as_str), Some("4096"));
+        }
+        assert_eq!(a.avoid.len(), 2);
     }
 
     #[test]

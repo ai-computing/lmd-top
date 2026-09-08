@@ -19,7 +19,7 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
         + (app.compile_preflight(form).len() as u16)
         + {
             let a = app.compile_advice(&form.model_id, form.vendor);
-            1 + a.avoid.len().min(2) as u16
+            1 + a.avoid.len().min(2) as u16 + u16::from(a.next.is_some())
         }
         + 14;
     let area = centered(full, 92, h.min(full.height.saturating_sub(2)));
@@ -133,6 +133,16 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
                 format!("  ({})", best.reason),
                 Style::default().fg(C_DIM()),
             ),
+        ]));
+    }
+    if let Some(next) = &advice.next {
+        lines.push(Line::from(vec![
+            Span::styled("  ↺ next     ", Style::default().fg(C_DIM())),
+            Span::styled(
+                next.options_line(),
+                Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  ({})", next.reason), Style::default().fg(C_DIM())),
         ]));
     }
     for bad in advice.avoid.iter().take(2) {
