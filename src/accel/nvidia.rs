@@ -15,6 +15,8 @@ pub static PACK: Pack = Pack {
     display: "NVIDIA",
     kind: AccelKind::Gpu,
     engine: "vLLM",
+    // NVIDIA publishes Nemotron and NIM-targeted models under nvidia.
+    hf_orgs: &["nvidia"],
     accent: 0,
     exporter: "dcgm",
     family: "NVIDIA GPU (DCGM)",

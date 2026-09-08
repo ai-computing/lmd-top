@@ -19,7 +19,12 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
         + (app.compile_preflight(form).len() as u16)
         + {
             let a = app.compile_advice(&form.model_id, form.vendor);
-            1 + a.avoid.len().min(2) as u16 + u16::from(a.next.is_some())
+            1 + a.avoid.len().min(2) as u16
+                + u16::from(a.next.is_some())
+                + crate::advisor::toolchain_warnings(&app.history)
+                    .iter()
+                    .filter(|(v, _)| v == form.vendor)
+                    .count() as u16
         }
         + 14;
     let area = centered(full, 92, h.min(full.height.saturating_sub(2)));
@@ -132,6 +137,20 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
             Span::styled(
                 format!("  ({})", best.reason),
                 Style::default().fg(C_DIM()),
+            ),
+        ]));
+    }
+    // A dependency skew known to break this vendor's compiler outranks any option advice —
+    // no parameter fixes it, and every build will fail until it is addressed on the host.
+    for (_, why) in crate::advisor::toolchain_warnings(&app.history)
+        .into_iter()
+        .filter(|(v, _)| v == form.vendor)
+    {
+        lines.push(Line::from(vec![
+            Span::styled("  ⚠ toolchain ", Style::default().fg(C_BAD())),
+            Span::styled(
+                truncw(&why, 86),
+                Style::default().fg(C_BAD()).add_modifier(Modifier::BOLD),
             ),
         ]));
     }

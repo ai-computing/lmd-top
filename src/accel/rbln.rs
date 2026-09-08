@@ -13,6 +13,9 @@ pub static PACK: Pack = Pack {
     display: "Rebellions",
     kind: AccelKind::Rbln,
     engine: "vLLM-RBLN",
+    // No official HF org — the supported-model list lives in RBLN-SW/rbln-model-zoo
+    // and is folded into catalog/zoo.yaml by scripts/fetch-zoo.sh.
+    hf_orgs: &[],
     accent: 1,
     exporter: "rbln",
     family: "Rebellions RBLN",

@@ -175,6 +175,10 @@ pub struct Pack {
     pub engine: &'static str,
     /// Prometheus job-name fragment, for `--doctor`'s exporter survey.
     pub exporter: &'static str,
+    /// HuggingFace organisations this vendor publishes models under, for the zoo's live
+    /// refresh. Empty when the vendor has none — Rebellions ships its supported-model list as
+    /// a GitHub repo (`rbln-model-zoo`) rather than an HF org, so there is nothing to query.
+    pub hf_orgs: &'static [&'static str],
     /// Index into the theme's vendor-accent ramp. Identity, not a colour: the theme decides
     /// what each slot looks like, so a new accelerator picks the next index and every theme
     /// keeps working (the ramp wraps).
@@ -278,6 +282,9 @@ struct PackFile {
     family: String,
     #[serde(default)]
     accent: usize,
+    /// HuggingFace orgs to offer in the zoo's live refresh.
+    #[serde(default)]
+    hf_orgs: Vec<String>,
     labels: LabelsFile,
     series: Vec<SeriesFile>,
     #[serde(default)]
@@ -453,6 +460,13 @@ impl PackFile {
                 self.exporter
             }),
             accent: self.accent,
+            hf_orgs: Box::leak(
+                self.hf_orgs
+                    .into_iter()
+                    .map(intern)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
             family: intern(if self.family.is_empty() {
                 id.to_uppercase()
             } else {
