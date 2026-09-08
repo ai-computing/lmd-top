@@ -198,7 +198,12 @@ pub fn build_compile_manifest(
         "metadata" => ymap! { "name" => s(name.clone()), "namespace" => s(ns) },
         "spec" => ymap! {
             "backoffLimit" => serde_yaml::Value::from(0),
-            "ttlSecondsAfterFinished" => serde_yaml::Value::from(3600),
+            // 24h, not 1h. lmd-top records a Job's outcome when it observes it, so a build
+            // that finished and was garbage-collected between two runs of the tool left no
+            // trace — which is why "compiles fail often" had no discoverable pattern. A day
+            // is long enough that a failure survives until someone next looks, and these are
+            // completed pods holding no devices.
+            "ttlSecondsAfterFinished" => serde_yaml::Value::from(86_400),
             "template" => ymap! { "spec" => serde_yaml::Value::Mapping(pod_spec) },
         },
     };

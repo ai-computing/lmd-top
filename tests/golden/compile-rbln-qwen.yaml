@@ -83,7 +83,7 @@ metadata:
   namespace: llm-serving
 spec:
   backoffLimit: 0
-  ttlSecondsAfterFinished: 3600
+  ttlSecondsAfterFinished: 86400
   template:
     spec:
       restartPolicy: Never

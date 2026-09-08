@@ -226,7 +226,9 @@ impl App {
             },
             "spec" => crate::ymap! {
                 "backoffLimit" => serde_yaml::Value::from(0),
-                "ttlSecondsAfterFinished" => serde_yaml::Value::from(3600),
+                // Same reasoning as the compile Job: outlive the gap between two runs of the
+                // tool, so a failed download is still there to be recorded and read.
+                "ttlSecondsAfterFinished" => serde_yaml::Value::from(86_400),
                 "template" => crate::ymap! {
                     "spec" => crate::ymap! {
                         "restartPolicy" => s("Never"),
