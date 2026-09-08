@@ -533,3 +533,190 @@ mod tests {
         assert_eq!(a.avoid[0].options_line(), "tp=4");
     }
 }
+
+// ── Failure patterns ────────────────────────────────────────────────────────────────────────
+
+/// A recurring failure, and the option value that correlates with it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pattern {
+    pub vendor: String,
+    /// Classified cause (see [`crate::diagnose`]).
+    pub kind: String,
+    pub failures: usize,
+    /// Total compiles attempted on this accelerator — the denominator.
+    pub attempts: usize,
+    /// An option `key=value` present in every one of these failures and in no success here.
+    /// `None` when nothing separates them, which is the honest answer most of the time.
+    pub correlates: Option<String>,
+}
+
+impl Pattern {
+    pub fn line(&self) -> String {
+        let base = format!(
+            "{}/{}: {} of {} compiles",
+            self.vendor, self.kind, self.failures, self.attempts
+        );
+        match &self.correlates {
+            Some(opt) => format!("{} — all of them had {}", base, opt),
+            None => base,
+        }
+    }
+}
+
+/// Recurring failures across the whole history, most frequent first.
+///
+/// Answers "it fails often but I cannot see the pattern": groups by accelerator and classified
+/// cause, and looks for an option value shared by every failure in a group and absent from
+/// every success on that accelerator. A correlation is only reported with at least two
+/// failures and at least one contrasting success — otherwise "all failures had tp=4" is just
+/// restating that tp=4 is the default.
+pub fn patterns(history: &[Record]) -> Vec<Pattern> {
+    let compiles: Vec<&Record> = history.iter().filter(|r| r.kind == "compile").collect();
+    let mut groups: BTreeMap<(String, String), Vec<&Record>> = BTreeMap::new();
+    let mut attempts: BTreeMap<String, usize> = BTreeMap::new();
+    for rec in &compiles {
+        *attempts.entry(rec.vendor.clone()).or_insert(0) += 1;
+        if rec.outcome == Outcome::Fail {
+            let kind = if rec.failure_kind.is_empty() {
+                "unclassified".to_string()
+            } else {
+                rec.failure_kind.clone()
+            };
+            groups.entry((rec.vendor.clone(), kind)).or_default().push(rec);
+        }
+    }
+
+    let mut out: Vec<Pattern> = groups
+        .into_iter()
+        .map(|((vendor, kind), fails)| {
+            let successes: Vec<&&Record> = compiles
+                .iter()
+                .filter(|r| r.vendor == vendor && r.outcome == Outcome::Ok)
+                .collect();
+            let correlates = (fails.len() >= 2 && !successes.is_empty())
+                .then(|| {
+                    // An option present in every failure…
+                    let mut shared: Option<BTreeMap<String, String>> = None;
+                    for f in &fails {
+                        let opts = build_options(f);
+                        shared = Some(match shared {
+                            None => opts,
+                            Some(prev) => prev
+                                .into_iter()
+                                .filter(|(k, v)| opts.get(k) == Some(v))
+                                .collect(),
+                        });
+                    }
+                    // …and in none of the successes.
+                    shared?
+                        .into_iter()
+                        .find(|(k, v)| {
+                            successes
+                                .iter()
+                                .all(|s| build_options(s).get(k) != Some(v))
+                        })
+                        .map(|(k, v)| format!("{}={}", k, v))
+                })
+                .flatten();
+            Pattern {
+                attempts: *attempts.get(&vendor).unwrap_or(&0),
+                vendor,
+                kind,
+                failures: fails.len(),
+                correlates,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| b.failures.cmp(&a.failures).then(a.vendor.cmp(&b.vendor)));
+    out
+}
+
+#[cfg(test)]
+mod pattern_tests {
+    use super::super::history::{Outcome, Record};
+    use super::*;
+
+    fn r(model: &str, vendor: &str, outcome: Outcome, kind: &str, opts: &[(&str, &str)]) -> Record {
+        Record {
+            ts: 1,
+            kind: "compile".into(),
+            id: format!("{}-{}-{}", model, vendor, opts.len()),
+            model: model.into(),
+            vendor: vendor.into(),
+            options: opts.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            outcome,
+            duration_secs: Some(60),
+            failure_kind: kind.into(),
+            detail: String::new(),
+            tps: None,
+            ttft_p95: None,
+        }
+    }
+
+    #[test]
+    fn no_history_no_patterns() {
+        assert!(patterns(&[]).is_empty());
+    }
+
+    #[test]
+    fn counts_failures_against_attempts_most_frequent_first() {
+        let h = vec![
+            r("a", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "4")]),
+            r("b", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "2")]),
+            r("c", "rbln", Outcome::Ok, "", &[("tp", "4")]),
+            r("d", "furiosa", Outcome::Fail, "furiosa-build", &[("tp", "8")]),
+        ];
+        let p = patterns(&h);
+        assert_eq!(p.len(), 2);
+        assert_eq!((p[0].vendor.as_str(), p[0].failures, p[0].attempts), ("rbln", 2, 3));
+        assert_eq!(p[1].vendor, "furiosa");
+        assert!(p[0].line().contains("2 of 3 compiles"), "{}", p[0].line());
+    }
+
+    /// The useful case: every failure shares an option that no success has.
+    #[test]
+    fn reports_an_option_that_separates_failures_from_successes() {
+        let h = vec![
+            r("a", "rbln", Outcome::Fail, "rbln-codegen", &[("attn", "flash_attn"), ("tp", "4")]),
+            r("b", "rbln", Outcome::Fail, "rbln-codegen", &[("attn", "flash_attn"), ("tp", "2")]),
+            r("c", "rbln", Outcome::Ok, "", &[("attn", "eager"), ("tp", "4")]),
+        ];
+        let p = patterns(&h);
+        assert_eq!(p[0].correlates.as_deref(), Some("attn=flash_attn"));
+        assert!(p[0].line().contains("all of them had attn=flash_attn"), "{}", p[0].line());
+    }
+
+    /// An option shared by failures *and* successes explains nothing, and saying it would
+    /// send the operator after the wrong parameter.
+    #[test]
+    fn does_not_blame_an_option_the_successes_also_have() {
+        let h = vec![
+            r("a", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "4"), ("max-len", "8192")]),
+            r("b", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "4"), ("max-len", "8192")]),
+            r("c", "rbln", Outcome::Ok, "", &[("tp", "4"), ("max-len", "8192")]),
+        ];
+        assert_eq!(patterns(&h)[0].correlates, None);
+    }
+
+    /// With no successful build to contrast against, "all failures had X" is vacuous.
+    #[test]
+    fn needs_a_contrasting_success_and_two_failures() {
+        let only_fails = vec![
+            r("a", "rbln", Outcome::Fail, "rbln-codegen", &[("attn", "flash_attn")]),
+            r("b", "rbln", Outcome::Fail, "rbln-codegen", &[("attn", "flash_attn")]),
+        ];
+        assert_eq!(patterns(&only_fails)[0].correlates, None);
+
+        let single = vec![
+            r("a", "rbln", Outcome::Fail, "rbln-codegen", &[("attn", "flash_attn")]),
+            r("c", "rbln", Outcome::Ok, "", &[("attn", "eager")]),
+        ];
+        assert_eq!(patterns(&single)[0].correlates, None, "one failure is not a pattern");
+    }
+
+    #[test]
+    fn an_unclassified_failure_is_still_grouped() {
+        let h = vec![r("a", "rbln", Outcome::Fail, "", &[("tp", "4")])];
+        assert_eq!(patterns(&h)[0].kind, "unclassified");
+    }
+}
