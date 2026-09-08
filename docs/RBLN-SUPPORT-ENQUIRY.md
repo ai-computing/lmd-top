@@ -1,7 +1,9 @@
 # Support enquiry — rebel-compiler 0.10.3 fails on a graph that 0.10.2 compiled
 
-Draft. Facts only; every claim below is backed by a log kept in this repo or on the node.
-Do not send until the KONI-8B control run under 0.10.3 has finished (see "Open item").
+**Ready to send.** Facts only; every claim below is backed by a log kept in this repo or on
+the node. The KONI-8B control run under 0.10.3 completed on 2026-09-08 and failed as
+predicted, so the reproduction is a single-variable one: only the toolchain version differs
+from the build that succeeded.
 
 ---
 
@@ -63,7 +65,7 @@ after graph optimization, during result assembly.
 | Hypothesis | How it was tested | Result |
 |---|---|---|
 | Compile parameters | 5-rung ladder ending at the exact 0.10.2 parameters | not the cause |
-| Model / architecture | Qwen2.5-0.5B, Llama-3.2-1B, Llama-3.1-8B, KONI-8B | all fail alike |
+| Model / architecture | Qwen2.5-0.5B, Llama-3.2-1B, Llama-3.1-8B, **KONI-8B (the exact model 0.10.2 compiled)** | all fail alike |
 | Dependency versions | vendor-pinned bundle, verified against `importlib.metadata.requires` | not the cause |
 | NPU visibility | 0.10.2 succeeded while warning it could not determine the NPU | not the cause |
 | Node environment drift | reproduced in a clean `python:3.10-slim` container | not the cause |
@@ -89,10 +91,11 @@ Thank you.
 
 ---
 
-## Open item before sending
+## Control run — closed
 
-The KONI-8B control under 0.10.3 — the exact model and parameters of the 2026-06-01 success —
-must be confirmed failing. Its first attempt was OOMKilled at a 64Gi container limit
-(inconclusive, not a compile failure) and its second never ran the script at all. If the
-re-run with 320Gi **passes**, this enquiry is void and the cause is model-specific after all;
-the smaller Llama-3.2-1B failure would then need re-examining as an unrelated issue.
+The KONI-8B control under 0.10.3 (the exact model and parameters of the 2026-06-01 success)
+completed 2026-09-08 10:17 and failed at `_impl:946`, container exit 0, no OOM, graph hash
+`mod_name=1a4e47` matching the successful June log. Two earlier attempts proved nothing and
+are recorded so they are not mistaken for evidence: the first was OOMKilled at a 64Gi
+container limit, the second ran the wrong script because a `sed` was chained off an
+unmodified bootstrap file.
