@@ -3,6 +3,7 @@
 //!      `lmd-top --snapshot` → collect once and print text (for headless verification)
 
 mod accel;
+mod advisor;
 mod agent;
 mod app;
 mod audit;
@@ -11,6 +12,8 @@ mod catalog;
 mod collect;
 mod compat;
 mod config;
+mod diagnose;
+mod history;
 mod doctor;
 mod kube;
 mod manifest;
@@ -84,6 +87,7 @@ OPTIONS:
     --json           print machine-readable agent state (JSON) and exit
     --doctor         survey Prometheus: exporters, metric coverage, gaps
     --audit          print the audit log of applied mutations, then exit
+    --history        print recorded compile/serving outcomes, then exit
     --snapshot, -s   collect once, print headless text summary
     --render         render each view to text via TestBackend (CI / no-tty)
     --cast [FILE]    write a demo asciicast (default: docs/demo.cast)
@@ -101,6 +105,7 @@ ENVIRONMENT:
     LMD_GRAFANA      Grafana base URL (opened via the `:graf` palette command)
     LMD_THEME        startup theme: soft | default | high-contrast | colorblind
     LMD_AUDIT        audit log path (default: ~/.config/lmd-top/audit.log)
+    LMD_HISTORY      compile/serving history path (default: ~/.config/lmd-top/history.jsonl)
     LMD_W / LMD_H    size for --render
 
 With no options, lmd-top launches the interactive TUI. See `?` in the TUI for keybindings.";
@@ -128,6 +133,7 @@ fn check_args(args: &[String]) -> ArgCheck {
         "-s",
         "--render",
         "--audit",
+        "--history",
         "--dry-run",
         "--apply",
     ];
@@ -310,6 +316,12 @@ async fn main() -> Result<()> {
     // View audit log — print the history (file) of mutations applied by lmd-top.
     if args.iter().any(|a| a == "--audit") {
         audit::print_log();
+        return Ok(());
+    }
+
+    // Recorded compile/serving outcomes — what the option recommendations are drawn from.
+    if args.iter().any(|a| a == "--history") {
+        history::print_log();
         return Ok(());
     }
 
@@ -1875,6 +1887,22 @@ fn print_snapshot(s: &collect::Snapshot, cfg: &Config) {
             "  {:<40} {:<8} {} {} restarts={}",
             p.name, p.phase, p.ready, p.node, p.restarts
         );
+    }
+    // Compile-option advice from recorded history, for the models currently in the store.
+    let hist = crate::history::load();
+    if !hist.is_empty() {
+        println!("\n[history] {} record(s)", hist.len());
+        let mut seen = std::collections::BTreeSet::new();
+        for r in hist.iter().rev() {
+            if !seen.insert((r.model.clone(), r.vendor.clone())) {
+                continue;
+            }
+            let advice = crate::advisor::advise(&hist, &r.model, &r.vendor);
+            let line = advice.line();
+            if !line.is_empty() {
+                println!("  {} / {}: {}", r.model, r.vendor, line);
+            }
+        }
     }
     if !s.warnings.is_empty() {
         println!("\n[warnings] {}", s.warnings.len());

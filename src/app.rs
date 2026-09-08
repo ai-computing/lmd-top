@@ -427,6 +427,9 @@ pub struct App {
     pub snap: Snapshot,
     // ── Deploy/compile target context (used for manifest generation · apply) ──
     pub ns: String, // target namespace (cfg.ns) — injected instead of hardcoded
+    /// Compile/serving history, loaded once at startup and appended to by the collect tick.
+    /// Kept in `App` so the compile form can advise without touching the filesystem per frame.
+    pub history: Vec<crate::history::Record>,
     pub img_rbln: Option<String>, // LMD_COMPILE_IMAGE_RBLN — placeholder if absent
     pub img_furiosa: Option<String>, // LMD_COMPILE_IMAGE_FURIOSA — default furiosaai/furiosa-llm:latest
     pub img_serving: Option<String>, // LMD_SERVING_IMAGE — placeholder if absent
@@ -524,6 +527,7 @@ impl App {
             selected: 0,
             snap: Snapshot::default(),
             ns: "llm-serving".into(),
+            history: crate::history::load(),
             img_rbln: env("LMD_COMPILE_IMAGE_RBLN"),
             img_furiosa: env("LMD_COMPILE_IMAGE_FURIOSA")
                 .or_else(|| Some("furiosaai/furiosa-llm:latest".into())),
@@ -737,6 +741,11 @@ impl App {
         } else {
             None
         }
+    }
+
+    /// What history says about compiling `model` on `vendor` — see [`crate::advisor`].
+    pub fn compile_advice(&self, model: &str, vendor: &str) -> crate::advisor::Advice {
+        crate::advisor::advise(&self.history, model, vendor)
     }
 
     /// Look a model up by deployment name. Actions must resolve their parameters from the
@@ -1854,6 +1863,7 @@ mod tests {
                     duration_secs: None,
                     phase: "compiling 45%".into(),
                     progress: Some(0.45),
+                    ..Default::default()
                 },
                 CompileJob {
                     name: "compile-llama-rngd".into(),
@@ -1865,6 +1875,7 @@ mod tests {
                     duration_secs: None,
                     phase: "loading weights".into(), // 진행률 없음 → indeterminate
                     progress: None,
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -2847,6 +2858,7 @@ mod tests {
                 duration_secs: None,
                 phase: "compiling".into(),
                 progress: Some(0.5),
+                ..Default::default()
             }],
             models: vec![steady, starting, scaled],
             ..Default::default()
@@ -2967,6 +2979,7 @@ mod tests {
             duration_secs: dur,
             phase: String::new(),
             progress: None,
+            ..Default::default()
         };
         let mut a = App::new();
         a.snap = Snapshot {

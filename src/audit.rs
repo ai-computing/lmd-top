@@ -18,7 +18,7 @@ fn log_path() -> Option<std::path::PathBuf> {
 }
 
 /// epoch seconds → "YYYY-MM-DDTHH:MM:SSZ" (UTC). Howard Hinnant civil-from-days algorithm.
-fn iso_utc(secs: u64) -> String {
+pub(crate) fn iso_utc(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
     let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
