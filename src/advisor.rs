@@ -793,24 +793,31 @@ mod pattern_tests {
         assert!(p[0].line().contains("transformers"), "{}", p[0].line());
     }
 
-    /// A dependency combination known to break the compiler is reported on first sight —
-    /// it does not need two failures and a contrasting success to be actionable.
+    /// A dependency mismatch *measured against the vendor's own declared pins* is reported on
+    /// first sight — it does not need a correlation to be actionable. A vendor-consistent set
+    /// is never reported, however suspicious its version numbers look: optimum-rbln 0.11 pins
+    /// transformers 5.8.1, and calling that a skew would break a healthy host.
     #[test]
-    fn reports_a_known_skew_immediately() {
+    fn reports_a_measured_mismatch_immediately() {
         let mut h = vec![r("m", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "4")])];
         h[0].toolchain = [("optimum-rbln", "0.11.0.post1"), ("transformers", "5.8.1")]
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+        assert!(
+            toolchain_warnings(&h).is_empty(),
+            "the vendor's own pins are not a skew"
+        );
+
+        h[0]
+            .toolchain
+            .insert("_mismatch".into(), "transformers 4.40.0 != required 5.8.1".into());
         let w = toolchain_warnings(&h);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].0, "rbln");
-        assert!(w[0].1.contains("Pin transformers <5"), "{}", w[0].1);
+        assert!(w[0].1.contains("transformers 4.40.0"), "{}", w[0].1);
 
-        // A healthy toolchain warns about nothing.
-        h[0].toolchain.insert("transformers".into(), "4.48.0".into());
-        assert!(toolchain_warnings(&h).is_empty());
-        // And a history with no toolchain recorded says nothing rather than guessing.
+        // A history with no toolchain recorded says nothing rather than guessing.
         h[0].toolchain.clear();
         assert!(toolchain_warnings(&h).is_empty());
     }
