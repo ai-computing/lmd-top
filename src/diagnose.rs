@@ -381,6 +381,35 @@ RuntimeError: Error occurred while compiling the model
     }
 }
 
+/// Current advice for a classified failure kind, independent of what was concluded when the
+/// record was written.
+///
+/// History is append-only, so a record keeps the text produced at the time. When the advice
+/// changes — as it did for `rbln-codegen`, whose remedies were disproven by experiment — the
+/// stored text becomes stale while the kind stays valid. Rendering from the kind means
+/// `--history` shows what is currently known rather than a snapshot of an earlier belief.
+pub fn advice_for_kind(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "oom" => "raise the Job memory request, or lower tp / max-len",
+        "disk-full" => "free space on the model store PVC",
+        "store-io" => "build in local scratch and copy the artifact back",
+        "hf-auth" => "set the hf-token secret, and accept the model licence on HF",
+        "hf-missing" => "check the source id — it must be org/name",
+        "network" => "check egress to huggingface.co, or prefetch to the store first",
+        "device-oom" => "raise tp, lower max-len, or quantise (w8a8/w4a16)",
+        "rbln-kvpart" => "max-len must be a multiple of kvpart (or use attn=eager)",
+        "rbln-attn" => "try attn=eager",
+        "unsupported-model" => "check the vendor's support list, or update the compiler image",
+        "rbln-codegen" => {
+            "not option-related in the case investigated here — see docs/RBLN-COMPILE-INCIDENT.md"
+        }
+        "furiosa-build" => {
+            "furiosa-llm builds furiosa-ai quantised checkpoints — check the source is one"
+        }
+        _ => return None,
+    })
+}
+
 // ── Toolchain ───────────────────────────────────────────────────────────────────────────────
 
 /// Parse the `LMD_TOOLCHAIN pkg=ver …` line the recipes print.
@@ -439,6 +468,39 @@ pub fn toolchain_skew(
 #[cfg(test)]
 mod toolchain_tests {
     use super::*;
+
+    /// Advice is rendered from the kind, so an old record shows current understanding.
+    /// Every kind classify() can produce must have an entry, or history loses its hint.
+    #[test]
+    fn every_classified_kind_has_current_advice() {
+        let samples = [
+            ("oom", ("", Some(137))),
+            ("disk-full", ("OSError: No space left on device", Some(1))),
+            ("store-io", ("OSError: [Errno 95] Operation not supported", Some(1))),
+            ("hf-auth", ("401 Client Error: Unauthorized", Some(1))),
+            ("hf-missing", ("404 Client Error. Repository Not Found", Some(1))),
+            ("network", ("Connection error while fetching", Some(1))),
+            ("device-oom", ("RuntimeError: out of memory on device", Some(1))),
+            ("rbln-kvpart", ("ValueError: kvcache_partition_len invalid", Some(1))),
+            ("unsupported-model", ("ValueError: architecture X is not supported", Some(1))),
+            ("rbln-codegen", ("Error occurred while compiling the model", Some(1))),
+        ];
+        for (want_kind, (log, exit)) in samples {
+            let f = classify(log, exit);
+            assert_eq!(f.kind, want_kind, "classifying {:?}", log);
+            assert!(
+                advice_for_kind(f.kind).is_some(),
+                "kind {:?} has no current advice, so history would print none",
+                f.kind
+            );
+        }
+        // The rbln-codegen advice must no longer name the disproven remedies.
+        let a = advice_for_kind("rbln-codegen").unwrap();
+        assert!(!a.contains("lower max-len") && !a.contains("attn=eager"), "{}", a);
+        assert!(a.contains("RBLN-COMPILE-INCIDENT"), "{}", a);
+        // A kind with genuinely no action gets no invented one.
+        assert_eq!(advice_for_kind("error"), None);
+    }
 
     #[test]
     fn parses_the_reported_line() {
