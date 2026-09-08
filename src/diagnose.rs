@@ -148,6 +148,24 @@ pub fn classify(log: &str, exit_code: Option<i32>) -> Failure {
         );
     }
 
+    // ── Compiling with no NPU visible: optimum-rbln opens a runtime unless told not to ──
+    //
+    // A compile does not need a device — the vendor's own working script on this cluster
+    // compiled while rebel-compiler warned "Could not determine the current machine's NPU".
+    // But optimum-rbln defaults to creating runtimes, and that default turns a perfectly
+    // valid device-less compile into a device error. Observed verbatim as
+    // "ValueError: Device 0 is not a valid NPU device. Please check your NPU status with
+    // 'rbln-smi' command." Our recipe passes rbln_create_runtimes=False, so this reaches a
+    // user only via a custom recipe or LMD_COMPILE_ENV — worth naming rather than letting it
+    // read as broken hardware.
+    if err.contains("is not a valid npu device") || err.contains("rbln-smi") {
+        return Failure::new(
+            "rbln-no-device",
+            "compile tried to claim an NPU, and none is visible to the pod",
+            "compiling needs no device — pass rbln_create_runtimes=False",
+        );
+    }
+
     // ── RBLN parameter combinations the compiler validates late ──
     if err.contains("kvcache_partition_len") || err.contains("kvcache partition") {
         return Failure::new(
@@ -342,6 +360,11 @@ RuntimeError: Error occurred while compiling the model
             ("404 Client Error. Repository Not Found for url", "hf-missing"),
             ("OSError: [Errno 95] Operation not supported", "store-io"),
             ("OSError: [Errno 28] No space left on device", "disk-full"),
+            (
+                "ValueError: Device 0 is not a valid NPU device. Please check your NPU \
+                 status with 'rbln-smi' command.",
+                "rbln-no-device",
+            ),
             ("ValueError: rbln_kvcache_partition_len must divide max_seq_len", "rbln-kvpart"),
             ("RuntimeError: model exceeds the available device memory", "device-oom"),
             ("ValueError: architecture Qwen3ForCausalLM is not supported", "unsupported-model"),
@@ -413,6 +436,7 @@ pub fn advice_for_kind(kind: &str) -> Option<&'static str> {
         "device-oom" => "raise tp, lower max-len, or quantise (w8a8/w4a16)",
         "rbln-kvpart" => "max-len must be a multiple of kvpart (or use attn=eager)",
         "rbln-attn" => "try attn=eager",
+        "rbln-no-device" => "compiling needs no device — pass rbln_create_runtimes=False",
         "unsupported-model" => "check the vendor's support list, or update the compiler image",
         "vendor-flag" => "fix or unset that flag in LMD_COMPILE_ENV",
         "rbln-codegen" => {
@@ -497,6 +521,10 @@ mod toolchain_tests {
             ("network", ("Connection error while fetching", Some(1))),
             ("device-oom", ("RuntimeError: out of memory on device", Some(1))),
             ("rbln-kvpart", ("ValueError: kvcache_partition_len invalid", Some(1))),
+            (
+                "rbln-no-device",
+                ("ValueError: Device 0 is not a valid NPU device", Some(1)),
+            ),
             ("unsupported-model", ("ValueError: architecture X is not supported", Some(1))),
             ("rbln-codegen", ("Error occurred while compiling the model", Some(1))),
         ];
