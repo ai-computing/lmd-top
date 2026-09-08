@@ -109,6 +109,10 @@ impl Overlay {
 }
 
 pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
+    // Who owns the cursor this frame? While a modal overlay is up, background lists dim their
+    // selection bar (see `hl_style`) so the floating window's marker is the only live cursor —
+    // previously both were drawn bright and the panel's bar was the more eye-catching of the two.
+    theme::set_modal(Overlay::top(app).is_some());
     let dt = fxs.begin(app); // 경과시간 + 상태변화 감지(이펙트 무장)
     let (body, footer_area, summary) = if app.zoom {
         // 포커스 모드: 헤더/탭 숨기고 본문 최대화
@@ -1471,7 +1475,7 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
         )));
         for e in eps.iter().take(4) {
             let mut sp = vec![Span::styled(
-                format!("{:<20} ", truncw(&e.pod, 20)),
+                format!("{} ", padw(&e.pod, 20)),
                 Style::default().fg(Color::White),
             )];
             sp.push(Span::styled(
@@ -1604,7 +1608,7 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(rbr, Style::default().fg(C_DIM())),
             dot(up),
             Span::styled(
-                format!("{:<13} ", truncw(&r.path, 13)),
+                format!("{} ", padw(&r.path, 13)),
                 Style::default().fg(Color::White),
             ),
             Span::styled("→", Style::default().fg(C_DIM())),
@@ -1633,7 +1637,7 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         }
         let mut rl = Line::from(spans);
         if sel {
-            rl = rl.style(Style::default().bg(C_HL()).add_modifier(Modifier::BOLD));
+            rl = rl.style(hl_style());
             // 선택 route(정렬 유지 위해 배경만)
         }
         lines.push(rl);
@@ -1743,7 +1747,7 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         let mut pline = Line::from(vec![
             tag("EPP", c_epp()),
             Span::styled(
-                format!(" {:<18}", truncw(&p.name, 18)),
+                format!(" {}", padw(&p.name, 18)),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
@@ -1763,7 +1767,7 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(metrics, Style::default().fg(C_DIM())),
         ]);
         if sel {
-            pline.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+            pline.style = hl_style();
         }
         pl.push(pline);
         // 선택된 pool 은 selector 상세 한 줄 더(어떤 파드를 고르는지).
@@ -2066,7 +2070,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("@{:<16} ", truncw(node, 16)),
+                format!("@{} ", padw(node, 16)),
                 Style::default().fg(C_DIM()),
             ),
         ];
@@ -2129,7 +2133,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         pl.push(Line::from(vec![
             dot(p.ep_ready > 0),
             Span::styled(
-                format!("{:<16} ", truncw(&p.name, 16)),
+                format!("{} ", padw(&p.name, 16)),
                 Style::default().fg(Color::White),
             ),
             Span::styled(
@@ -2472,7 +2476,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
                 };
                 let mut line = accel_brief(a, branch, true);
                 if sel {
-                    line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+                    line.style = hl_style();
                 }
                 dl.push(line);
             }
@@ -2654,6 +2658,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled(v.clone(), Style::default().fg(Color::White)),
             ]));
         }
+        app.detail_lines.set(lines.len() as u16);
         f.render_widget(
             Paragraph::new(lines)
                 .scroll((app.detail_scroll, 0))
@@ -2809,6 +2814,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             None => Vec::new(),
         };
         let n_lines = lines.len();
+        app.detail_lines.set(n_lines as u16);
         let pblk = Paragraph::new(lines)
             .scroll((app.detail_scroll, 0))
             .wrap(Wrap { trim: false })
@@ -2867,6 +2873,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         )));
     }
 
+    app.detail_lines.set(lines.len() as u16);
     f.render_widget(
         Paragraph::new(lines)
             .scroll((app.detail_scroll, 0))
@@ -3342,7 +3349,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{:<6} ", truncw(&a.id, 6)),
+                format!("{} ", padw(&a.id, 6)),
                 Style::default().fg(C_DIM()),
             ),
             Span::styled("util ", Style::default().fg(C_DIM())),
@@ -3601,7 +3608,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     } else {
         for (j, (pod, q)) in app.snap.pod_queues.iter().enumerate().take(12) {
             let mut sp = vec![Span::styled(
-                format!("{:<20} ", truncw(pod, 20)),
+                format!("{} ", padw(pod, 20)),
                 Style::default().fg(Color::White),
             )];
             sp.extend(bar_line(q / maxq * 100.0, 8, C_ACC()).spans);
@@ -3611,7 +3618,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             ));
             let mut line = Line::from(sp);
             if qfocus && app.selected == j {
-                line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+                line.style = hl_style();
             }
             ql.push(line);
         }
@@ -3765,7 +3772,7 @@ fn activity_panel(f: &mut Frame, area: Rect, app: &App, active: bool) {
             };
             // STATUS 셀: 상태 텍스트(% 포함) + (진행 중 compile 이면) 진행바.
             let mut status_spans = vec![Span::styled(
-                format!("{:<14} ", truncw(&r.status, 14)),
+                format!("{} ", padw(&r.status, 14)),
                 Style::default().fg(color),
             )];
             if r.running_compile {
@@ -3906,13 +3913,13 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
                 };
                 sp.push(Span::styled(format!("{} ", g), Style::default().fg(c)));
                 sp.push(Span::styled(
-                    format!("{:<22} ", truncw(&m.id, 22)),
+                    format!("{} ", padw(&m.id, 22)),
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 ));
                 sp.push(Span::styled(
-                    format!("{:<8} ", truncw(&m.role, 8)),
+                    format!("{} ", padw(&m.role, 8)),
                     Style::default().fg(C_DIM()),
                 ));
                 let mut seen = std::collections::BTreeSet::new();
@@ -3980,11 +3987,11 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
                 sp.push(Span::styled("◇ ", Style::default().fg(C_ACC())));
                 sp.push(tbadge);
                 sp.push(Span::styled(
-                    format!(" {:<22} ", truncw(s.repo.rsplit('/').next().unwrap_or(&s.repo), 22)),
+                    format!(" {} ", padw(s.repo.rsplit('/').next().unwrap_or(&s.repo), 22)),
                     Style::default().fg(Color::White),
                 ));
                 sp.push(Span::styled(
-                    format!("{:<22} ", truncw(&label, 22)),
+                    format!("{} ", padw(&label, 22)),
                     Style::default().fg(if is_src { C_DIM() } else { C_WARN() }),
                 ));
                 sp.push(Span::styled(
@@ -3995,7 +4002,7 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
         }
         let mut line = Line::from(sp);
         if selected {
-            line.style = Style::default().bg(C_HL()).add_modifier(Modifier::BOLD);
+            line.style = hl_style();
         }
         ll.push(line);
     }
@@ -4136,7 +4143,7 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(format!("{} ", glyph), Style::default().fg(gc)),
             Span::styled(
-                format!("{:<20} ", truncw(&n.name, 20)),
+                format!("{} ", padw(&n.name, 20)),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
@@ -4189,7 +4196,7 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
         ));
         let mut hline = Line::from(h);
         if selected {
-            hline = hline.style(Style::default().bg(C_HL()).add_modifier(Modifier::BOLD));
+            hline = hline.style(hl_style());
         }
         lines.push(hline);
         // 이 노드의 디바이스들(트리 자식)

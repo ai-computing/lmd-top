@@ -32,6 +32,19 @@ pub(crate) fn truncw(s: &str, max: usize) -> String {
     out
 }
 
+/// Truncate to `n` display columns, then pad to exactly `n` columns.
+///
+/// `format!("{:<n}", truncw(s, n))` looks equivalent but is not: `{:<n}` counts **chars** while
+/// `truncw` counts **columns**, so a CJK name (5 chars / 9 columns) got 15 spaces appended and
+/// occupied 24 columns instead of 20 — shifting every column to its right (BUG-12).
+pub(crate) fn padw(s: &str, n: usize) -> String {
+    let t = truncw(s, n);
+    let w = dwidth(&t);
+    let mut out = t;
+    out.extend(std::iter::repeat_n(' ', n.saturating_sub(w)));
+    out
+}
+
 /// Dot gauge — filled = colored dots (●), empty = dim dots (·). Each dot is a discrete tick. Font-safe.
 pub(crate) fn dot_bar(pct: f64, cells: usize, color: Color) -> Line<'static> {
     let filled = ((pct.clamp(0.0, 100.0) / 100.0) * cells as f64).round() as usize;
@@ -306,8 +319,14 @@ pub(crate) fn hrow_sorted(cols: &[&str], mark: &str, arrow: &str) -> Row<'static
     )
 }
 
+/// Selection bar style for background lists/tables. Dims itself while a modal overlay is open
+/// (see `C_SEL_BG`) so the floating window's cursor is the only live one on screen.
 pub(crate) fn hl_style() -> Style {
-    Style::default().bg(C_HL()).add_modifier(Modifier::BOLD)
+    let mut st = Style::default().bg(C_SEL_BG());
+    if !modal_open() {
+        st = st.add_modifier(Modifier::BOLD);
+    }
+    st
 }
 
 /// 리스트/테이블 오른쪽에 스크롤바(오버플로 표시). 블록 테두리 안쪽 세로로 렌더.
@@ -372,3 +391,43 @@ pub(crate) fn count_suffix(sel: usize, total: usize) -> String {
 pub(crate) fn cellw(text: String, w: usize) -> Cell<'static> {
     Cell::from(truncw(&text, w))
 }
+#[cfg(test)]
+mod width_tests {
+    use super::*;
+
+    /// BUG-12 회귀: 표 셀은 문자 수가 아니라 **표시 폭**으로 맞춰져야 한다.
+    /// (한글 이름 한 개가 열 정렬 전체를 밀어내던 원인.)
+    #[test]
+    fn padw_pads_and_truncates_by_display_width() {
+        for (s, n) in [
+            ("ascii", 20),
+            ("모델-서버", 20),   // 5 char / 9 columns
+            ("한글이름아주긴것", 10),
+            ("mixed-한글-name", 16),
+            ("", 8),
+            ("정확히열폭", 10),  // exactly n columns → unchanged, no padding
+        ] {
+            assert_eq!(
+                dwidth(&padw(s, n)),
+                n,
+                "padw({:?}, {}) must occupy exactly {} columns",
+                s,
+                n,
+                n
+            );
+        }
+        // 짧은 값은 잘리지 않고 뒤에 공백만 붙는다.
+        assert!(padw("모델", 10).starts_with("모델"));
+        // 넘치면 잘리고 말줄임표가 붙는다.
+        assert!(padw("한글이름아주긴것", 6).contains('…'));
+    }
+
+    /// 기존 `format!("{:<N}", truncw(s, N))` 조합이 왜 틀렸는지 고정 — 회귀 방지 설명용.
+    #[test]
+    fn char_padding_would_overflow_for_cjk() {
+        let cjk = "모델-서버"; // 5 chars, 9 columns
+        assert_eq!(dwidth(&format!("{:<20}", truncw(cjk, 20))), 24);
+        assert_eq!(dwidth(&padw(cjk, 20)), 20);
+    }
+}
+

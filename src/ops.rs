@@ -292,6 +292,84 @@ pub struct ActionItem {
     pub desc: &'static str,
     pub action: Action,
 }
+impl ActionItem {
+    pub fn new(key: char, label: &'static str, desc: &'static str, action: Action) -> Self {
+        Self {
+            key,
+            label,
+            desc,
+            action,
+        }
+    }
+    pub fn info(desc: &'static str) -> Self {
+        Self::new('i', "Info", desc, Action::Info)
+    }
+    pub fn logs(desc: &'static str) -> Self {
+        Self::new('l', "Logs", desc, Action::Logs)
+    }
+    pub fn yaml(desc: &'static str) -> Self {
+        Self::new('y', "YAML", desc, Action::Yaml)
+    }
+    pub fn scale() -> Self {
+        Self::new('s', "Scale", "toggle replicas 0/1", Action::Scale)
+    }
+    pub fn restart() -> Self {
+        Self::new('S', "Restart", "rollout restart (rolling)", Action::Restart)
+    }
+    pub fn rollback() -> Self {
+        Self::new(
+            'b',
+            "Rollback",
+            "rollout undo → previous revision",
+            Action::Rollback,
+        )
+    }
+    pub fn objective() -> Self {
+        Self::new(
+            'O',
+            "Objective",
+            "set SLO target (TTFT/TPOT/E2E/tok·s) — drives advisor",
+            Action::Objective,
+        )
+    }
+    pub fn stop(desc: &'static str) -> Self {
+        Self::new('x', "Stop", desc, Action::Stop)
+    }
+    pub fn prefetch() -> Self {
+        Self::new(
+            'p',
+            "Prefetch",
+            "download HF weights into the shared store cache",
+            Action::Prefetch,
+        )
+    }
+    pub fn deploy(desc: &'static str) -> Self {
+        Self::new('d', "Deploy", desc, Action::Deploy)
+    }
+    pub fn compile(vendor: &'static str) -> Self {
+        let (key, label, desc) = if vendor == "furiosa" {
+            (
+                'f',
+                "Compile→Furiosa",
+                "furiosa-llm build → artifact in store",
+            )
+        } else {
+            ('c', "Compile→RBLN", "optimum-rbln compile → .rbln in store")
+        };
+        Self::new(key, label, desc, Action::Compile(vendor))
+    }
+    pub fn delete(desc: &'static str) -> Self {
+        Self::new('D', "Delete", desc, Action::Delete)
+    }
+    pub fn delete_job() -> Self {
+        Self::new(
+            'D',
+            "Delete",
+            "delete compile job (cancel / clean up)",
+            Action::DeleteJob,
+        )
+    }
+}
 /// Enter 액션 메뉴 오버레이 — 선택 항목에 대해 가능한 동작 목록.
 #[derive(Clone)]
 pub struct ActionMenu {

@@ -337,7 +337,11 @@ impl App {
         self.dev_sel = 0;
     }
     pub fn scroll_detail(&mut self, delta: i64) {
-        self.detail_scroll = (self.detail_scroll as i64 + delta).max(0) as u16;
+        // Clamp to the content actually rendered (recorded by the detail pane each frame) so
+        // `j` stops at the last line rather than scrolling into blank space (BUG-15).
+        let max = self.detail_lines.get().saturating_sub(1) as i64;
+        let next = (self.detail_scroll as i64 + delta).max(0);
+        self.detail_scroll = if max > 0 { next.min(max) as u16 } else { next as u16 };
     }
     /// 현재 선택 노드가 가진 가속기 수(Node 상세 device 커서 범위).
     pub fn node_dev_count(&self) -> usize {

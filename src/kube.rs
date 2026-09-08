@@ -3,14 +3,38 @@
 
 use anyhow::{anyhow, Result};
 use tokio::process::Command;
+use tokio::time::{timeout, Duration};
+
+/// Turn a spawn failure into an actionable message. `--request-timeout` bounds the API call but
+/// says nothing when the binary itself is missing — users saw a bare
+/// "No such file or directory (os error 2)" instead (BUG-09).
+fn spawn_err(e: std::io::Error) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        anyhow!("kubectl not found in PATH — install kubectl or fix PATH")
+    } else {
+        anyhow!("cannot run kubectl: {}", e)
+    }
+}
+
+/// Outer wall-clock bound on a kubectl shell-out. `--request-timeout` only covers the API
+/// round-trip; an exec credential plugin or DNS stall can hang the process past it, and one
+/// stuck call would stall the whole collect tick (REG-07 / BUG-01).
+async fn run(mut cmd: Command, label: &str, budget: Duration) -> Result<std::process::Output> {
+    match timeout(budget, cmd.output()).await {
+        Ok(r) => r.map_err(spawn_err),
+        Err(_) => Err(anyhow!(
+            "kubectl {} timed out after {}s",
+            label,
+            budget.as_secs()
+        )),
+    }
+}
 
 /// Run `kubectl <args...> -o json` → Value. (caller includes -o json in args)
 pub async fn get_json(args: &[&str]) -> Result<serde_json::Value> {
-    let out = Command::new("kubectl")
-        .args(args)
-        .arg("--request-timeout=15s")
-        .output()
-        .await?;
+    let mut cmd = Command::new("kubectl");
+    cmd.args(args).arg("--request-timeout=15s");
+    let out = run(cmd, args.join(" ").as_str(), Duration::from_secs(20)).await?;
     if !out.status.success() {
         return Err(anyhow!(
             "kubectl {:?} failed: {}",
@@ -31,10 +55,10 @@ pub fn cm_data<'a>(cm: &'a serde_json::Value, key: &str) -> Option<&'a str> {
 /// `Some(true)`=object present, `Some(false)`=absent, `None`=kubectl error (kind/CRD missing or cluster unreachable).
 /// Read-only; used by the Setup(Doctor) view's prerequisite checks.
 pub async fn get_exists(args: &[&str]) -> Option<bool> {
-    let out = Command::new("kubectl")
-        .args(args)
-        .args(["--ignore-not-found", "-o", "name", "--request-timeout=8s"])
-        .output()
+    let mut cmd = Command::new("kubectl");
+    cmd.args(args)
+        .args(["--ignore-not-found", "-o", "name", "--request-timeout=8s"]);
+    let out = run(cmd, args.join(" ").as_str(), Duration::from_secs(12))
         .await
         .ok()?;
     if !out.status.success() {
@@ -45,11 +69,11 @@ pub async fn get_exists(args: &[&str]) -> Option<bool> {
 
 /// `kubectl get <args> -o jsonpath=<jp>` → trimmed stdout, or `None` on kubectl error (object/kind absent).
 pub async fn get_jsonpath(args: &[&str], jp: &str) -> Option<String> {
-    let out = Command::new("kubectl")
-        .args(args)
+    let mut cmd = Command::new("kubectl");
+    cmd.args(args)
         .arg(format!("-o=jsonpath={}", jp))
-        .arg("--request-timeout=8s")
-        .output()
+        .arg("--request-timeout=8s");
+    let out = run(cmd, args.join(" ").as_str(), Duration::from_secs(12))
         .await
         .ok()?;
     if !out.status.success() {
