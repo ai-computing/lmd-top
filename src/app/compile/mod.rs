@@ -229,12 +229,29 @@ impl App {
 
     /// Run preflight checklist before compilation.
     pub fn compile_preflight(&self, form: &CompileForm) -> Vec<(bool, String)> {
-        preflight::compile_preflight(
+        let mut checks = preflight::compile_preflight(
             &self.snap.stored,
             &self.snap.nodes,
             self.img_rbln.as_deref(),
             form,
-        )
+        );
+        // History is part of the pre-flight picture: if this exact option set has failed here
+        // before, that belongs in the checklist rather than only in an advisory line.
+        let advice = self.compile_advice(&form.model_id, form.vendor);
+        let current: std::collections::BTreeMap<String, String> = form
+            .fields
+            .iter()
+            .filter(|f| !f.value.is_empty() && f.value != "none")
+            .map(|f| (f.key.clone(), f.value.clone()))
+            .collect();
+        if let Some(bad) = advice.avoid.iter().find(|s| {
+            s.options
+                .iter()
+                .all(|(k, v)| current.get(k).map(String::as_str) == Some(v.as_str()))
+        }) {
+            checks.push((false, format!("⚠ these options {}", bad.reason)));
+        }
+        checks
     }
 
     /// Create synthetic model artifact for headless planning.
