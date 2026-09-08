@@ -1,79 +1,160 @@
 # title: compile Llama-3.1-8B-Instruct → rbln-ca22-tp4-s8192
 # Compile Job preview. Review, then apply with `kubectl apply -f -`.
-# Model meta-llama/Llama-3.1-8B-Instruct -> rbln compile -> shared store compiled/meta-llama--Llama-3.1-8B-Instruct/rbln/rbln-ca22-tp4-s8192.
+# Model meta-llama/Llama-3.1-8B-Instruct -> rbln compile -> shared store compiled/meta-llama--Llama-3.1-8B-Instruct/rbln/rbln-ca22-tp4-s8192
 # Compile-time fixed options: tp=4  max-len=8192  batch=1  attn=flash_attn  kvpart=4096  quant=none  npu=RBLN-CA22  devices=4
-# RBLN compile script (inline) — create_runtimes=False, local build, then copy to model-store.
+# Compile recipe (compile.py), mounted at /scripts.
 apiVersion: v1
 kind: ConfigMap
-metadata: { name: compile-meta-llama--llama-3-1-8189fe-rbln-ca22-tp4-s8192-script, namespace: llm-serving }
+metadata:
+  name: compile-meta-llama--llama-3-1-8189fe-rbln-ca22-tp4-s8192-script
+  namespace: llm-serving
 data:
   compile.py: |
-    import os, shutil
+    # RBLN ahead-of-time compile (optimum-rbln). Mounted from a ConfigMap; all input via env.
+    #
+    #   MODEL_ID                    HF repo id or local path        (required)
+    #   OUTPUT                      destination in the model store  (required)
+    #   RBLN_NPU                    target chip                     (default RBLN-CA22)
+    #   RBLN_TENSOR_PARALLEL_SIZE   chip count                      (default 1)
+    #   RBLN_MAX_SEQ_LEN            compile-time context length     (default 4096)
+    #   RBLN_BATCH_SIZE             static batch size               (default 1)
+    #   RBLN_ATTN_IMPL              flash_attn | eager              (default flash_attn)
+    #   RBLN_KVCACHE_PARTITION_LEN  flash_attn only                 (default 16384)
+    import os
+    import shutil
+
     from optimum.rbln import RBLNAutoModelForCausalLM as M
-    g = os.environ.get; o = os.environ["OUTPUT"]; loc = "/work/out"
+
+    get = os.environ.get
+    output = os.environ["OUTPUT"]
+    local = "/work/out"
+
     cfg = dict(
-      rbln_npu=g("RBLN_NPU", "RBLN-CA22"),
-      rbln_num_devices=int(g("RBLN_TENSOR_PARALLEL_SIZE", "1")),
-      rbln_max_seq_len=int(g("RBLN_MAX_SEQ_LEN", "4096")),
-      rbln_batch_size=int(g("RBLN_BATCH_SIZE", "1")))
-    attn = g("RBLN_ATTN_IMPL", "flash_attn")
+        rbln_npu=get("RBLN_NPU", "RBLN-CA22"),
+        rbln_num_devices=int(get("RBLN_TENSOR_PARALLEL_SIZE", "1")),
+        rbln_max_seq_len=int(get("RBLN_MAX_SEQ_LEN", "4096")),
+        rbln_batch_size=int(get("RBLN_BATCH_SIZE", "1")),
+    )
+    attn = get("RBLN_ATTN_IMPL", "flash_attn")
     if attn:
-      cfg["rbln_attn_impl"] = attn
+        cfg["rbln_attn_impl"] = attn
     if attn == "flash_attn":
-      cfg["rbln_kvcache_partition_len"] = int(g("RBLN_KVCACHE_PARTITION_LEN", "16384"))
+        cfg["rbln_kvcache_partition_len"] = int(get("RBLN_KVCACHE_PARTITION_LEN", "16384"))
+
     print("RBLN_CONFIG", cfg)
-    m = M.from_pretrained(os.environ["MODEL_ID"], export=True, rbln_create_runtimes=False, **cfg)
-    m.save_pretrained(loc)
-    os.makedirs(o, exist_ok=True)
-    for f in os.listdir(loc):
-      s = os.path.join(loc, f); d = os.path.join(o, f)
-      shutil.copytree(s, d, dirs_exist_ok=True) if os.path.isdir(s) else shutil.copy2(s, d)
-    print("COMPILE_DONE", os.listdir(o))
+    # create_runtimes=False: compile without claiming a device, so serving may hold the chips.
+    model = M.from_pretrained(
+        os.environ["MODEL_ID"], export=True, rbln_create_runtimes=False, **cfg
+    )
+    # Build into local scratch first — the shared store is SMB and rejects the compiler's I/O.
+    model.save_pretrained(local)
+
+    os.makedirs(output, exist_ok=True)
+    for entry in os.listdir(local):
+        src = os.path.join(local, entry)
+        dst = os.path.join(output, entry)
+        if os.path.isdir(src):
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        else:
+            shutil.copy2(src, dst)
+    print("COMPILE_DONE", os.listdir(output))
 ---
-# RBLN: no registry image configured, so this uses the target node's host rebel-compiler stack via hostPath. create_runtimes=False.
+# RBLN: no registry image configured, so this borrows the target node's host rebel-compiler stack via hostPath (rbln_create_runtimes=False).
 apiVersion: batch/v1
 kind: Job
-metadata: { name: compile-meta-llama--llama-3-1-8189fe-rbln-ca22-tp4-s8192, namespace: llm-serving }
+metadata:
+  name: compile-meta-llama--llama-3-1-8189fe-rbln-ca22-tp4-s8192
+  namespace: llm-serving
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600
   template:
     spec:
       restartPolicy: Never
-      nodeSelector: { kubernetes.io/hostname: npu-1 }
+      nodeSelector:
+        kubernetes.io/hostname: npu-1
       volumes:
-        - { name: store, persistentVolumeClaim: { claimName: model-store } }
-        - { name: script, configMap: { name: compile-meta-llama--llama-3-1-8189fe-rbln-ca22-tp4-s8192-script } }
-        - { name: work, emptyDir: {} }
-        - { name: hp-local, hostPath: { path: /home/gspark/.local/lib/python3.10/site-packages, type: Directory } }
-        - { name: hp-sys, hostPath: { path: /usr/local/lib/python3.10/dist-packages, type: Directory } }
-        - { name: hp-lib, hostPath: { path: /usr/lib, type: Directory } }
-        - { name: hp-bin, hostPath: { path: /usr/bin, type: Directory } }
+      - name: store
+        persistentVolumeClaim:
+          claimName: model-store
+      - name: script
+        configMap:
+          name: compile-meta-llama--llama-3-1-8189fe-rbln-ca22-tp4-s8192-script
+      - name: work
+        emptyDir: {}
+      - name: hp-local
+        hostPath:
+          path: /home/gspark/.local/lib/python3.10/site-packages
+          type: Directory
+      - name: hp-sys
+        hostPath:
+          path: /usr/local/lib/python3.10/dist-packages
+          type: Directory
+      - name: hp-lib
+        hostPath:
+          path: /usr/lib
+          type: Directory
+      - name: hp-bin
+        hostPath:
+          path: /usr/bin
+          type: Directory
       containers:
-        - name: compile
-          image: ubuntu:22.04
-          resources: { requests: { cpu: "8", memory: "16Gi" } }
-          env:
-            - { name: PYTHONPATH, value: "/home/gspark/.local/lib/python3.10/site-packages:/host-sys:/host-lib/python3/dist-packages" }
-            - { name: LD_LIBRARY_PATH, value: "/host-lib:/host-lib/x86_64-linux-gnu" }
-            - { name: PATH, value: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin" }
-            - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true } } }
-            - { name: MODEL_STORE, value: "/mnt/store" }
-            - { name: MODEL_ID, value: "meta-llama/Llama-3.1-8B-Instruct" }
-            - { name: OUTPUT, value: "/mnt/store/compiled/meta-llama--Llama-3.1-8B-Instruct/rbln/rbln-ca22-tp4-s8192" }
-            - { name: HF_HOME, value: "/mnt/store/hub" }
-            - { name: RBLN_TENSOR_PARALLEL_SIZE, value: "4" }
-            - { name: RBLN_MAX_SEQ_LEN, value: "8192" }
-            - { name: RBLN_BATCH_SIZE, value: "1" }
-            - { name: RBLN_ATTN_IMPL, value: "flash_attn" }
-            - { name: RBLN_KVCACHE_PARTITION_LEN, value: "4096" }
-            - { name: RBLN_NPU, value: "RBLN-CA22" }
-          volumeMounts:
-            - { name: store, mountPath: /mnt/store }
-            - { name: script, mountPath: /scripts, readOnly: true }
-            - { name: work, mountPath: /work }
-            - { name: hp-local, mountPath: /home/gspark/.local/lib/python3.10/site-packages }
-            - { name: hp-sys, mountPath: /host-sys }
-            - { name: hp-lib, mountPath: /host-lib }
-            - { name: hp-bin, mountPath: /host-bin }
-          command: ["bash", "-c", "set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq --no-install-recommends python3.10 libnuma1 libgomp1 ca-certificates tzdata >/dev/null 2>&1; ln -sf /usr/bin/python3.10 /usr/local/bin/python3; python3 /scripts/compile.py"]
+      - name: compile
+        image: ubuntu:22.04
+        command:
+        - bash
+        - -c
+        - set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq --no-install-recommends python3.10 libnuma1 libgomp1 ca-certificates tzdata >/dev/null 2>&1; ln -sf /usr/bin/python3.10 /usr/local/bin/python3; python3 /scripts/compile.py
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        - name: MODEL_STORE
+          value: /mnt/store
+        - name: MODEL_ID
+          value: meta-llama/Llama-3.1-8B-Instruct
+        - name: OUTPUT
+          value: /mnt/store/compiled/meta-llama--Llama-3.1-8B-Instruct/rbln/rbln-ca22-tp4-s8192
+        - name: HF_HOME
+          value: /mnt/store/hub
+        - name: PYTHONPATH
+          value: /home/gspark/.local/lib/python3.10/site-packages:/host-sys:/host-lib/python3/dist-packages
+        - name: LD_LIBRARY_PATH
+          value: /host-lib:/host-lib/x86_64-linux-gnu
+        - name: PATH
+          value: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin
+        - name: RBLN_TENSOR_PARALLEL_SIZE
+          value: '4'
+        - name: RBLN_MAX_SEQ_LEN
+          value: '8192'
+        - name: RBLN_BATCH_SIZE
+          value: '1'
+        - name: RBLN_ATTN_IMPL
+          value: flash_attn
+        - name: RBLN_KVCACHE_PARTITION_LEN
+          value: '4096'
+        - name: RBLN_NPU
+          value: RBLN-CA22
+        resources:
+          requests:
+            cpu: '8'
+            memory: 16Gi
+        volumeMounts:
+        - name: store
+          mountPath: /mnt/store
+        - name: script
+          mountPath: /scripts
+          readOnly: true
+        - name: work
+          mountPath: /work
+        - name: hp-local
+          mountPath: /home/gspark/.local/lib/python3.10/site-packages
+        - name: hp-sys
+          mountPath: /host-sys
+        - name: hp-lib
+          mountPath: /host-lib
+        - name: hp-bin
+          mountPath: /host-bin

@@ -1,9 +1,26 @@
-//! Kubernetes batch/v1 Job and ConfigMap manifest generation for NPU compilation.
+//! Compile Job manifest — a `batch/v1` Job plus the ConfigMap carrying its recipe.
+//!
+//! Built as data via [`crate::manifest`] and serialized, not formatted as text: the model id
+//! and every form value are user- (and, via the Zoo view, network-) supplied, and text
+//! assembly made escaping the author's problem at each interpolation (BUG-06).
+//! The recipes themselves live in `assets/recipes/` and take all input through the
+//! environment, so no value is ever spliced into a script.
 
 use crate::app::compile_job_name;
 use crate::collect::NodeInfo;
+use crate::manifest::{args, env_secret, env_val, mount, s, seq, Doc, Manifest};
 use crate::ops::CompileForm;
-use crate::quote::{shq, valid_model_id, yamlq};
+use crate::quote::valid_model_id;
+use crate::ymap;
+
+/// Compile recipes, embedded from `assets/recipes/`. Real files so they can be linted, diffed
+/// and run by hand; the Job mounts them from a ConfigMap.
+const RECIPE_RBLN: &str = include_str!("../../../assets/recipes/rbln-compile.py");
+const RECIPE_FURIOSA: &str = include_str!("../../../assets/recipes/furiosa-compile.sh");
+
+/// Shared model store — compile output and the HF cache both live here.
+const STORE_MOUNT: &str = "/mnt/store";
+const STORE_PVC: &str = "model-store";
 
 /// The outcome of building a compile manifest from a user-configured form.
 pub enum CompileManifestOutcome {
@@ -18,7 +35,22 @@ pub enum CompileManifestOutcome {
     InvalidVendor { vendor: String },
 }
 
-/// Construct the Kubernetes Job (and optional ConfigMap) YAML manifest for the compile job.
+/// How a vendor's compile container is shaped — the parts that genuinely differ.
+struct ContainerPlan {
+    /// Recipe file contents and the ConfigMap key it is mounted as.
+    recipe: (&'static str, &'static str),
+    /// `command` for the container.
+    command: Vec<String>,
+    /// Environment beyond the shared set.
+    extra_env: Vec<serde_yaml::Value>,
+    /// Volumes and mounts beyond store + script + work.
+    extra_volumes: Vec<serde_yaml::Value>,
+    extra_mounts: Vec<serde_yaml::Value>,
+    /// One-line explanation shown above the Job.
+    note: &'static str,
+}
+
+/// Construct the compile Job manifest (recipe ConfigMap + Job).
 pub fn build_compile_manifest(
     form: &CompileForm,
     ns: &str,
@@ -50,9 +82,9 @@ pub fn build_compile_manifest(
     let target = form.target();
     let repo_dir = model_id.replace('/', "--");
     let name = compile_job_name(&repo_dir, &target);
-    let tp = form.get("tp");
+    let outdir = format!("{}/compiled/{}/{}/{}", STORE_MOUNT, repo_dir, vendor, target);
 
-    // Destination node: explicit picker selection takes precedence over any auto-selection
+    // Destination node: explicit picker selection takes precedence over any auto-selection.
     let node_pick = if form.dest.is_empty() {
         "any"
     } else {
@@ -60,7 +92,8 @@ pub fn build_compile_manifest(
     };
     let node_host = node_pick.split('(').next().unwrap_or("any").trim();
 
-    // RBLN host stack fallback: when no registry image is configured, run on an RBLN node via hostPath
+    // RBLN host-stack fallback: with no registry image configured, the compile runs against the
+    // target node's own rebel-compiler install via hostPath, so it must land on an RBLN node.
     let rbln_host_stack = vendor == "rbln" && img_rbln.is_none();
     let auto_rbln_node = nodes
         .iter()
@@ -71,27 +104,103 @@ pub fn build_compile_manifest(
         if rbln_host_stack {
             "ubuntu:22.04".to_string()
         } else {
-            img_rbln.unwrap().to_string()
+            img_rbln.unwrap_or_default().to_string()
         }
     } else {
         img_furiosa
-            .map(|s| s.to_string())
+            .map(str::to_string)
             .unwrap_or_else(|| "furiosaai/furiosa-llm:latest".into())
     };
 
-    let node_label = if node_host != "any" && !node_host.is_empty() {
-        format!("kubernetes.io/hostname: {}", node_host)
+    // nodeSelector is omitted entirely when unconstrained — the device resource request is what
+    // schedules an unpinned compile.
+    let node_selector = if node_host != "any" && !node_host.is_empty() {
+        Some(ymap! { "kubernetes.io/hostname" => s(node_host) })
     } else if rbln_host_stack {
-        match &auto_rbln_node {
-            Some(n) => format!("kubernetes.io/hostname: {}", n),
-            None => "rebellions.ai/npu.product: RBLN-CA22".to_string(),
-        }
+        Some(match &auto_rbln_node {
+            Some(n) => ymap! { "kubernetes.io/hostname" => s(n.clone()) },
+            None => ymap! { "rebellions.ai/npu.product" => s("RBLN-CA22") },
+        })
     } else {
-        String::new()
+        None
     };
 
-    let resources_line = "resources: { requests: { cpu: \"8\", memory: \"16Gi\" } }";
-    let envs = build_compile_env_vars(vendor, form, &repo_dir, &target);
+    let plan = if vendor == "furiosa" {
+        furiosa_plan(form, &repo_dir)
+    } else {
+        rbln_plan(rbln_host_stack, form)
+    };
+
+    // Shared environment: where the weights come from and where the artifact goes.
+    let mut env = vec![
+        env_secret("HF_TOKEN", "hf-token", "HF_TOKEN", true),
+        env_val("MODEL_STORE", STORE_MOUNT),
+        env_val("MODEL_ID", model_id.clone()),
+        env_val("OUTPUT", outdir.clone()),
+    ];
+    env.extend(plan.extra_env.clone());
+
+    let (recipe_body, recipe_key) = plan.recipe;
+    let cm_name = format!("{}-script", name);
+
+    let mut volumes = vec![
+        ymap! {
+            "name" => s("store"),
+            "persistentVolumeClaim" => ymap! { "claimName" => s(STORE_PVC) },
+        },
+        ymap! {
+            "name" => s("script"),
+            "configMap" => ymap! { "name" => s(cm_name.clone()) },
+        },
+        ymap! { "name" => s("work"), "emptyDir" => ymap! {} },
+    ];
+    volumes.extend(plan.extra_volumes.clone());
+
+    let mut mounts = vec![
+        mount("store", STORE_MOUNT, false),
+        mount("script", "/scripts", true),
+        mount("work", "/work", false),
+    ];
+    mounts.extend(plan.extra_mounts.clone());
+
+    let mut pod_spec = serde_yaml::Mapping::new();
+    pod_spec.insert("restartPolicy".into(), s("Never"));
+    if let Some(sel) = node_selector {
+        pod_spec.insert("nodeSelector".into(), sel);
+    }
+    pod_spec.insert("volumes".into(), seq(volumes));
+    pod_spec.insert(
+        "containers".into(),
+        seq(vec![ymap! {
+            "name" => s("compile"),
+            "image" => s(image),
+            "command" => args(plan.command.clone()),
+            "env" => seq(env),
+            "resources" => ymap! {
+                "requests" => ymap! { "cpu" => s("8"), "memory" => s("16Gi") },
+            },
+            "volumeMounts" => seq(mounts),
+        }]),
+    );
+
+    let job = ymap! {
+        "apiVersion" => s("batch/v1"),
+        "kind" => s("Job"),
+        "metadata" => ymap! { "name" => s(name.clone()), "namespace" => s(ns) },
+        "spec" => ymap! {
+            "backoffLimit" => serde_yaml::Value::from(0),
+            "ttlSecondsAfterFinished" => serde_yaml::Value::from(3600),
+            "template" => ymap! { "spec" => serde_yaml::Value::Mapping(pod_spec) },
+        },
+    };
+
+    let config_map = ymap! {
+        "apiVersion" => s("v1"),
+        "kind" => s("ConfigMap"),
+        "metadata" => ymap! { "name" => s(cm_name), "namespace" => s(ns) },
+        "data" => ymap! { recipe_key => s(recipe_body) },
+    };
+
     let opts_summary: String = form
         .fields
         .iter()
@@ -99,61 +208,19 @@ pub fn build_compile_manifest(
         .collect::<Vec<_>>()
         .join("  ");
 
-    let outdir = format!("/mnt/store/compiled/{}/{}/{}", repo_dir, vendor, target);
-
-    let (volumes_extra, env_block, mounts_extra, command, note, extra_doc) = if vendor == "furiosa"
-    {
-        build_furiosa_container_spec(model_id, form, &tp, &outdir)
-    } else {
-        build_rbln_container_spec(&name, ns, rbln_host_stack, &envs)
-    };
-
-    let yaml = format!(
-        "# Compile Job preview. Review, then apply with `kubectl apply -f -`.\n\
-         # Model {model_id} -> {vendor} compile -> shared store compiled/{repo_dir}/{vendor}/{target}.\n\
-         # Compile-time fixed options: {opts}\n\
-         {extra_doc}\
-         {note}\n\
-         apiVersion: batch/v1\n\
-         kind: Job\n\
-         metadata: {{ name: {name}, namespace: {ns} }}\n\
-         spec:\n\
-         \x20 backoffLimit: 0\n\
-         \x20 ttlSecondsAfterFinished: 3600\n\
-         \x20 template:\n\
-         \x20   spec:\n\
-         \x20     restartPolicy: Never\n\
-         \x20     nodeSelector: {{ {node_label} }}\n\
-         \x20     volumes:\n\
-         \x20       - {{ name: store, persistentVolumeClaim: {{ claimName: model-store }} }}\n\
-         {volumes_extra}\
-         \x20     containers:\n\
-         \x20       - name: compile\n\
-         \x20         image: {image}\n\
-         \x20         {resources_line}\n\
-         \x20         env:\n\
-         {env_block}\
-         \x20         volumeMounts:\n\
-         \x20           - {{ name: store, mountPath: /mnt/store }}\n\
-         {mounts_extra}\
-         \x20         command: {command}\n",
-        model_id = model_id,
-        vendor = vendor,
-        repo_dir = repo_dir,
-        target = target,
-        opts = opts_summary,
-        extra_doc = extra_doc,
-        note = note,
-        name = name,
-        ns = ns,
-        node_label = node_label,
-        image = image,
-        resources_line = resources_line,
-        volumes_extra = volumes_extra,
-        env_block = env_block,
-        mounts_extra = mounts_extra,
-        command = command,
-    );
+    let yaml = Manifest::new()
+        .note("Compile Job preview. Review, then apply with `kubectl apply -f -`.")
+        .note(format!(
+            "Model {} -> {} compile -> shared store compiled/{}/{}/{}",
+            model_id, vendor, repo_dir, vendor, target
+        ))
+        .note(format!("Compile-time fixed options: {}", opts_summary))
+        .push(
+            Doc::new(config_map)
+                .note(format!("Compile recipe ({}), mounted at /scripts.", recipe_key)),
+        )
+        .push(Doc::new(job).note(plan.note))
+        .to_yaml();
 
     CompileManifestOutcome::Ready {
         title: format!("compile {} → {}", form.model, target),
@@ -161,181 +228,127 @@ pub fn build_compile_manifest(
     }
 }
 
-/// Map compile form fields to environment variables passed to compiler runners.
-fn build_compile_env_vars(
-    vendor: &str,
-    form: &CompileForm,
-    repo_dir: &str,
-    target: &str,
-) -> Vec<(String, String)> {
-    let mut envs: Vec<(String, String)> = vec![
-        ("MODEL_STORE".into(), "/mnt/store".into()),
-        ("MODEL_ID".into(), form.model_id.clone()),
-        (
-            "OUTPUT".into(),
-            format!("/mnt/store/compiled/{}/{}/{}", repo_dir, vendor, target),
-        ),
-        ("HF_HOME".into(), "/mnt/store/hub".into()),
-    ];
-
-    for f in &form.fields {
-        if f.value.is_empty() || f.value == "none" {
-            continue;
+/// Furiosa: `fxb build` from the vendor image, driven entirely by environment variables.
+fn furiosa_plan(form: &CompileForm, repo_dir: &str) -> ContainerPlan {
+    let or = |key: &str, def: &str| {
+        let v = form.get(key);
+        if v.is_empty() {
+            def.to_string()
+        } else {
+            v
         }
-        let ek = match (vendor, f.key.as_str()) {
-            ("rbln", "tp") => "RBLN_TENSOR_PARALLEL_SIZE",
-            ("rbln", "max-len") => "RBLN_MAX_SEQ_LEN",
-            ("rbln", "batch") => "RBLN_BATCH_SIZE",
-            ("rbln", "attn") => "RBLN_ATTN_IMPL",
-            ("rbln", "kvpart") => "RBLN_KVCACHE_PARTITION_LEN",
-            ("rbln", "npu") => "RBLN_NPU",
-            ("rbln", "quant") => "RBLN_QUANTIZATION",
-            (_, "tp") => "TENSOR_PARALLEL_SIZE",
-            (_, "pp") => "PIPELINE_PARALLEL_SIZE",
-            (_, "max-len") => "MAX_SEQ_LEN_TO_CAPTURE",
-            (_, "batch") => "BUCKET_BATCH_SIZE",
-            (_, "chunk") => "PREFILL_CHUNK_SIZE",
-            (_, "block") => "PAGED_ATTENTION_BLOCK_SIZE",
-            (_, "quant") => "USE_ACTIVATION_DQ",
-            _ => continue,
+    };
+    ContainerPlan {
+        recipe: (RECIPE_FURIOSA, "compile.sh"),
+        command: vec!["sh".into(), "/scripts/compile.sh".into()],
+        extra_env: vec![
+            // The downloader cannot write to the SMB-backed store (os error 95), so the HF cache
+            // is local scratch and only the finished artifact is copied back.
+            env_val("HF_HOME", "/work/hub"),
+            env_val(
+                "PREFETCHED_DIR",
+                format!("{}/hub/hub/models--{}", STORE_MOUNT, repo_dir),
+            ),
+            env_val("TP", or("tp", "1")),
+            env_val("PP", or("pp", "1")),
+            env_val("MAX_LEN", or("max-len", "8192")),
+        ],
+        extra_volumes: Vec::new(),
+        extra_mounts: Vec::new(),
+        note: "Furiosa: fxb build for furiosa-ai quantized checkpoints. Installs the aarch64 \
+               cross-compiler, builds in local scratch, then copies to the model store.",
+    }
+}
+
+/// RBLN: optimum-rbln recipe. Without a registry image, borrow the node's own compiler stack.
+fn rbln_plan(host_stack: bool, form: &CompileForm) -> ContainerPlan {
+    let params = rbln_param_env(form);
+    if !host_stack {
+        return ContainerPlan {
+            recipe: (RECIPE_RBLN, "compile.py"),
+            command: vec!["python3".into(), "/scripts/compile.py".into()],
+            extra_env: [vec![env_val("HF_HOME", format!("{}/hub", STORE_MOUNT))], params]
+                .concat(),
+            extra_volumes: Vec::new(),
+            extra_mounts: Vec::new(),
+            note: "RBLN: runs the optimum-rbln recipe inside LMD_COMPILE_IMAGE_RBLN \
+                   (rbln_create_runtimes=False, so serving may hold the chips).",
         };
-        envs.push((ek.into(), f.value.clone()));
     }
-    envs
+    // hostPath fallback: a bare ubuntu image plus the node's python/rebel-compiler install.
+    // tzdata is needed because pandas→pytz reads /usr/share/zoneinfo, which minimal images lack.
+    let host = [
+        ("hp-local", "/home/gspark/.local/lib/python3.10/site-packages", "/home/gspark/.local/lib/python3.10/site-packages"),
+        ("hp-sys", "/usr/local/lib/python3.10/dist-packages", "/host-sys"),
+        ("hp-lib", "/usr/lib", "/host-lib"),
+        ("hp-bin", "/usr/bin", "/host-bin"),
+    ];
+    ContainerPlan {
+        recipe: (RECIPE_RBLN, "compile.py"),
+        command: vec![
+            "bash".into(),
+            "-c".into(),
+            "set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; \
+             apt-get install -y -qq --no-install-recommends python3.10 libnuma1 libgomp1 \
+             ca-certificates tzdata >/dev/null 2>&1; \
+             ln -sf /usr/bin/python3.10 /usr/local/bin/python3; python3 /scripts/compile.py"
+                .into(),
+        ],
+        extra_env: [
+            vec![
+                env_val("HF_HOME", format!("{}/hub", STORE_MOUNT)),
+                env_val(
+                    "PYTHONPATH",
+                    "/home/gspark/.local/lib/python3.10/site-packages:/host-sys:/host-lib/python3/dist-packages",
+                ),
+                env_val("LD_LIBRARY_PATH", "/host-lib:/host-lib/x86_64-linux-gnu"),
+                env_val(
+                    "PATH",
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin",
+                ),
+            ],
+            params,
+        ]
+        .concat(),
+        extra_volumes: host
+            .iter()
+            .map(|(name, path, _)| {
+                ymap! {
+                    "name" => s(*name),
+                    "hostPath" => ymap! { "path" => s(*path), "type" => s("Directory") },
+                }
+            })
+            .collect(),
+        extra_mounts: host
+            .iter()
+            .map(|(name, _, at)| mount(name, at, false))
+            .collect(),
+        note: "RBLN: no registry image configured, so this borrows the target node's host \
+               rebel-compiler stack via hostPath (rbln_create_runtimes=False).",
+    }
 }
 
-/// Furiosa container execution configuration using `fxb build`.
-fn build_furiosa_container_spec(
-    model_id: &str,
-    form: &CompileForm,
-    tp: &str,
-    outdir: &str,
-) -> (String, String, String, String, &'static str, String) {
-    let pp = {
-        let p = form.get("pp");
-        if p.is_empty() {
-            "1".into()
-        } else {
-            p
-        }
-    };
-    let ml = {
-        let m = form.get("max-len");
-        if m.is_empty() {
-            "8192".into()
-        } else {
-            m
-        }
-    };
-    let dashes = model_id.replace('/', "--");
-    let cmd = format!(
-        "set -e; apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq gcc-aarch64-linux-gnu build-essential >/dev/null 2>&1; \
-         mkdir -p /work/hub/hub; \
-         if [ -d {prefetched} ]; then echo 'reuse prefetched weights from store'; cp -r {prefetched} /work/hub/hub/ && export HF_HUB_OFFLINE=1; fi; \
-         mkdir -p /work/out; fxb build {model_id} /work/out/model -tp {tp} -pp {pp} --max-model-len {ml} --concurrency 8; \
-         mkdir -p {outdir}; cp -r /work/out/. {outdir}/; echo COMPILE_DONE; ls -la {outdir}",
-        outdir = shq(outdir),
-        model_id = shq(model_id),
-        tp = shq(tp),
-        pp = shq(&pp),
-        ml = shq(&ml),
-        prefetched = shq(&format!("/mnt/store/hub/hub/models--{}", dashes))
-    );
-    (
-        "        - { name: work, emptyDir: {} }\n".to_string(),
-        "            - { name: HF_HOME, value: /work/hub }\n            - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true } } }\n".to_string(),
-        "            - { name: work, mountPath: /work }\n".to_string(),
-        format!("[\"sh\", \"-c\", \"{}\"]", yamlq(&cmd)),
-        "# Furiosa: run fxb build directly for furiosa-ai quantized checkpoints. Installs aarch64 cross-compiler, builds locally, then copies to model-store.",
-        String::new(),
-    )
-}
-
-/// Rebellions (RBLN) inline ConfigMap compile script and container execution configuration.
-fn build_rbln_container_spec(
-    name: &str,
-    ns: &str,
-    rbln_host_stack: bool,
-    envs: &[(String, String)],
-) -> (String, String, String, String, &'static str, String) {
-    let env_lines: String = envs
+/// Map compile form fields onto the RBLN_* names the optimum-rbln recipe reads.
+///
+/// Only RBLN needs this: the Furiosa recipe takes its parameters as TP/PP/MAX_LEN, set in its
+/// own plan. (The old generic arms — TENSOR_PARALLEL_SIZE and friends — were unreachable, since
+/// only the RBLN branch ever consumed this list.)
+fn rbln_param_env(form: &CompileForm) -> Vec<serde_yaml::Value> {
+    form.fields
         .iter()
-        .map(|(k, v)| {
-            format!(
-                "            - {{ name: {}, value: \"{}\" }}\n",
-                k,
-                yamlq(v)
-            )
+        .filter(|f| !f.value.is_empty() && f.value != "none")
+        .filter_map(|f| {
+            let key = match f.key.as_str() {
+                "tp" => "RBLN_TENSOR_PARALLEL_SIZE",
+                "max-len" => "RBLN_MAX_SEQ_LEN",
+                "batch" => "RBLN_BATCH_SIZE",
+                "attn" => "RBLN_ATTN_IMPL",
+                "kvpart" => "RBLN_KVCACHE_PARTITION_LEN",
+                "npu" => "RBLN_NPU",
+                "quant" => "RBLN_QUANTIZATION",
+                _ => return None,
+            };
+            Some(env_val(key, f.value.clone()))
         })
-        .collect();
-    let hf_token_env = "            - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true } } }\n";
-
-    let script_doc = format!(
-        "# RBLN compile script (inline) — create_runtimes=False, local build, then copy to model-store.\n\
-         apiVersion: v1\n\
-         kind: ConfigMap\n\
-         metadata: {{ name: {name}-script, namespace: {ns} }}\n\
-         data:\n\
-         \x20 compile.py: |\n\
-         \x20\x20\x20 import os, shutil\n\
-         \x20\x20\x20 from optimum.rbln import RBLNAutoModelForCausalLM as M\n\
-         \x20\x20\x20 g = os.environ.get; o = os.environ[\"OUTPUT\"]; loc = \"/work/out\"\n\
-         \x20\x20\x20 cfg = dict(\n\
-         \x20\x20\x20\x20\x20 rbln_npu=g(\"RBLN_NPU\", \"RBLN-CA22\"),\n\
-         \x20\x20\x20\x20\x20 rbln_num_devices=int(g(\"RBLN_TENSOR_PARALLEL_SIZE\", \"1\")),\n\
-         \x20\x20\x20\x20\x20 rbln_max_seq_len=int(g(\"RBLN_MAX_SEQ_LEN\", \"4096\")),\n\
-         \x20\x20\x20\x20\x20 rbln_batch_size=int(g(\"RBLN_BATCH_SIZE\", \"1\")))\n\
-         \x20\x20\x20 attn = g(\"RBLN_ATTN_IMPL\", \"flash_attn\")\n\
-         \x20\x20\x20 if attn:\n\
-         \x20\x20\x20\x20\x20 cfg[\"rbln_attn_impl\"] = attn\n\
-         \x20\x20\x20 if attn == \"flash_attn\":\n\
-         \x20\x20\x20\x20\x20 cfg[\"rbln_kvcache_partition_len\"] = int(g(\"RBLN_KVCACHE_PARTITION_LEN\", \"16384\"))\n\
-         \x20\x20\x20 print(\"RBLN_CONFIG\", cfg)\n\
-         \x20\x20\x20 m = M.from_pretrained(os.environ[\"MODEL_ID\"], export=True, rbln_create_runtimes=False, **cfg)\n\
-         \x20\x20\x20 m.save_pretrained(loc)\n\
-         \x20\x20\x20 os.makedirs(o, exist_ok=True)\n\
-         \x20\x20\x20 for f in os.listdir(loc):\n\
-         \x20\x20\x20\x20\x20 s = os.path.join(loc, f); d = os.path.join(o, f)\n\
-         \x20\x20\x20\x20\x20 shutil.copytree(s, d, dirs_exist_ok=True) if os.path.isdir(s) else shutil.copy2(s, d)\n\
-         \x20\x20\x20 print(\"COMPILE_DONE\", os.listdir(o))\n\
-         ---\n",
-        name = name,
-        ns = ns
-    );
-
-    let cm_vol = format!(
-        "        - {{ name: script, configMap: {{ name: {}-script }} }}\n        - {{ name: work, emptyDir: {{}} }}\n",
-        name
-    );
-
-    if rbln_host_stack {
-        let host_vols = format!(
-            "{cm}\
-             \x20       - {{ name: hp-local, hostPath: {{ path: /home/gspark/.local/lib/python3.10/site-packages, type: Directory }} }}\n\
-             \x20       - {{ name: hp-sys, hostPath: {{ path: /usr/local/lib/python3.10/dist-packages, type: Directory }} }}\n\
-             \x20       - {{ name: hp-lib, hostPath: {{ path: /usr/lib, type: Directory }} }}\n\
-             \x20       - {{ name: hp-bin, hostPath: {{ path: /usr/bin, type: Directory }} }}\n",
-            cm = cm_vol
-        );
-        let host_mounts = "            - { name: script, mountPath: /scripts, readOnly: true }\n            - { name: work, mountPath: /work }\n            - { name: hp-local, mountPath: /home/gspark/.local/lib/python3.10/site-packages }\n            - { name: hp-sys, mountPath: /host-sys }\n            - { name: hp-lib, mountPath: /host-lib }\n            - { name: hp-bin, mountPath: /host-bin }\n".to_string();
-        let host_env = "            - { name: PYTHONPATH, value: \"/home/gspark/.local/lib/python3.10/site-packages:/host-sys:/host-lib/python3/dist-packages\" }\n            - { name: LD_LIBRARY_PATH, value: \"/host-lib:/host-lib/x86_64-linux-gnu\" }\n            - { name: PATH, value: \"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-bin\" }\n";
-        let cmd = "set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq --no-install-recommends python3.10 libnuma1 libgomp1 ca-certificates tzdata >/dev/null 2>&1; ln -sf /usr/bin/python3.10 /usr/local/bin/python3; python3 /scripts/compile.py";
-        (
-            host_vols,
-            format!("{}{}{}", host_env, hf_token_env, env_lines),
-            host_mounts,
-            format!("[\"bash\", \"-c\", \"{}\"]", cmd),
-            "# RBLN: no registry image configured, so this uses the target node's host rebel-compiler stack via hostPath. create_runtimes=False.",
-            script_doc,
-        )
-    } else {
-        (
-            cm_vol,
-            format!("{}{}", hf_token_env, env_lines),
-            "            - { name: script, mountPath: /scripts, readOnly: true }\n            - { name: work, mountPath: /work }\n".to_string(),
-            "[\"python3\", \"/scripts/compile.py\"]".to_string(),
-            "# RBLN: runs the inline optimum-rbln compile script inside LMD_COMPILE_IMAGE_RBLN. create_runtimes=False.",
-            script_doc,
-        )
-    }
+        .collect()
 }

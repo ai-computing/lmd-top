@@ -1,29 +1,107 @@
 # title: compile Llama-3.1-8B-Instruct → rngd-tp8-pp1-s8192
 # Compile Job preview. Review, then apply with `kubectl apply -f -`.
-# Model meta-llama/Llama-3.1-8B-Instruct -> furiosa compile -> shared store compiled/meta-llama--Llama-3.1-8B-Instruct/furiosa/rngd-tp8-pp1-s8192.
+# Model meta-llama/Llama-3.1-8B-Instruct -> furiosa compile -> shared store compiled/meta-llama--Llama-3.1-8B-Instruct/furiosa/rngd-tp8-pp1-s8192
 # Compile-time fixed options: tp=8  pp=1  max-len=8192  batch=1  chunk=none  block=16  quant=none  devices=1
-# Furiosa: run fxb build directly for furiosa-ai quantized checkpoints. Installs aarch64 cross-compiler, builds locally, then copies to model-store.
+# Compile recipe (compile.sh), mounted at /scripts.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: compile-meta-llama--llama-3-1--8189fe-rngd-tp8-pp1-s8192-script
+  namespace: llm-serving
+data:
+  compile.sh: |
+    #!/bin/sh
+    # Furiosa RNGD ahead-of-time compile (furiosa-llm). Mounted from a ConfigMap; all input via env.
+    #
+    #   MODEL_ID        HF repo id                              (required)
+    #   OUTPUT          destination in the model store          (required)
+    #   PREFETCHED_DIR  HF cache copy in the store, if present  (optional)
+    #   TP, PP          tensor / pipeline parallel size
+    #   MAX_LEN         max model length
+    set -eu
+
+    # RNGD's control processor is ARM64: the final EDF codegen needs an aarch64 cross-compiler,
+    # which the furiosa-llm serve image does not ship.
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq gcc-aarch64-linux-gnu build-essential >/dev/null 2>&1
+
+    # HF_HOME is local scratch — the downloader fails against the SMB-backed store (os error 95).
+    mkdir -p /work/hub/hub
+    if [ -n "${PREFETCHED_DIR:-}" ] && [ -d "$PREFETCHED_DIR" ]; then
+      echo "reuse prefetched weights from store"
+      cp -r "$PREFETCHED_DIR" /work/hub/hub/
+      export HF_HUB_OFFLINE=1
+    fi
+
+    mkdir -p /work/out
+    fxb build "$MODEL_ID" /work/out/model \
+      -tp "$TP" -pp "$PP" --max-model-len "$MAX_LEN" --concurrency 8
+
+    # Only the finished artifact goes back to the store.
+    mkdir -p "$OUTPUT"
+    cp -r /work/out/. "$OUTPUT"/
+    echo COMPILE_DONE
+    ls -la "$OUTPUT"
+---
+# Furiosa: fxb build for furiosa-ai quantized checkpoints. Installs the aarch64 cross-compiler, builds in local scratch, then copies to the model store.
 apiVersion: batch/v1
 kind: Job
-metadata: { name: compile-meta-llama--llama-3-1--8189fe-rngd-tp8-pp1-s8192, namespace: llm-serving }
+metadata:
+  name: compile-meta-llama--llama-3-1--8189fe-rngd-tp8-pp1-s8192
+  namespace: llm-serving
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 3600
   template:
     spec:
       restartPolicy: Never
-      nodeSelector: {  }
       volumes:
-        - { name: store, persistentVolumeClaim: { claimName: model-store } }
-        - { name: work, emptyDir: {} }
+      - name: store
+        persistentVolumeClaim:
+          claimName: model-store
+      - name: script
+        configMap:
+          name: compile-meta-llama--llama-3-1--8189fe-rngd-tp8-pp1-s8192-script
+      - name: work
+        emptyDir: {}
       containers:
-        - name: compile
-          image: furiosaai/furiosa-llm:latest
-          resources: { requests: { cpu: "8", memory: "16Gi" } }
-          env:
-            - { name: HF_HOME, value: /work/hub }
-            - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true } } }
-          volumeMounts:
-            - { name: store, mountPath: /mnt/store }
-            - { name: work, mountPath: /work }
-          command: ["sh", "-c", "set -e; apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq gcc-aarch64-linux-gnu build-essential >/dev/null 2>&1; mkdir -p /work/hub/hub; if [ -d '/mnt/store/hub/hub/models--meta-llama--Llama-3.1-8B-Instruct' ]; then echo 'reuse prefetched weights from store'; cp -r '/mnt/store/hub/hub/models--meta-llama--Llama-3.1-8B-Instruct' /work/hub/hub/ && export HF_HUB_OFFLINE=1; fi; mkdir -p /work/out; fxb build 'meta-llama/Llama-3.1-8B-Instruct' /work/out/model -tp '8' -pp '1' --max-model-len '8192' --concurrency 8; mkdir -p '/mnt/store/compiled/meta-llama--Llama-3.1-8B-Instruct/furiosa/rngd-tp8-pp1-s8192'; cp -r /work/out/. '/mnt/store/compiled/meta-llama--Llama-3.1-8B-Instruct/furiosa/rngd-tp8-pp1-s8192'/; echo COMPILE_DONE; ls -la '/mnt/store/compiled/meta-llama--Llama-3.1-8B-Instruct/furiosa/rngd-tp8-pp1-s8192'"]
+      - name: compile
+        image: furiosaai/furiosa-llm:latest
+        command:
+        - sh
+        - /scripts/compile.sh
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        - name: MODEL_STORE
+          value: /mnt/store
+        - name: MODEL_ID
+          value: meta-llama/Llama-3.1-8B-Instruct
+        - name: OUTPUT
+          value: /mnt/store/compiled/meta-llama--Llama-3.1-8B-Instruct/furiosa/rngd-tp8-pp1-s8192
+        - name: HF_HOME
+          value: /work/hub
+        - name: PREFETCHED_DIR
+          value: /mnt/store/hub/hub/models--meta-llama--Llama-3.1-8B-Instruct
+        - name: TP
+          value: '8'
+        - name: PP
+          value: '1'
+        - name: MAX_LEN
+          value: '8192'
+        resources:
+          requests:
+            cpu: '8'
+            memory: 16Gi
+        volumeMounts:
+        - name: store
+          mountPath: /mnt/store
+        - name: script
+          mountPath: /scripts
+          readOnly: true
+        - name: work
+          mountPath: /work
