@@ -1094,7 +1094,14 @@ fn ui_loop(
                     if k.kind != KeyEventKind::Press {
                         continue;
                     }
-                    // Filter input mode: capture text
+                    // One source of truth for who owns this key: the topmost open overlay,
+                    // by Overlay::PRECEDENCE. Each block below asserts *which* overlay it is
+                    // rather than merely "mine is open", so the dispatch order cannot drift
+                    // from the declared z-order — which is how the compile options form came
+                    // to consume keys while its destination picker was the visible window.
+                    let top = ui::Overlay::top(&app);
+
+                    // Filter input mode: capture text (a mode on the view, not an overlay).
                     if app.filtering {
                         match k.code {
                             KeyCode::Esc | KeyCode::Enter => app.stop_filter(),
@@ -1105,7 +1112,7 @@ fn ui_loop(
                         continue;
                     }
                     // Command palette (`:`) — text capture + fuzzy selection. Enter runs, Esc closes.
-                    if app.palette.is_some() {
+                    if top == Some(ui::Overlay::Palette) {
                         let action = match k.code {
                             KeyCode::Esc => {
                                 app.palette = None;
@@ -1137,12 +1144,12 @@ fn ui_loop(
                         continue;
                     }
                     // Help overlay: any key closes it
-                    if app.help {
+                    if top == Some(ui::Overlay::Help) {
                         app.help = false;
                         continue;
                     }
                     // Quit confirmation: opened by q in the background. Keep it separate from mutation confirms.
-                    if app.exit_confirm {
+                    if top == Some(ui::Overlay::ExitConfirm) {
                         match k.code {
                             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => break,
                             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -1154,7 +1161,7 @@ fn ui_loop(
                         continue;
                     }
                     // Mutation confirm (y/n) — other keys ignored. Execution happens here (permission check at trigger time).
-                    if let Some(pending) = app.confirm.clone() {
+                    if let Some(pending) = app.confirm.clone().filter(|_| top == Some(ui::Overlay::Confirm)) {
                         // Only for Apply confirms: e=edit in vi, v=server dry-run validation (YAML reachable only via specific keys).
                         if let Pending::Apply { yaml, title } = &pending {
                             match k.code {
@@ -1225,7 +1232,7 @@ fn ui_loop(
                         continue;
                     }
                     // Alert history overlay: esc/q/A closes it.
-                    if app.alerts_panel {
+                    if top == Some(ui::Overlay::Alerts) {
                         match k.code {
                             KeyCode::Esc
                             | KeyCode::Char('q')
@@ -1236,7 +1243,7 @@ fn ui_loop(
                         continue;
                     }
                     // Action menu — ↑↓/jk select, Enter/key runs, q/Esc closes.
-                    if app.action_menu.is_some() {
+                    if top == Some(ui::Overlay::ActionMenu) {
                         let act = match k.code {
                             KeyCode::Esc | KeyCode::Char('q') => {
                                 app.action_menu = None;
@@ -1262,12 +1269,12 @@ fn ui_loop(
                         continue;
                     }
                     // Serving objective edit form overlay.
-                    if app.objective_form.is_some() {
+                    if top == Some(ui::Overlay::ObjectiveForm) {
                         handle_edit_form!(app, objective_form, objective_form_submit, k.code);
                         continue;
                     }
                     // Route edit form (rename text / retarget selection).
-                    if app.route_form.is_some() {
+                    if top == Some(ui::Overlay::RouteForm) {
                         let rename = app.route_form.as_ref().unwrap().rename;
                         match k.code {
                             KeyCode::Esc => app.route_form = None,
@@ -1320,7 +1327,7 @@ fn ui_loop(
                     }
                     // Placement/Destination picker (deploy/compile/prefetch 2단계) — 후보 노드/PVC 상태 목록.
                     // Overlay::PRECEDENCE 순서와 일치: 자식 picker 가 열려있으면 부모 폼보다 먼저 키를 소비해야 함.
-                    if app.place_picker.is_some() {
+                    if top == Some(ui::Overlay::PlacePicker) {
                         match k.code {
                             KeyCode::Up | KeyCode::Char('k') => app.place_pick_move(-1),
                             KeyCode::Down | KeyCode::Char('j') => app.place_pick_move(1),
@@ -1331,7 +1338,7 @@ fn ui_loop(
                         continue;
                     }
                     // NPU compile options form overlay. Enter(옵션 확정) → 목적지 노드 picker(2단계).
-                    if app.compile_form.is_some() {
+                    if top == Some(ui::Overlay::CompileForm) {
                         let editing = app.compile_form.as_ref().unwrap().editing;
                         if !editing && matches!(k.code, KeyCode::Enter) {
                             app.open_compile_dest_picker();
@@ -1341,7 +1348,7 @@ fn ui_loop(
                         continue;
                     }
                     // Prefetch form. Enter(옵션 확정) → 목적지 PVC picker(2단계).
-                    if app.prefetch_form.is_some() {
+                    if top == Some(ui::Overlay::PrefetchForm) {
                         let editing = app.prefetch_form.as_ref().unwrap().editing;
                         if !editing && matches!(k.code, KeyCode::Enter) {
                             app.open_prefetch_dest_picker();
@@ -1351,7 +1358,7 @@ fn ui_loop(
                         continue;
                     }
                     // Deploy/serving options form overlay.
-                    if app.deploy_form.is_some() {
+                    if top == Some(ui::Overlay::DeployForm) {
                         // 옵션을 다 고른 뒤 Enter → placement 선택 화면(다음 단계) → 거기서 매니페스트.
                         let editing = app.deploy_form.as_ref().unwrap().editing;
                         if !editing && matches!(k.code, KeyCode::Enter) {
@@ -1362,7 +1369,7 @@ fn ui_loop(
                         continue;
                     }
                     // Preview overlay — generated manifests support validate/apply/save, read-only YAML supports save.
-                    if app.preview.is_some() {
+                    if top == Some(ui::Overlay::Preview) {
                         match k.code {
                             KeyCode::Esc | KeyCode::Char('q') => app.preview = None,
                             KeyCode::Up | KeyCode::Char('k') => {
@@ -1434,7 +1441,7 @@ fn ui_loop(
                         continue;
                     }
                     // Logs overlay.
-                    if app.logs_mode {
+                    if top == Some(ui::Overlay::Logs) {
                         match k.code {
                             KeyCode::Esc | KeyCode::Char('q') => app.logs_mode = false,
                             KeyCode::Up | KeyCode::Char('k') => {
@@ -2051,6 +2058,39 @@ mod tests {
         app.compile_form = None;
         super::scroll_wheel(&mut app, 1);
         assert_ne!(app.selected, 1, "with no overlay the wheel moves the list");
+    }
+
+    /// Every overlay must have a dispatch arm, and each arm must name the overlay it handles.
+    /// Without this a new overlay silently falls through to the background keymap, or — as in
+    /// BUG-18 — a hand-ordered chain of "is mine open?" checks disagrees with the z-order and
+    /// the wrong window consumes the keys.
+    #[test]
+    fn every_overlay_has_a_dispatch_arm_naming_it() {
+        // Only the real code — this test's own literals would otherwise match themselves.
+        let full = include_str!("main.rs");
+        let src = &full[..full.find("\n#[cfg(test)]").unwrap_or(full.len())];
+        for overlay in crate::ui::Overlay::PRECEDENCE {
+            let arm = format!("Some(ui::Overlay::{:?})", overlay);
+            assert!(
+                src.contains(&arm),
+                "no input dispatch arm for {:?} — add one, or it will never receive keys",
+                overlay
+            );
+        }
+        // And nothing dispatches on bare field presence any more, which is what allowed the
+        // order to drift.
+        for stale in [
+            "if app.compile_form.is_some() {",
+            "if app.place_picker.is_some() {",
+            "if app.preview.is_some() {",
+            "if app.logs_mode {",
+        ] {
+            assert!(
+                !src.contains(stale),
+                "input dispatch still keys off field presence: {}",
+                stale
+            );
+        }
     }
 
     /// BUG-02 (REG-01): while any overlay is open the wheel must not reach the background list.
