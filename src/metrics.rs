@@ -108,7 +108,7 @@ pub const DEPS: &[(&str, &str, &str)] = &[
 /// construction a metric doctor checks, and vice versa.
 pub fn coverage() -> Vec<(&'static str, &'static str, &'static str)> {
     let mut out: Vec<(&str, &str, &str)> = Vec::new();
-    for pack in crate::accel::PACKS {
+    for pack in crate::accel::packs() {
         for series in pack.series {
             out.push((pack.family, series.metric, series.missing));
         }
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn coverage_includes_every_series_the_packs_declare() {
         let covered = known_metrics();
-        for pack in crate::accel::PACKS {
+        for pack in crate::accel::packs() {
             for series in pack.series {
                 assert!(
                     covered.contains(series.metric),

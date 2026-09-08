@@ -28,7 +28,7 @@ pub async fn run(cfg: &Config) {
                 .filter(|j| {
                     // Accelerator exporter names come from the packs; "node" covers the host.
                     let l = j.to_lowercase();
-                    crate::accel::PACKS
+                    crate::accel::packs()
                         .iter()
                         .any(|p| l.contains(p.exporter))
                         || l.contains("node")

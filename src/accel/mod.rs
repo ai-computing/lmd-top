@@ -91,6 +91,7 @@ pub enum Field {
 }
 
 /// One Prometheus series backing a [`Field`].
+#[derive(Debug)]
 pub struct Series {
     pub field: Field,
     pub metric: &'static str,
@@ -101,6 +102,7 @@ pub struct Series {
 }
 
 /// Which labels identify a device in this vendor's series.
+#[derive(Debug)]
 pub struct Labels {
     /// Label joining a device's series together (usually a UUID).
     pub key: &'static str,
@@ -128,6 +130,7 @@ pub enum Health {
 /// Absent capabilities are `None`/`false` rather than a zero reading. That distinction matters:
 /// writing `throttle: 0.0` for hardware that does not report throttling is indistinguishable
 /// from "never throttled", so the UI cannot tell you which it is looking at.
+#[derive(Debug)]
 pub struct Caps {
     /// Needs (and supports) an ahead-of-time compile step. GPUs serve HF weights directly, so
     /// a GPU compile is not a rejected request — it is not representable.
@@ -146,6 +149,7 @@ pub struct Caps {
 }
 
 /// Serving/scheduling identity in Kubernetes.
+#[derive(Debug)]
 pub struct Scheduling {
     /// Extended resource name requested per device.
     pub resource_key: &'static str,
@@ -156,6 +160,7 @@ pub struct Scheduling {
 }
 
 /// One accelerator family.
+#[derive(Debug)]
 pub struct Pack {
     /// Canonical id used in forms, manifest paths and `--vendor`.
     pub id: &'static str,
@@ -189,33 +194,347 @@ impl Pack {
     }
 }
 
-/// Every known accelerator. Adding one means adding its module and a line here.
-pub static PACKS: &[&Pack] = &[&rbln::PACK, &furiosa::PACK, &nvidia::PACK];
+/// Accelerators compiled into the binary. Adding one means adding its module and a line here.
+static BUILTIN: &[&Pack] = &[&rbln::PACK, &furiosa::PACK, &nvidia::PACK];
+
+/// Every accelerator this run knows about: the built-ins plus any declared in
+/// `~/.config/lmd-top/accelerators/*.yaml`.
+///
+/// The data half of a pack is just declarations — metric names, units, label spellings,
+/// resource keys — so an accelerator whose telemetry is shaped like an existing one needs no
+/// rebuild. Same precedent as `npu-compat.json` and `catalog/*.yaml`. Anything code-shaped
+/// (a compile recipe, a memory model) still needs a built-in pack; a runtime pack that claims
+/// `compile: true` is rejected at load rather than silently borrowing another vendor's recipe.
+pub fn packs() -> &'static [&'static Pack] {
+    static ALL: std::sync::OnceLock<Vec<&'static Pack>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all: Vec<&'static Pack> = BUILTIN.to_vec();
+        for pack in load_config_packs() {
+            // A config pack must not shadow a built-in: those carry code (recipes, memory
+            // models) that a declaration cannot replace.
+            if all
+                .iter()
+                .any(|p| p.id == pack.id || p.aliases.contains(&pack.id))
+            {
+                continue;
+            }
+            all.push(Box::leak(Box::new(pack)));
+        }
+        all
+    })
+}
 
 /// Look up by canonical id or alias — the single place `--vendor` spellings are resolved.
 pub fn by_id(name: &str) -> Option<&'static Pack> {
     let lower = name.to_lowercase();
-    PACKS
+    packs()
         .iter()
         .copied()
         .find(|p| p.id == lower || p.aliases.contains(&lower.as_str()))
 }
 
 /// Look up by the accelerator kind carried on collected devices.
+/// Pack for a collected device's class. Falls back to the GPU pack rather than panicking:
+/// a device can only carry a kind that some pack produced, but a stale kind must not take the
+/// whole UI down mid-render.
 pub fn by_kind(kind: AccelKind) -> &'static Pack {
-    PACKS
-        .iter()
+    let all = packs();
+    all.iter()
         .copied()
         .find(|p| p.kind == kind)
-        .expect("every AccelKind has a pack")
+        .unwrap_or_else(|| all.iter().copied().find(|p| p.kind == AccelKind::Gpu).unwrap_or(all[0]))
 }
 
 /// Packs that support an ahead-of-time compile (the ones a compile form can target).
 pub fn compilable() -> impl Iterator<Item = &'static Pack> {
-    PACKS
+    packs()
         .iter()
         .copied()
         .filter(|p| p.caps.compiles_ahead_of_time)
+}
+
+
+// ── Runtime packs ────────────────────────────────────────────────────────────────────────
+//
+// A YAML declaration of the data half of a pack. Deliberately not `#[derive(Deserialize)]`
+// on `Pack` itself: `Pack` holds `&'static str` for zero-cost lookup everywhere else, and the
+// conversion is where a malformed declaration gets rejected with a reason.
+
+#[derive(serde::Deserialize)]
+struct PackFile {
+    id: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    label: String,
+    #[serde(default)]
+    display: String,
+    /// Which built-in device class this reports as: gpu | rbln | rngd.
+    kind: String,
+    #[serde(default)]
+    engine: String,
+    #[serde(default)]
+    exporter: String,
+    #[serde(default)]
+    family: String,
+    #[serde(default)]
+    accent: usize,
+    labels: LabelsFile,
+    series: Vec<SeriesFile>,
+    #[serde(default)]
+    resource_key: String,
+    #[serde(default)]
+    product_label: Option<(String, String)>,
+    #[serde(default)]
+    route_segment: String,
+    #[serde(default)]
+    max_tensor_parallel: Option<u32>,
+    #[serde(default)]
+    serving_tp_unit: Option<String>,
+    #[serde(default)]
+    unified_memory: bool,
+    /// `zero-is-healthy` | `non-zero-is-alive`; omit when the hardware reports no health.
+    #[serde(default)]
+    health: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct LabelsFile {
+    key: String,
+    id: String,
+    node: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    busy: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SeriesFile {
+    field: String,
+    metric: String,
+    unit: String,
+    #[serde(default)]
+    agg: Option<String>,
+    #[serde(default)]
+    missing: String,
+}
+
+/// Leak a `String` into a `&'static str`. Packs live for the process, and the alternative is
+/// threading a lifetime through every lookup for a handful of short strings loaded once.
+fn intern(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+fn parse_field(name: &str) -> Option<Field> {
+    Some(match name {
+        "util" => Field::Util,
+        "temp" => Field::Temp,
+        "power" => Field::Power,
+        "mem_used" => Field::MemUsed,
+        "mem_total" => Field::MemTotal,
+        "health" => Field::Health,
+        "throttle" => Field::Throttle,
+        "mem_bandwidth" => Field::MemBandwidth,
+        "clock_mhz" => Field::ClockMhz,
+        "mem_temp" => Field::MemTemp,
+        "energy" => Field::Energy,
+        _ => return None,
+    })
+}
+
+fn parse_unit(name: &str) -> Option<Unit> {
+    Some(match name {
+        "percent" => Unit::Percent,
+        "ratio" => Unit::Ratio,
+        "bytes" => Unit::Bytes,
+        "mib" => Unit::Mib,
+        "celsius" => Unit::Celsius,
+        "watt" => Unit::Watt,
+        "millijoule" => Unit::Millijoule,
+        "count" => Unit::Count,
+        _ => return None,
+    })
+}
+
+impl PackFile {
+    /// Validate and convert. `Err` carries a message the caller prints — a bad declaration
+    /// should say what is wrong, not vanish.
+    fn into_pack(self, slot: u16) -> Result<Pack, String> {
+        // A declared accelerator gets its own device class. Naming a built-in one would make
+        // `by_kind` ambiguous, so it is refused rather than silently shadowing that vendor's
+        // colour, capabilities and label.
+        let kind = match self.kind.as_str() {
+            "" | "custom" => AccelKind::Other(slot),
+            claimed @ ("gpu" | "rbln" | "rngd" | "furiosa") => {
+                return Err(format!(
+                    "kind '{}' belongs to a built-in accelerator; omit `kind` (or use \
+                     `custom`) so this pack gets its own device class",
+                    claimed
+                ))
+            }
+            other => return Err(format!("unknown kind '{}' (omit it, or `custom`)", other)),
+        };
+        if self.id.is_empty() || self.labels.key.is_empty() {
+            return Err("id and labels.key are required".into());
+        }
+        // Same invariant the built-ins are tested for: a per-node ordinal cannot identify a
+        // device across nodes (BUG-19).
+        if self.labels.key == self.labels.id {
+            return Err(format!(
+                "labels.key ({}) must be a unique device identifier, not the display index",
+                self.labels.key
+            ));
+        }
+        let mut series = Vec::new();
+        for sf in self.series {
+            let field = parse_field(&sf.field)
+                .ok_or_else(|| format!("unknown field '{}'", sf.field))?;
+            let unit =
+                parse_unit(&sf.unit).ok_or_else(|| format!("unknown unit '{}'", sf.unit))?;
+            let agg = match sf.agg.as_deref().unwrap_or("max") {
+                "max" => Agg::Max,
+                "avg" => Agg::Avg,
+                "sum" => Agg::Sum,
+                other => return Err(format!("unknown agg '{}'", other)),
+            };
+            series.push(Series {
+                field,
+                metric: intern(sf.metric),
+                unit,
+                agg,
+                missing: intern(if sf.missing.is_empty() {
+                    format!("{} unavailable", sf.field)
+                } else {
+                    sf.missing
+                }),
+            });
+        }
+        if !series.iter().any(|s| s.field == Field::Util) {
+            return Err("a util series is required".into());
+        }
+        let health = match self.health.as_deref() {
+            None => None,
+            Some("zero-is-healthy") => Some(Health::ZeroIsHealthy),
+            Some("non-zero-is-alive") => Some(Health::NonZeroIsAlive),
+            Some(other) => return Err(format!("unknown health '{}'", other)),
+        };
+        if health.is_some() != series.iter().any(|s| s.field == Field::Health) {
+            return Err("health and its series must both be present or both absent".into());
+        }
+        let id = intern(self.id);
+        Ok(Pack {
+            id,
+            aliases: Box::leak(
+                self.aliases
+                    .into_iter()
+                    .map(intern)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            label: intern(if self.label.is_empty() {
+                id.to_uppercase()
+            } else {
+                self.label
+            }),
+            display: intern(if self.display.is_empty() {
+                id.to_string()
+            } else {
+                self.display
+            }),
+            kind,
+            engine: intern(if self.engine.is_empty() {
+                "vLLM".to_string()
+            } else {
+                self.engine
+            }),
+            exporter: intern(if self.exporter.is_empty() {
+                id.to_string()
+            } else {
+                self.exporter
+            }),
+            accent: self.accent,
+            family: intern(if self.family.is_empty() {
+                id.to_uppercase()
+            } else {
+                self.family
+            }),
+            labels: Labels {
+                key: intern(self.labels.key),
+                id: intern(self.labels.id),
+                node: intern(self.labels.node),
+                model: self.labels.model.map(intern),
+                busy: self.labels.busy.map(intern),
+            },
+            series: Box::leak(series.into_boxed_slice()),
+            caps: Caps {
+                // Declarations cannot carry a compile recipe, so a runtime pack never claims
+                // an ahead-of-time build — it would otherwise inherit another vendor's script.
+                compiles_ahead_of_time: false,
+                health,
+                throttle: false,
+                energy: false,
+                unified_memory: self.unified_memory,
+                serving_tp_unit: self.serving_tp_unit.map(intern),
+                max_tensor_parallel: self.max_tensor_parallel,
+            },
+            scheduling: Scheduling {
+                resource_key: intern(if self.resource_key.is_empty() {
+                    format!("{}/device", id)
+                } else {
+                    self.resource_key
+                }),
+                product_label: self
+                    .product_label
+                    .map(|(k, v)| (intern(k), intern(v))),
+                route_segment: intern(if self.route_segment.is_empty() {
+                    id.to_string()
+                } else {
+                    self.route_segment
+                }),
+            },
+        })
+    }
+}
+
+/// Where runtime packs live. Absent directory is the normal case, not an error.
+fn config_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::Path::new(&home).join(".config/lmd-top/accelerators"))
+}
+
+fn load_config_packs() -> Vec<Pack> {
+    let Some(dir) = config_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("yaml") | Some("yml")
+            )
+        })
+        .collect();
+    files.sort(); // deterministic order
+    let mut out = Vec::new();
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let slot = out.len() as u16;
+        match serde_yaml::from_str::<PackFile>(&text).map_err(|e| e.to_string()) {
+            Ok(pf) => match pf.into_pack(slot) {
+                Ok(pack) => out.push(pack),
+                Err(why) => eprintln!("lmd-top: ignoring {}: {}", path.display(), why),
+            },
+            Err(why) => eprintln!("lmd-top: ignoring {}: {}", path.display(), why),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -225,7 +544,7 @@ mod tests {
     #[test]
     fn ids_and_aliases_are_unique_and_resolvable() {
         let mut seen = std::collections::BTreeSet::new();
-        for p in PACKS {
+        for p in BUILTIN {
             assert!(seen.insert(p.id), "duplicate pack id {}", p.id);
             for a in p.aliases {
                 assert!(seen.insert(a), "alias {} collides", a);
@@ -241,7 +560,7 @@ mod tests {
     #[test]
     fn every_kind_has_exactly_one_pack() {
         for kind in [AccelKind::Gpu, AccelKind::Rbln, AccelKind::Rngd] {
-            let matching: Vec<&str> = PACKS
+            let matching: Vec<&str> = BUILTIN
                 .iter()
                 .filter(|p| p.kind == kind)
                 .map(|p| p.id)
@@ -269,7 +588,7 @@ mod tests {
     /// colours, sparklines and the placement solver's idea of "free".
     #[test]
     fn every_pack_reports_utilisation_in_percent() {
-        for p in PACKS {
+        for p in BUILTIN {
             let s = p
                 .series_for(Field::Util)
                 .unwrap_or_else(|| panic!("{} declares no Util series", p.id));
@@ -287,7 +606,7 @@ mod tests {
     /// A capability and the series backing it must agree, or the UI shows a zero it cannot explain.
     #[test]
     fn caps_match_declared_series() {
-        for p in PACKS {
+        for p in BUILTIN {
             assert_eq!(
                 p.caps.health.is_some(),
                 p.series_for(Field::Health).is_some(),
@@ -324,7 +643,7 @@ mod tests {
     /// node's temperature/power was reported for the other (a 67 °C device read as 44 °C).
     #[test]
     fn join_keys_are_globally_unique_identifiers() {
-        for p in PACKS {
+        for p in BUILTIN {
             assert_ne!(
                 p.labels.key, p.labels.id,
                 "{}: the join key must be a unique device identifier, not the display index — \
@@ -340,10 +659,88 @@ mod tests {
         }
     }
 
+    // ── Runtime pack loader ──
+    fn parse(yaml: &str) -> Result<Pack, String> {
+        serde_yaml::from_str::<PackFile>(yaml)
+            .map_err(|e| e.to_string())
+            .and_then(|pf| pf.into_pack(0))
+    }
+
+    const MINIMAL: &str = "id: tpu\nlabel: TPU\nkind: custom\n\
+        labels: { key: uuid, id: chip, node: hostname }\n\
+        series: [ { field: util, metric: tpu_util, unit: ratio, agg: avg } ]\n";
+
+    #[test]
+    fn declared_pack_loads_and_defaults_sensibly() {
+        let p = parse(MINIMAL).expect("minimal declaration loads");
+        assert_eq!(p.id, "tpu");
+        assert_eq!(p.kind, AccelKind::Other(0));
+        // Unset fields fall back to something usable rather than empty.
+        assert_eq!(p.scheduling.resource_key, "tpu/device");
+        assert_eq!(p.scheduling.route_segment, "tpu");
+        assert_eq!(p.engine, "vLLM");
+        let util = p.series_for(Field::Util).expect("util series");
+        assert_eq!(util.unit, Unit::Ratio);
+        assert_eq!(util.agg, Agg::Avg);
+        // A declaration carries no recipe, so it never claims an ahead-of-time build.
+        assert!(!p.caps.compiles_ahead_of_time);
+    }
+
+    #[test]
+    fn declared_pack_validation_rejects_with_a_reason() {
+        let cases = [
+            // Claiming a built-in class would make by_kind ambiguous.
+            ("kind: custom", "kind: gpu", "built-in"),
+            // A per-node ordinal cannot identify a device (BUG-19).
+            (
+                "labels: { key: uuid, id: chip, node: hostname }",
+                "labels: { key: chip, id: chip, node: hostname }",
+                "unique device identifier",
+            ),
+            // Unknown vocabulary should name the offending value.
+            (
+                "unit: ratio, agg: avg",
+                "unit: furlongs, agg: avg",
+                "unknown unit",
+            ),
+            ("field: util", "field: vibes", "unknown field"),
+        ];
+        for (from, to, expect) in cases {
+            let err = parse(&MINIMAL.replace(from, to))
+                .expect_err(&format!("{:?} should be rejected", to));
+            assert!(
+                err.contains(expect),
+                "rejecting {:?} should mention {:?}, said: {}",
+                to,
+                expect,
+                err
+            );
+        }
+        // A util series is mandatory — everything downstream keys off it.
+        let no_util = MINIMAL.replace("field: util", "field: temp").replace("unit: ratio", "unit: celsius");
+        assert!(parse(&no_util).unwrap_err().contains("util series"));
+        // Health and its series must agree, exactly as for the built-ins.
+        let bad_health = format!("{}health: zero-is-healthy\n", MINIMAL);
+        assert!(parse(&bad_health).unwrap_err().contains("health"));
+    }
+
+    #[test]
+    fn declared_pack_cannot_shadow_a_builtin_id() {
+        // `packs()` skips a declaration reusing a built-in id or alias; check the predicate
+        // that guards it, since the loader reads the real filesystem.
+        for p in BUILTIN {
+            assert!(
+                BUILTIN.iter().any(|b| b.id == p.id || b.aliases.contains(&p.id)),
+                "{} should be recognised as taken",
+                p.id
+            );
+        }
+    }
+
     #[test]
     fn scheduling_keys_are_distinct() {
         let mut keys = std::collections::BTreeSet::new();
-        for p in PACKS {
+        for p in BUILTIN {
             assert!(
                 keys.insert(p.scheduling.resource_key),
                 "{} reuses resource key {}",
