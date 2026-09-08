@@ -6,6 +6,8 @@
 //! (선택한 안전 모델: "점검 + 가이드된 apply" — 위험 항목은 절대 자동 합성/적용하지 않는다.)
 
 use super::*;
+use crate::manifest::{s, seq, Doc, Manifest};
+use crate::ymap;
 
 /// 상류 릴리스 매니페스트 URL — 이 클러스터의 실제 설치 레시피(scripts/02, GIE GA)와 일치.
 /// (Gateway API v1.2.0 = Cilium 1.16 호환 standard 채널)
@@ -88,10 +90,13 @@ impl SetupCheck {
 
 impl App {
     fn ns_manifest(&self) -> String {
-        format!(
-            "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {ns}\n",
-            ns = self.ns
-        )
+        Manifest::new()
+            .push(Doc::new(ymap! {
+                "apiVersion" => s("v1"),
+                "kind" => s("Namespace"),
+                "metadata" => ymap! { "name" => s(&self.ns) },
+            }))
+            .to_yaml()
     }
 
     /// 사용 가능한 GatewayClass 중 선택 — cilium 우선(이 클러스터 CNI), 없으면 첫 번째.
@@ -104,21 +109,27 @@ impl App {
     }
 
     fn gateway_manifest(&self, class: &str) -> String {
-        format!(
-            "apiVersion: gateway.networking.k8s.io/v1\n\
-             kind: Gateway\n\
-             metadata:\n  name: llm-d-gateway\n  namespace: {ns}\n\
-             spec:\n  gatewayClassName: {class}\n\
-             \x20 listeners:\n\
-             \x20   - name: http\n\
-             \x20     port: 80\n\
-             \x20     protocol: HTTP\n\
-             \x20     allowedRoutes:\n\
-             \x20       namespaces:\n\
-             \x20         from: Same\n",
-            ns = self.ns,
-            class = class
-        )
+        Manifest::new()
+            .push(Doc::new(ymap! {
+                "apiVersion" => s("gateway.networking.k8s.io/v1"),
+                "kind" => s("Gateway"),
+                "metadata" => ymap! {
+                    "name" => s("llm-d-gateway"),
+                    "namespace" => s(&self.ns),
+                },
+                "spec" => ymap! {
+                    "gatewayClassName" => s(class),
+                    "listeners" => seq(vec![ymap! {
+                        "name" => s("http"),
+                        "port" => serde_yaml::Value::from(80),
+                        "protocol" => s("HTTP"),
+                        "allowedRoutes" => ymap! {
+                            "namespaces" => ymap! { "from" => s("Same") },
+                        },
+                    }]),
+                },
+            }))
+            .to_yaml()
     }
 
     /// 부트스트랩 전제조건 점검 목록(카테고리 순). Setup 뷰가 이걸 렌더하고, ⏎(setup_enter)로 조치.

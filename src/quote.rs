@@ -1,53 +1,13 @@
-//! Escaping and validation for values interpolated into generated manifests.
+//! Validation for model identifiers arriving from users and from the network.
 //!
-//! Manifests are assembled as text, so every user- or network-sourced string crosses two
-//! boundaries: YAML (a double-quoted scalar) and, for `sh -c` jobs, the shell. Before this
-//! module both were unescaped — a model id with `"` or a newline produced a manifest that would
-//! not parse, and one with `;` injected commands into the compile Job's command line (BUG-06).
-//! The Zoo view pulls model ids straight off the Hugging Face API, so those strings are remote
-//! input, not just the operator's own typing.
+//! The Zoo view pulls model ids straight off the Hugging Face API, so these strings are remote
+//! input, not just the operator's own typing, and they end up naming Kubernetes objects and
+//! store paths. Rejecting a malformed id at the boundary is better than carrying it further:
+//! manifests are serialized (see `crate::manifest`), so a hostile value can no longer become
+//! YAML or shell syntax, but a string that is not a model id is still not something to deploy.
 //!
-//! Three layers, in order of preference:
-//!   1. `valid_model_id` — reject malformed ids at the boundary (ingestion + form submit).
-//!   2. `yamlq` — escape whatever reaches a YAML double-quoted scalar.
-//!   3. `shq` — single-quote whatever reaches a shell word.
-
-/// Escape a string for a YAML double-quoted scalar (the `"…"` is *not* included).
-/// Backslash and quote are escaped; control characters become escapes so a newline can never
-/// end the scalar early and turn the rest of the value into stray YAML.
-pub fn yamlq(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32))
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Quote a string as a single POSIX shell word. Single quotes protect everything;
-/// an embedded `'` is closed, escaped, and reopened (`'\''`).
-pub fn shq(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
-}
+//! This used to also hold `yamlq`/`shq` escaping helpers. Serializing the manifests removed
+//! every caller — there is no longer a place where a value is spliced into text.
 
 /// Is this a Hugging Face repo id (`name` or `org/name`) or an absolute local path?
 ///
@@ -90,43 +50,7 @@ pub fn valid_model_id(s: &str) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn yamlq_escapes_quote_and_newline() {
-        assert_eq!(yamlq("plain"), "plain");
-        assert_eq!(yamlq("a\"b"), "a\\\"b");
-        assert_eq!(yamlq("a\\b"), "a\\\\b");
-        assert_eq!(yamlq("a\nb"), "a\\nb");
-        assert_eq!(yamlq("a\u{1}b"), "a\\x01b");
-        // CJK must survive untouched (it is legal in a double-quoted scalar).
-        assert_eq!(yamlq("모델-x"), "모델-x");
-    }
 
-    #[test]
-    fn yamlq_output_parses_as_yaml() {
-        for raw in [
-            "Qwen/x\"-0.5B",
-            "Qwen/x\nbar",
-            "a: b # c",
-            "{{tpl}}",
-            "back\\slash",
-        ] {
-            let doc = format!("value: \"{}\"\n", yamlq(raw));
-            let v: serde_yaml::Value = serde_yaml::from_str(&doc)
-                .unwrap_or_else(|e| panic!("{:?} → invalid YAML: {}", raw, e));
-            assert_eq!(v["value"].as_str(), Some(raw), "round-trip for {:?}", raw);
-        }
-    }
-
-    #[test]
-    fn shq_neutralises_command_separators() {
-        assert_eq!(shq("plain"), "'plain'");
-        assert_eq!(shq("a; echo PWNED; #"), "'a; echo PWNED; #'");
-        assert_eq!(shq("it's"), "'it'\\''s'");
-        // Quoted form contains no unquoted metacharacter.
-        let q = shq("$(id); `id`; a&b|c>d");
-        assert!(q.starts_with('\'') && q.ends_with('\''));
-        assert_eq!(q.matches('\'').count(), 2);
-    }
 
     #[test]
     fn valid_model_id_accepts_real_ids() {

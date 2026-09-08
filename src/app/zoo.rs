@@ -4,6 +4,11 @@
 //! 컴파일 가능 벤더는 [[npu-compat]](src/npu-compat.json) 패밀리 지원에서 자동 판정.
 
 use super::*;
+use crate::manifest::{args, env_secret, env_val, mount, s, seq, Doc, Manifest};
+
+/// Prefetch recipe, embedded from `assets/recipes/`. Takes every parameter through the
+/// environment, so the model id and revision are never spliced into a script.
+const RECIPE_PREFETCH: &str = include_str!("../../assets/recipes/hf-prefetch.sh");
 
 impl App {
     /// 현재 Zoo 뷰(상단 패널)에서 선택된 모델(정렬·필터 반영). 하단 Activity 패널이면 None.
@@ -187,67 +192,95 @@ impl App {
             }
         };
         let revision = form.get("revision");
-        let rev_arg = if revision.trim().is_empty() || revision == "main" {
-            String::new()
-        } else {
-            format!(", revision='{}'", revision)
-        };
+        // A revision names a git ref; anything else is a typo that would only waste a Job.
+        // (It is env-passed now, so this is validation rather than escaping.)
+        if !revision.trim().is_empty()
+            && !revision
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+        {
+            self.notify_bad(format!(
+                "revision '{}' is not a valid git ref — prefetch cancelled",
+                revision
+            ));
+            return;
+        }
         let repo_dir = source.replace('/', "--");
         let name = job_name("prefetch", &repo_dir, "");
-        let ns = &self.ns;
         let hf_home = format!("/mnt/store/{}", dir.trim_matches('/'));
-        let yaml = format!(
-            "# Prefetch Job — download HF weights for {source}\n\
-             #   destination: PVC '{pvc}' at {hf_home}  (reused by compile/serve as HF_HOME)\n\
-             #   revision:    {rev}\n\
-             # Review, then apply. Progress shows in Deploy▸Zoo/Library Activity.\n\
-             apiVersion: batch/v1\n\
-             kind: Job\n\
-             metadata: {{ name: {name}, namespace: {ns}, labels: {{ app.kubernetes.io/component: prefetch }} }}\n\
-             spec:\n\
-             \x20 backoffLimit: 0\n\
-             \x20 ttlSecondsAfterFinished: 3600\n\
-             \x20 template:\n\
-             \x20   spec:\n\
-             \x20     restartPolicy: Never\n\
-             \x20     volumes:\n\
-             \x20       - {{ name: store, persistentVolumeClaim: {{ claimName: {pvc} }} }}\n\
-             \x20     containers:\n\
-             \x20       - name: prefetch\n\
-             \x20         image: python:3.10-slim\n\
-             \x20         resources: {{ requests: {{ cpu: \"2\", memory: \"4Gi\" }} }}\n\
-             \x20         env:\n\
-             \x20           - {{ name: HF_HOME, value: {hf_home} }}\n\
-             \x20           - {{ name: HF_HUB_ENABLE_HF_TRANSFER, value: \"0\" }}\n\
-             \x20           - {{ name: HF_TOKEN, valueFrom: {{ secretKeyRef: {{ name: hf-token, key: HF_TOKEN, optional: true }} }} }}\n\
-             \x20         command: [\"bash\", \"-c\"]\n\
-             \x20         args:\n\
-             \x20           - |-\n\
-             \x20             set -e\n\
-             \x20             pip install -q --no-cache-dir huggingface_hub\n\
-             \x20             pip install -q --no-cache-dir hf_transfer && export HF_HUB_ENABLE_HF_TRANSFER=1 || true\n\
-             \x20             MDIR={hf_home}/hub/models--{repo_dashes}\n\
-             \x20             TOTAL=$(python -c \"from huggingface_hub import HfApi; i=HfApi().model_info('{source}', files_metadata=True); print(sum((f.size or 0) for f in i.siblings))\" 2>/dev/null || echo 0)\n\
-             \x20             python -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id='{source}'{rev_arg})\" &\n\
-             \x20             DL=$!\n\
-             \x20             while kill -0 $DL 2>/dev/null; do\n\
-             \x20               B=$(du -sb \"$MDIR\" 2>/dev/null | cut -f1); B=${{B:-0}}\n\
-             \x20               if [ \"$TOTAL\" -gt 0 ] 2>/dev/null; then echo \"downloading {source}: $((B*100/TOTAL))% ($((B/1073741824))G/$((TOTAL/1073741824))G)\"; else echo \"downloading {source}: $(du -sh \"$MDIR\" 2>/dev/null|cut -f1) on disk\"; fi\n\
-             \x20               sleep 15\n\
-             \x20             done\n\
-             \x20             wait $DL\n\
-             \x20             echo PREFETCH_DONE {source} 100%% -> {hf_home}\n\
-             \x20         volumeMounts:\n\
-             \x20           - {{ name: store, mountPath: /mnt/store }}\n",
-            source = source,
-            name = name,
-            ns = ns,
-            pvc = pvc,
-            hf_home = hf_home,
-            repo_dashes = repo_dir,
-            rev = if revision.trim().is_empty() { "main" } else { &revision },
-            rev_arg = rev_arg,
-        );
+        let model_dir = format!("{}/hub/models--{}", hf_home, repo_dir);
+        let rev_label = if revision.trim().is_empty() {
+            "main".to_string()
+        } else {
+            revision.clone()
+        };
+        let cm_name = format!("{}-script", name);
+
+        let job = crate::ymap! {
+            "apiVersion" => s("batch/v1"),
+            "kind" => s("Job"),
+            "metadata" => crate::ymap! {
+                "name" => s(name.clone()),
+                "namespace" => s(&self.ns),
+                "labels" => crate::ymap! { "app.kubernetes.io/component" => s("prefetch") },
+            },
+            "spec" => crate::ymap! {
+                "backoffLimit" => serde_yaml::Value::from(0),
+                "ttlSecondsAfterFinished" => serde_yaml::Value::from(3600),
+                "template" => crate::ymap! {
+                    "spec" => crate::ymap! {
+                        "restartPolicy" => s("Never"),
+                        "volumes" => seq(vec![
+                            crate::ymap! {
+                                "name" => s("store"),
+                                "persistentVolumeClaim" => crate::ymap! { "claimName" => s(pvc.clone()) },
+                            },
+                            crate::ymap! {
+                                "name" => s("script"),
+                                "configMap" => crate::ymap! { "name" => s(cm_name.clone()) },
+                            },
+                        ]),
+                        "containers" => seq(vec![crate::ymap! {
+                            "name" => s("prefetch"),
+                            "image" => s("python:3.10-slim"),
+                            "command" => args(["sh", "/scripts/prefetch.sh"]),
+                            "env" => seq(vec![
+                                env_secret("HF_TOKEN", "hf-token", "HF_TOKEN", true),
+                                env_val("SOURCE", source.clone()),
+                                env_val("HF_HOME", hf_home.clone()),
+                                env_val("MODEL_DIR", model_dir),
+                                env_val("REVISION", if rev_label == "main" { String::new() } else { rev_label.clone() }),
+                                env_val("HF_HUB_ENABLE_HF_TRANSFER", "0"),
+                            ]),
+                            "resources" => crate::ymap! {
+                                "requests" => crate::ymap! { "cpu" => s("2"), "memory" => s("4Gi") },
+                            },
+                            "volumeMounts" => seq(vec![
+                                mount("store", "/mnt/store", false),
+                                mount("script", "/scripts", true),
+                            ]),
+                        }]),
+                    },
+                },
+            },
+        };
+        let config_map = crate::ymap! {
+            "apiVersion" => s("v1"),
+            "kind" => s("ConfigMap"),
+            "metadata" => crate::ymap! { "name" => s(cm_name), "namespace" => s(&self.ns) },
+            "data" => crate::ymap! { "prefetch.sh" => s(RECIPE_PREFETCH) },
+        };
+        let yaml = Manifest::new()
+            .note(format!("Prefetch Job — download HF weights for {}", source))
+            .note(format!(
+                "  destination: PVC '{}' at {}  (reused by compile/serve as HF_HOME)",
+                pvc, hf_home
+            ))
+            .note(format!("  revision:    {}", rev_label))
+            .note("Review, then apply. Progress shows in Deploy▸Zoo/Library Activity.")
+            .push(Doc::new(config_map).note("Prefetch recipe, mounted at /scripts."))
+            .push(Doc::new(job))
+            .to_yaml();
         self.confirm = Some(Pending::Apply {
             title: format!("prefetch {} → {}:{}", source, pvc, hf_home),
             yaml,
@@ -293,10 +326,46 @@ mod zoo_tests {
         a.prefetch_form_submit();
         match a.confirm {
             Some(Pending::Apply { ref yaml, ref title }) => {
-                assert!(yaml.contains("kind: Job"));
-                assert!(yaml.contains("snapshot_download"));
-                assert!(yaml.contains("/mnt/store/models"), "chosen dir reflected in HF_HOME");
-                assert!(yaml.contains("claimName: model-store"));
+                let docs: Vec<serde_yaml::Value> = serde_yaml::Deserializer::from_str(yaml)
+                    .map(|d| {
+                        <serde_yaml::Value as serde::Deserialize>::deserialize(d)
+                            .expect("prefetch manifest is valid YAML")
+                    })
+                    .filter(|v: &serde_yaml::Value| !v.is_null())
+                    .collect();
+                let job = docs
+                    .iter()
+                    .find(|d| d["kind"].as_str() == Some("Job"))
+                    .expect("a prefetch Job");
+                let cm = docs
+                    .iter()
+                    .find(|d| d["kind"].as_str() == Some("ConfigMap"))
+                    .expect("the recipe ConfigMap");
+                let recipe = cm["data"]["prefetch.sh"].as_str().expect("prefetch.sh");
+                assert!(recipe.contains("snapshot_download"), "recipe downloads the snapshot");
+                assert!(
+                    recipe.contains("os.environ[\"SOURCE\"]"),
+                    "recipe reads the repo id from the environment, not interpolation"
+                );
+                let pod = &job["spec"]["template"]["spec"];
+                let env: std::collections::BTreeMap<&str, &str> = pod["containers"][0]["env"]
+                    .as_sequence()
+                    .expect("env")
+                    .iter()
+                    .filter_map(|e| Some((e["name"].as_str()?, e["value"].as_str().unwrap_or("<ref>"))))
+                    .collect();
+                assert_eq!(
+                    env.get("HF_HOME"),
+                    Some(&"/mnt/store/models"),
+                    "chosen dir reflected in HF_HOME"
+                );
+                let claims: Vec<&str> = pod["volumes"]
+                    .as_sequence()
+                    .expect("volumes")
+                    .iter()
+                    .filter_map(|v| v["persistentVolumeClaim"]["claimName"].as_str())
+                    .collect();
+                assert_eq!(claims, vec!["model-store"]);
                 assert!(title.contains("/mnt/store/models"), "destination shown in title");
             }
             _ => panic!("prefetch should stage a Pending::Apply Job"),
