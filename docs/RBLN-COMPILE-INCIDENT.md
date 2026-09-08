@@ -145,6 +145,49 @@ $ RBLN_COMPILER_LOG_LEVEL=4
        in a deploy build (raw: "4"). Unset it or use a development build.
 ```
 
+## 검증된 스크립트를 찾았다 — 그리고 파라미터는 원인이 아니다
+
+노드 `etri-001` 에 **성공한 컴파일의 스크립트와 로그가 그대로 남아 있었다.** 처음에 봐야 했던 것이다.
+
+```python
+# ~/compile-koni-tp4.py  →  ~/rbln-KONI-Llama3.1-8B-Instruct-tp4-bs1-s8192 (동작 확인됨)
+model = RBLNAutoModelForCausalLM.from_pretrained(
+    model_id="KISTI-KONI/KONI-Llama3.1-8B-Instruct-20241024", export=True,
+    rbln_batch_size=1, rbln_max_seq_len=8192, rbln_tensor_parallel_size=4,
+    rbln_create_runtimes=False,      # NPU 실물 없이 컴파일만
+    rbln_npu="RBLN-CA22")
+```
+
+```
+# ~/compile-koni.log
+2026-06-01 01:20:19 INFO [rebel-compiler] RBLN SDK compiler version: 0.10.2
+2026-06-01 01:20:19 WARNING [rebel-compiler] Could not determine the current machine's NPU. Skipping NPU mismatch check.
+2026-06-01 01:20:19 INFO [rebel-compiler] -- Tensor parallel size: 4
+...  [+] DONE → /home/gspark/rbln-KONI-Llama3.1-8B-Instruct-tp4-bs1-s8192
+```
+
+**NPU 가 안 보이는 상태로도 컴파일이 끝났다.** 디바이스 가시성도, 이 클러스터도 원인이 아니다.
+
+### 사다리 테스트 — 내 레시피에서 검증된 스크립트까지 한 번에 한 변수씩
+
+스토어 0.10.3 툴체인, `Qwen/Qwen2.5-0.5B-Instruct`, 컨테이너:
+
+| 단 | 바꾼 것 | 결과 |
+|---|---|---|
+| 1 | 내 레시피 그대로 (`attn_impl=eager`, tp1, s2048) | `ValueError: Device 0 is not a valid NPU device` |
+| 2 | `attn_impl` 제거 | 동일한 디바이스 오류 |
+| 3 | `+ rbln_create_runtimes=False` | `_impl:946` |
+| 4 | `+ tp=4` | `_impl:946` |
+| 5 | **검증된 스크립트와 동일한 형태** (tp4, s8192, bs1, attn_impl 없음) | `_impl:946` |
+
+**파라미터는 원인이 아니다.** 이 하드웨어에서 증명된 그 설정이 0.10.3 에서 똑같이 실패한다.
+(1·2단의 디바이스 오류는 내 사다리 스크립트가 `create_runtimes=False` 를 빼서 난 것으로,
+lmd-top 레시피는 이미 `rbln_create_runtimes=False` 를 넣고 있다 — 제품 버그가 아니다.
+다만 이 오류 메시지는 "NPU 없는 곳에서 컴파일할 때 무엇을 놓치면 무슨 말이 나오는지"의 좋은 예다.)
+
+남은 변수는 **둘뿐이다: 툴체인 버전(0.10.2 vs 0.10.3), 그리고 모델.** 성공 사례는 전부
+Llama-3.1 계열 8B 였고, 내 실패는 전부 Qwen 등 다른 계열이었다.
+
 ## 결정적 사실 — 동작하는 산출물이 스스로 버전을 기록하고 있다
 
 이 클러스터에서 **실제로 동작하는** RBLN 산출물(수동 컴파일, 노드 `/home/gspark/` 아래)의
