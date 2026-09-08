@@ -550,3 +550,111 @@ mod tests {
         assert_eq!(Action::Pivot('m').verb(), "go");
     }
 }
+
+/// Masked single-value entry, for a secret typed into the TUI.
+///
+/// Separate from the option forms because the value must never be rendered: [`masked`] is the
+/// only thing the overlay draws, and the value does not travel through any preview.
+#[derive(Clone)]
+pub struct SecretForm {
+    /// Secret name to create or replace.
+    pub name: String,
+    /// Key within the secret.
+    pub key: String,
+    /// What it is for, shown in place of the value.
+    pub purpose: String,
+    /// Where to get one, shown as help.
+    pub help: String,
+    value: String,
+}
+
+impl SecretForm {
+    pub fn new(
+        name: impl Into<String>,
+        key: impl Into<String>,
+        purpose: impl Into<String>,
+        help: impl Into<String>,
+    ) -> Self {
+        SecretForm {
+            name: name.into(),
+            key: key.into(),
+            purpose: purpose.into(),
+            help: help.into(),
+            value: String::new(),
+        }
+    }
+
+    pub fn push(&mut self, c: char) {
+        // Guard against a stray control character from a paste.
+        if !c.is_control() {
+            self.value.push(c);
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        self.value.pop();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.value.trim().is_empty()
+    }
+
+    /// What the overlay draws: length only, never the characters.
+    pub fn masked(&self) -> String {
+        "•".repeat(self.value.chars().count().min(48))
+    }
+
+    /// Consume the form, yielding the value. Takes `self` so the value is moved out rather
+    /// than copied around.
+    pub fn into_value(self) -> String {
+        self.value.trim().to_string()
+    }
+}
+
+#[cfg(test)]
+mod secret_form_tests {
+    use super::SecretForm;
+
+    #[test]
+    fn never_renders_the_value() {
+        let mut f = SecretForm::new("hf-token", "token", "HuggingFace token", "hf.co/settings/tokens");
+        for c in "hf_SECRETvalue123".chars() {
+            f.push(c);
+        }
+        let shown = f.masked();
+        assert!(!shown.contains("hf_"), "masked output leaked the value: {}", shown);
+        assert!(!shown.contains("SECRET"));
+        assert_eq!(shown.chars().count(), 17, "length is shown, characters are not");
+        assert!(shown.chars().all(|c| c == '•'));
+        // Editing works.
+        f.backspace();
+        assert_eq!(f.masked().chars().count(), 16);
+        assert!(!f.is_empty());
+        assert_eq!(f.clone().into_value(), "hf_SECRETvalue12");
+    }
+
+    #[test]
+    fn rejects_control_characters_and_trims() {
+        let mut f = SecretForm::new("s", "k", "p", "h");
+        assert!(f.is_empty());
+        for c in ['\n', '\t', '\r', '\u{7}'] {
+            f.push(c);
+        }
+        assert!(f.is_empty(), "control characters from a paste must not enter the value");
+        for c in "  hf_tok  ".chars() {
+            f.push(c);
+        }
+        assert_eq!(f.into_value(), "hf_tok", "surrounding whitespace is trimmed");
+    }
+
+    /// A very long paste is clamped for display only — the value itself is kept whole.
+    #[test]
+    fn long_values_are_clamped_for_display_only() {
+        let mut f = SecretForm::new("s", "k", "p", "h");
+        for _ in 0..200 {
+            f.push('x');
+        }
+        assert_eq!(f.masked().chars().count(), 48);
+        assert_eq!(f.clone().into_value().len(), 200);
+    }
+}

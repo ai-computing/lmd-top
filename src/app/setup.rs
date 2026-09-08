@@ -49,6 +49,14 @@ pub enum SetupFix {
     Apply { title: String, yaml: String }, // lmd-top 생성 매니페스트 → 미리보기 후 a(apply)
     ApplyUrl { title: String, url: String }, // 상류 릴리스 URL → 확인 후 kubectl apply -f <url>
     Command(String),                    // 사이트 특화/helm 관리 → 명령만 안내(직접 실행)
+    /// Enter a secret in the TUI, masked, and store it. The value never reaches a preview,
+    /// the audit log, or kubectl's argv.
+    Secret {
+        name: String,
+        key: String,
+        purpose: String,
+        help: String,
+    },
 }
 impl SetupFix {
     /// Setup 표의 ACTION 열에 보일 짧은 라벨.
@@ -58,6 +66,7 @@ impl SetupFix {
             SetupFix::Apply { .. } => "⏎ review→apply",
             SetupFix::ApplyUrl { .. } => "⏎ apply (URL)",
             SetupFix::Command(_) => "⏎ show cmd",
+            SetupFix::Secret { .. } => "⏎ enter token",
         }
     }
 }
@@ -367,11 +376,16 @@ impl App {
                 "hf-token",
                 CheckState::Warn,
                 "absent — needed only for gated HF models (Llama etc.)".into(),
-                SetupFix::Command(format!(
-                    "# create the HF token secret (keep the token out of lmd-top — run this yourself):\n\
-                     kubectl create secret generic hf-token -n {ns} --from-literal=token=$HF_TOKEN",
-                    ns = self.ns
-                )),
+                // Entered in the TUI, masked. The old advice was to run kubectl yourself
+                // because the tool had nowhere safe to put a token; it does now — the value
+                // goes to kubectl over stdin, so it never reaches the process table either.
+                SetupFix::Secret {
+                    name: "hf-token".into(),
+                    key: "token".into(),
+                    purpose: "HuggingFace token".into(),
+                    help: "create one at huggingface.co/settings/tokens (read access is enough)"
+                        .into(),
+                },
             )
         });
 
@@ -423,6 +437,26 @@ impl App {
         match &c.fix {
             SetupFix::None => {
                 self.notify(format!("{}: {}", c.name, c.detail));
+            }
+            SetupFix::Secret {
+                name,
+                key,
+                purpose,
+                help,
+            } => {
+                if !self.can(Mode::Admin) {
+                    self.notify(format!(
+                        "storing a secret needs --mode admin+ (current: {})",
+                        self.mode.name()
+                    ));
+                } else {
+                    self.secret_form = Some(crate::ops::SecretForm::new(
+                        name.clone(),
+                        key.clone(),
+                        purpose.clone(),
+                        help.clone(),
+                    ));
+                }
             }
             SetupFix::Command(cmd) => {
                 let title = format!("Setup · {} — run this (read-only)", c.name);
@@ -503,7 +537,7 @@ mod tests {
         // 사이트 특화·helm 관리 → 절대 합성 apply 하지 않고 명령만
         assert!(matches!(find(&v, "EPP shared Roles").fix, SetupFix::Command(_)));
         assert!(matches!(find(&v, "model-store PVC").fix, SetupFix::Command(_)));
-        assert!(matches!(find(&v, "hf-token").fix, SetupFix::Command(_)));
+        assert!(matches!(find(&v, "hf-token").fix, SetupFix::Secret { .. }));
     }
 
     #[test]
