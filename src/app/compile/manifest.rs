@@ -148,6 +148,13 @@ pub fn build_compile_manifest(
         env_val("OUTPUT", outdir.clone()),
     ];
     env.extend(plan.extra_env.clone());
+    // Vendor debug/tuning flags, passed straight through: `LMD_COMPILE_ENV=K=V,K=V`.
+    //
+    // Vendor compilers hide their real error behind a generic exception and expose the detail
+    // only through their own flags (rebel-compiler reads RBLN_* from the environment). Without
+    // a passthrough, getting that detail meant hand-editing a generated manifest, which is
+    // exactly the kind of one-off that does not survive to the next incident.
+    env.extend(passthrough_env());
 
     let (recipe_body, recipe_key) = plan.recipe;
     let cm_name = format!("{}-script", name);
@@ -342,6 +349,27 @@ fn rbln_plan(host_stack: bool, form: &CompileForm) -> ContainerPlan {
     }
 }
 
+/// Extra environment for the compile container, from `LMD_COMPILE_ENV`.
+///
+/// Format is `KEY=VALUE,KEY=VALUE`. Keys are restricted to the shape of an environment
+/// variable name so a stray value cannot inject a different field into the manifest — the
+/// manifest is serialized, so this is validation rather than escaping.
+fn passthrough_env() -> Vec<serde_yaml::Value> {
+    let Ok(raw) = std::env::var("LMD_COMPILE_ENV") else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.trim(), v.trim()))
+        .filter(|(k, _)| {
+            !k.is_empty()
+                && k.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        })
+        .map(|(k, v)| env_val(k, v))
+        .collect()
+}
+
 /// Map compile form fields onto the RBLN_* names the optimum-rbln recipe reads.
 ///
 /// Only RBLN needs this: the Furiosa recipe takes its parameters as TP/PP/MAX_LEN, set in its
@@ -365,4 +393,93 @@ fn rbln_param_env(form: &CompileForm) -> Vec<serde_yaml::Value> {
             Some(env_val(key, f.value.clone()))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod passthrough_tests {
+    use super::*;
+
+    /// Isolate the variable — it is process-global.
+    fn with_env<T>(val: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _g = crate::audit::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        match val {
+            Some(v) => std::env::set_var("LMD_COMPILE_ENV", v),
+            None => std::env::remove_var("LMD_COMPILE_ENV"),
+        }
+        let out = f();
+        std::env::remove_var("LMD_COMPILE_ENV");
+        out
+    }
+
+    fn names(vals: &[serde_yaml::Value]) -> Vec<(String, String)> {
+        vals.iter()
+            .filter_map(|v| {
+                Some((
+                    v["name"].as_str()?.to_string(),
+                    v["value"].as_str()?.to_string(),
+                ))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unset_adds_nothing() {
+        assert!(with_env(None, passthrough_env).is_empty());
+    }
+
+    #[test]
+    fn parses_pairs_and_trims() {
+        let got = with_env(Some("RBLN_VERBOSE=debug, RBLN_DEBUG_LEVEL=1"), passthrough_env);
+        assert_eq!(
+            names(&got),
+            vec![
+                ("RBLN_VERBOSE".to_string(), "debug".to_string()),
+                ("RBLN_DEBUG_LEVEL".to_string(), "1".to_string()),
+            ]
+        );
+    }
+
+    /// A key that is not an environment variable name is dropped rather than emitted: the
+    /// manifest is data, so this is about not putting nonsense in a Job spec.
+    #[test]
+    fn rejects_malformed_keys() {
+        let got = with_env(
+            Some("ok_lower=1,SPACE KEY=2,GOOD_1=3,=4,DASH-KEY=5"),
+            passthrough_env,
+        );
+        assert_eq!(
+            names(&got),
+            vec![("GOOD_1".to_string(), "3".to_string())],
+            "only a well-formed uppercase key survives"
+        );
+    }
+
+    /// The flags reach the generated Job, which is the point.
+    #[test]
+    fn reaches_the_generated_manifest() {
+        let yaml = with_env(Some("RBLN_VERBOSE=debug"), || {
+            let mut a = crate::app::App::new();
+            a.ns = "llm-serving".into();
+            a.plan_compile_for_model("Qwen/Qwen2.5-0.5B-Instruct", "rbln", &[])
+                .expect("manifest")
+                .1
+        });
+        let job: serde_yaml::Value = serde_yaml::Deserializer::from_str(&yaml)
+            .map(|d| {
+                <serde_yaml::Value as serde::Deserialize>::deserialize(d).expect("valid YAML")
+            })
+            .find(|v: &serde_yaml::Value| v["kind"].as_str() == Some("Job"))
+            .expect("a Job");
+        let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+            .as_sequence()
+            .expect("env")
+            .clone();
+        assert!(
+            names(&env).contains(&("RBLN_VERBOSE".to_string(), "debug".to_string())),
+            "passthrough env missing from the Job: {:?}",
+            names(&env)
+        );
+    }
 }
