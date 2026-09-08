@@ -376,7 +376,9 @@ pub fn toolchain_skew(
         if orb_minor <= 11 && tf_major >= 5 {
             return Some(format!(
                 "optimum-rbln {} with transformers {} — this combination failed every compile \
-                 observed here; pin transformers <5 on the compile host",
+                 observed here. Pin transformers <5 on the compile host, or set \
+                 LMD_COMPILE_IMAGE_RBLN to a pinned image so the build stops inheriting the \
+                 node's python environment",
                 versions.get("optimum-rbln").map(String::as_str).unwrap_or("?"),
                 versions.get("transformers").map(String::as_str).unwrap_or("?"),
             ));
@@ -414,7 +416,9 @@ mod toolchain_tests {
         .collect();
         let why = toolchain_skew(&observed).expect("skew flagged");
         assert!(why.contains("transformers"), "{}", why);
-        assert!(why.contains("pin transformers <5"), "{}", why);
+        assert!(why.contains("Pin transformers <5"), "{}", why);
+        // And names the durable fix, not just the immediate one.
+        assert!(why.contains("LMD_COMPILE_IMAGE_RBLN"), "{}", why);
 
         // A supported pairing is not flagged.
         let ok: std::collections::BTreeMap<String, String> = [
