@@ -8,6 +8,9 @@
 //! - [`manifest`]: Kubernetes Job and ConfigMap manifest generation.
 //! - [`plan`]: Headless and CLI planning utilities.
 
+#[cfg(test)]
+mod golden;
+
 pub mod fields;
 pub mod fit;
 pub mod manifest;
