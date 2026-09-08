@@ -150,9 +150,13 @@ fn print_patterns(recs: &[Record]) {
     for p in &pats {
         println!("  {}", p.line());
     }
-    if pats.iter().all(|p| p.correlates.is_none()) {
+    // Only say "no option separates them" where there is actually something to separate.
+    if pats
+        .iter()
+        .any(|p| p.correlates.is_none() && p.successes > 0)
+    {
         println!(
-            "  (no option separates the failures from the successes yet — more builds will tell)"
+            "  (no option separates those failures from the successes yet — more builds will tell)"
         );
     }
 }

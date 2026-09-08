@@ -140,10 +140,16 @@ pub fn compile_preflight(
                 true,
                 "compile node: LMD_COMPILE_IMAGE_RBLN 이미지로 실행(아무 노드)".into(),
             )),
+            // Works, but inherits whatever the node's Python environment happens to be: an
+            // unrelated pip install on that host silently changes the compile toolchain, which
+            // is how every RBLN compile here came to fail against transformers 5. Flag it as a
+            // warning rather than a clean pass so the fragility is visible before the build.
             (false, Some(n)) => out.push((
                 true,
                 format!(
-                    "compile node: {} 의 rebel-compiler 호스트 스택 사용(hostPath) — 레지스트리 이미지 불필요",
+                    "⚠ compile node: {} 의 호스트 rebel-compiler 스택(hostPath) 사용 — 그 노드의 \
+                     python 환경을 그대로 물려받는다(무관한 pip install 이 컴파일을 깨뜨림). \
+                     고정하려면 LMD_COMPILE_IMAGE_RBLN 에 핀된 이미지를 지정",
                     n
                 ),
             )),

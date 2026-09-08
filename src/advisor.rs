@@ -557,6 +557,10 @@ pub struct Pattern {
     pub failures: usize,
     /// Total compiles attempted on this accelerator — the denominator.
     pub attempts: usize,
+    /// Successful compiles recorded for this accelerator. Zero changes the conclusion
+    /// entirely: with nothing that ever worked, the accelerator's compile path is broken
+    /// rather than a particular option being wrong.
+    pub successes: usize,
     /// An option `key=value` present in every one of these failures and in no success here.
     /// `None` when nothing separates them, which is the honest answer most of the time.
     pub correlates: Option<String>,
@@ -568,9 +572,16 @@ impl Pattern {
             "{}/{}: {} of {} compiles",
             self.vendor, self.kind, self.failures, self.attempts
         );
-        match &self.correlates {
-            Some(opt) => format!("{} — all of them had {}", base, opt),
-            None => base,
+        match (&self.correlates, self.successes) {
+            (Some(opt), _) => format!("{} — all of them had {}", base, opt),
+            // No success to compare against: looking for the guilty option is the wrong
+            // search. Say what the evidence actually supports.
+            (None, 0) => format!(
+                "{} — no {} compile has ever succeeded here, so this is the compile path, \
+                 not an option",
+                base, self.vendor
+            ),
+            (None, _) => base,
         }
     }
 }
@@ -632,6 +643,7 @@ pub fn patterns(history: &[Record]) -> Vec<Pattern> {
                 .flatten();
             Pattern {
                 attempts: *attempts.get(&vendor).unwrap_or(&0),
+                successes: successes.len(),
                 vendor,
                 kind,
                 failures: fails.len(),
@@ -793,7 +805,7 @@ mod pattern_tests {
         let w = toolchain_warnings(&h);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].0, "rbln");
-        assert!(w[0].1.contains("pin transformers <5"), "{}", w[0].1);
+        assert!(w[0].1.contains("Pin transformers <5"), "{}", w[0].1);
 
         // A healthy toolchain warns about nothing.
         h[0].toolchain.insert("transformers".into(), "4.48.0".into());
@@ -801,6 +813,32 @@ mod pattern_tests {
         // And a history with no toolchain recorded says nothing rather than guessing.
         h[0].toolchain.clear();
         assert!(toolchain_warnings(&h).is_empty());
+    }
+
+    /// The situation on this cluster: five failures, four different models, and no RBLN build
+    /// has ever succeeded. Hunting for the guilty option is the wrong search, and saying "no
+    /// option separates the failures from the successes" implies successes exist.
+    #[test]
+    fn with_no_success_at_all_it_blames_the_compile_path() {
+        let h: Vec<Record> = ["qwen3-4b", "qwen2.5-0.5b", "llama-3.1-8b", "qwen2.5-0.5b"]
+            .iter()
+            .map(|m| r(m, "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "4")]))
+            .collect();
+        let p = patterns(&h);
+        assert_eq!(p[0].successes, 0);
+        assert_eq!(p[0].correlates, None, "nothing to correlate against");
+        let line = p[0].line();
+        assert!(
+            line.contains("has ever succeeded") && line.contains("not an option"),
+            "should point at the compile path: {}",
+            line
+        );
+        // One success on the same accelerator changes the conclusion back.
+        let mut with_ok = h.clone();
+        with_ok.push(r("m", "rbln", Outcome::Ok, "", &[("tp", "2")]));
+        let p2 = patterns(&with_ok);
+        assert_eq!(p2[0].successes, 1);
+        assert!(!p2[0].line().contains("has ever succeeded"), "{}", p2[0].line());
     }
 
     #[test]
