@@ -1216,6 +1216,18 @@ mod tests {
         }
     }
 
+    /// Parse a generated multi-document manifest. Manifests are data now, so tests assert on
+    /// the parsed objects instead of scraping formatted text.
+    fn docs_of(yaml: &str) -> Vec<serde_yaml::Value> {
+        serde_yaml::Deserializer::from_str(yaml)
+            .map(|d| {
+                <serde_yaml::Value as serde::Deserialize>::deserialize(d)
+                    .expect("each generated document is valid YAML")
+            })
+            .filter(|v: &serde_yaml::Value| !v.is_null())
+            .collect()
+    }
+
     // GPU(HF) 아티팩트를 NPU 로 컴파일(GPU→NPU 경로)해도 Job 이름이 모델+옵션(vendor·tp·seq)으로
     // 유일해야 하고, 같은 모델의 RBLN·Furiosa Job 이 서로 충돌하지 않아야 한다. Job 은 끝나면
     // 자동정리(ttlSecondsAfterFinished)되어야 한다. (사용자 보고: qwen 재컴파일 "field is immutable")
@@ -1248,26 +1260,19 @@ mod tests {
             a.compile_form_for(vendor);
             a.compile_form_submit();
             let (_t, yaml) = submitted(&a);
-            for doc in yaml.split("\n---\n") {
-                serde_yaml::from_str::<serde_yaml::Value>(doc).expect("compile doc valid YAML");
-            }
+            let docs = docs_of(&yaml);
+            let job = docs
+                .iter()
+                .find(|d| d["kind"].as_str() == Some("Job"))
+                .expect("compile manifest contains a Job");
             assert!(
-                yaml.contains("ttlSecondsAfterFinished"),
+                job["spec"]["ttlSecondsAfterFinished"].as_u64().is_some(),
                 "job auto-cleans after finish"
             );
-            yaml.lines()
-                .find(|l| {
-                    l.contains("kind: Job")
-                        || l.trim_start().starts_with("metadata: { name: compile-")
-                })
-                .map(|_| ())
-                .unwrap_or(());
-            // Job metadata.name 추출(ConfigMap 의 -script 는 제외).
-            yaml.lines()
-                .filter_map(|l| l.trim().strip_prefix("metadata: { name: "))
-                .map(|s| s.split(',').next().unwrap_or("").trim().to_string())
-                .find(|n| n.starts_with("compile-") && !n.ends_with("-script"))
+            job["metadata"]["name"]
+                .as_str()
                 .expect("job name present")
+                .to_string()
         };
         let rbln = name_for("rbln");
         let furiosa = name_for("furiosa");
@@ -1393,28 +1398,48 @@ mod tests {
         a.compile_preview(); // Furiosa 엔진 → 폼 열림
         a.compile_form_submit();
         let (_, yaml) = submitted(&a);
+        let docs = docs_of(&yaml);
+        let job = docs
+            .iter()
+            .find(|d| d["kind"].as_str() == Some("Job"))
+            .expect("a Job");
+        let cm = docs
+            .iter()
+            .find(|d| d["kind"].as_str() == Some("ConfigMap"))
+            .expect("the recipe ConfigMap");
+        let container = &job["spec"]["template"]["spec"]["containers"][0];
+
+        // 레시피는 마운트되는 에셋이고, fxb 호출은 그 안에 있다(커맨드라인 보간 없음).
+        let recipe = cm["data"]["compile.sh"].as_str().expect("compile.sh");
+        assert!(recipe.contains("fxb build"), "furiosa recipe drives fxb build");
         assert!(
-            yaml.contains("fxb build"),
-            "furiosa uses fxb build CLI directly"
+            recipe.contains("\"$MODEL_ID\""),
+            "recipe takes the model id from the environment, not interpolation"
         );
-        assert!(
-            yaml.contains("furiosaai/furiosa-llm:latest"),
+        let cmd: Vec<&str> = container["command"]
+            .as_sequence()
+            .expect("command")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(cmd, vec!["sh", "/scripts/compile.sh"], "runs the mounted recipe");
+
+        assert_eq!(
+            container["image"].as_str(),
+            Some("furiosaai/furiosa-llm:latest"),
             "default furiosa image"
         );
+        // 컴파일은 AOT → 가속기 디바이스를 예약하지 않는다. cpu/mem 만.
+        let req = &container["resources"]["requests"];
+        assert!(req["furiosa.ai/rngd"].is_null(), "compile is AOT — no device reservation");
         assert!(
-            !yaml.contains("compile-script"),
-            "no custom script needed for furiosa"
-        );
-        // 컴파일은 AOT → 가속기 디바이스를 예약하지 않음(furiosa.ai/rngd limits 없음). cpu/mem 만.
-        assert!(
-            !yaml.contains("furiosa.ai/rngd:"),
-            "compile is AOT — no device reservation"
+            container["resources"]["limits"].is_null(),
+            "compile sets no device limits"
         );
         assert!(
-            yaml.contains("cpu:") && yaml.contains("memory:"),
+            req["cpu"].as_str().is_some() && req["memory"].as_str().is_some(),
             "compile requests cpu/mem only"
         );
-        serde_yaml::from_str::<serde_yaml::Value>(&yaml).expect("furiosa manifest is valid YAML");
     }
 
     #[test]

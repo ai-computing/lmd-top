@@ -12,6 +12,7 @@ mod compat;
 mod config;
 mod doctor;
 mod kube;
+mod manifest;
 mod metrics;
 mod ops;
 mod palette;
