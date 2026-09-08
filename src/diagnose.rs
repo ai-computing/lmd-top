@@ -72,6 +72,20 @@ pub fn classify(log: &str, exit_code: Option<i32>) -> Failure {
     // name appearing in an echoed config says nothing about why the build failed.
     let err = error_context(log);
 
+    // ── A rejected vendor flag: nothing to do with the model or its options ──
+    //
+    // The SDK validates its RBLN_* flags and aborts before compiling. Classifying this as a
+    // compile failure would be wrong twice over: it hides the real message, and it teaches the
+    // advisor that the *options* failed when they were never tried.
+    if let Some(line) = log
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("[flag]"))
+    {
+        let detail = line.trim_start_matches("[flag]").trim();
+        return Failure::new("vendor-flag", clip(detail), "fix or unset that flag in LMD_COMPILE_ENV");
+    }
+
     // ── Environment and inputs: fix these before touching compile options ──
     if exit_code == Some(137) || lc.contains("oomkilled") {
         return Failure::new(
@@ -400,6 +414,7 @@ pub fn advice_for_kind(kind: &str) -> Option<&'static str> {
         "rbln-kvpart" => "max-len must be a multiple of kvpart (or use attn=eager)",
         "rbln-attn" => "try attn=eager",
         "unsupported-model" => "check the vendor's support list, or update the compiler image",
+        "vendor-flag" => "fix or unset that flag in LMD_COMPILE_ENV",
         "rbln-codegen" => {
             "not option-related in the case investigated here — see docs/RBLN-COMPILE-INCIDENT.md"
         }
@@ -500,6 +515,32 @@ mod toolchain_tests {
         assert!(a.contains("RBLN-COMPILE-INCIDENT"), "{}", a);
         // A kind with genuinely no action gets no invented one.
         assert_eq!(advice_for_kind("error"), None);
+    }
+
+    /// A flag the SDK rejects aborts the run before any compiling happens. Observed:
+    ///   [flag] invalid value for RBLN_COMPILER_LOG_LEVEL: expected int, got "debug"
+    ///   [flag] environment variable RBLN_DEBUG_LEVEL is dev-only and cannot be used ...
+    /// Reporting this as a compile failure would hide the message and, worse, teach the
+    /// advisor that the options failed when they were never tried.
+    #[test]
+    fn a_rejected_vendor_flag_is_not_a_compile_failure() {
+        for line in [
+            "[flag] invalid value for RBLN_COMPILER_LOG_LEVEL: expected int, got \"debug\" (raw: \"debug\")",
+            "[flag] environment variable RBLN_DEBUG_LEVEL is dev-only and cannot be used in a deploy build (raw: \"1\")",
+        ] {
+            let f = classify(&format!("LMD_TOOLCHAIN x=1\n{}\n", line), Some(1));
+            assert_eq!(f.kind, "vendor-flag", "classifying {:?}", line);
+            assert!(f.summary.contains("RBLN_"), "names the flag: {}", f.summary);
+            assert!(f.hint.contains("LMD_COMPILE_ENV"), "says where to fix it: {}", f.hint);
+        }
+        // And it outranks the generic compile wrapper, which appears in the same log once the
+        // run aborts.
+        let both = concat!(
+            "[flag] invalid value for RBLN_COMPILER_LOG_LEVEL: expected int\n",
+            "Traceback (most recent call last):\n",
+            "RuntimeError: Error occurred while compiling the model\n"
+        );
+        assert_eq!(classify(both, Some(1)).kind, "vendor-flag");
     }
 
     #[test]

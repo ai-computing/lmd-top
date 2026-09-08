@@ -134,7 +134,33 @@ RBLN_DUMMY_DEVICE  RBLN_APPLY_TIMER  RBLN_BATCH_ATTN_OPT  ...
 ```
 
 `RBLN_VERBOSE`(파이썬 로깅)를 올려도 효과가 없었던 이유가 이것으로 설명된다 — 컴파일러 진단은
-별도 레벨을 쓴다. `RBLN_COMPILER_LOG_LEVEL` 로 재실행 중.
+별도 레벨을 쓴다. 그러나 **그 레벨도 deploy 빌드에서 막혀 있다**:
+
+```
+$ RBLN_COMPILER_LOG_LEVEL=debug
+[flag] invalid value for RBLN_COMPILER_LOG_LEVEL: expected int, got "debug"
+
+$ RBLN_COMPILER_LOG_LEVEL=4
+[flag] environment variable RBLN_COMPILER_LOG_LEVEL is dev-only and cannot be used
+       in a deploy build (raw: "4"). Unset it or use a development build.
+```
+
+## 결론: deploy 빌드로는 더 알아낼 수 없다
+
+진단 경로를 **전부** 시도했고, 모두 무효이거나 dev 빌드 전용으로 명시적으로 차단된다.
+
+| 경로 | 결과 |
+|---|---|
+| `RBLN_VERBOSE=debug` (파이썬 로깅) | 효과 없음 — 컴파일러는 별도 레벨 사용 |
+| `RBLN_COMPILER_LOG_LEVEL` (컴파일러 로깅) | **dev-only, 거부** |
+| `RBLN_DEBUG_LEVEL` | **dev-only, 거부** |
+| `TVM_LOG_DEBUG`, `TVM_BACKTRACE` | 효과 없음. `Check failed:` 줄도 없음 |
+| Python 예외 `args` + cause chain 5단 | 비어 있음 |
+| `rebel.core_ori` 로 우회 | TVM 연산자 이중 등록으로 import 불가 |
+| 오류 문자열 위치 | `librbln.so` 내부(2회) — Rebellions 네이티브 코드가 직접 던짐 |
+
+**따라서 해결에는 Rebellions 의 development 빌드 또는 지원이 필요하다.** 이는 포기가 아니라
+확정된 결론이다 — SDK 가 설계상 deploy 빌드에서 진단을 닫아두었다.
 
 같은 바이너리에서 나온, 눈여겨볼 제약 문자열:
 
@@ -147,24 +173,11 @@ is not supported since its second dimension is not divisible by 32
 텐서 차원 정합 제약이다. 다만 서로 형상이 다른 모델 4종이 모두 실패했으므로 **단일 형상 제약이
 원인일 가능성은 낮다** — 기록만 해둔다(추정을 결론으로 올리지 않는다).
 
-## 시도했으나 소득 없던 진단 경로
-
-| 경로 | 결과 |
-|---|---|
-| `RBLN_VERBOSE=debug` (파이썬 로깅) | 추가 정보 없음 — 컴파일러는 별도 레벨 사용 |
-| `RBLN_DEBUG_LEVEL=1` | `dev-only and cannot be used in a deploy build` — 거부 |
-| `TVM_LOG_DEBUG=1`, `TVM_BACKTRACE=1` | 추가 정보 없음. `Check failed:` 줄도 없음 |
-| Python 예외 `args` + cause chain 5단 | 비어 있음 |
-| `rebel.core_ori` 로 우회 | TVM 연산자 이중 등록으로 import 불가 |
-
-`Check failed:` 가 **전혀 없다**는 점이 시사적이다 — TVM check 실패가 아니라 Rebellions 자체
-네이티브 코드가 일반 메시지로 던지는 것으로 보인다. 실제로 그 문자열은 `librbln.so` 안에 있다
-(2회 등장).
-
 ## 다음 단계
 
-1. **벤더 지원 문의** — 이 문서 그대로. 핵심 질문: SDK 0.11.0 / 드라이버 3.0.0 조합에서
-   `core.compilation._impl:974` 가 삼키는 오류를 어떻게 볼 수 있는가. dev 빌드가 필요한가.
+1. **벤더 지원 문의 — 이 문서 그대로.** 질문은 두 개로 좁혀졌다:
+   (a) SDK 0.11.0 / 드라이버 3.0.0 에서 `PyRblnModelBuilder` 결과 조립이 왜 실패하는가.
+   (b) deploy 빌드에서 진단을 보려면 무엇이 필요한가 — development 빌드 배포를 받을 수 있는가.
 2. **드라이버↔컴파일러 버전 조합 확인** — 드라이버 3.0.0 과 컴파일러 0.11.0 이 벤더가
    의도한 짝인지. (미확인 영역. 추측하지 않았다.)
 3. **`LMD_COMPILE_IMAGE_RBLN` 에 핀된 이미지 설정** — 원인 규명 **후**. 재발 방지책이며,
