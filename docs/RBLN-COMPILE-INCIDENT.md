@@ -120,6 +120,47 @@ Attribute target.rebel_descriptor of abs is already registered with same plevel=
 살아있는 구현이고, 컴파일러가 **TVM 기반**이므로 TVM 자신의 `TVM_LOG_DEBUG` / `TVM_BACKTRACE`
 가 적용된다. (그래서 `core_ori` 우회는 불가능하다 — 재시도하지 말 것.)
 
+## 네이티브 라이브러리가 노출하는 진단 플래그
+
+`librbln.so` 는 `site-packages/**tvm**/` 아래 있다 (`site-packages/rebel/` 가 아니다 —
+초기 문자열 검색이 이것을 놓쳤다). 405MB 바이너리를 뒤져 **컴파일러 자신의** 환경변수를 찾았다:
+
+```
+RBLN_COMPILER_LOG_LEVEL   ← 컴파일러 로그 레벨 (파이썬 레벨 RBLN_VERBOSE 와 별개)
+RBLN_DUMP_LOG  RBLN_DUMP_LOG_TVM  RBLN_DUMP_PATH  RBLN_DUMP_TVM_IRMODULE
+RBLN_DUMP_RELOC_BIN  RBLN_DUMP_TRANSFORM  RBLN_DUMP_OPTRACE  RBLN_DEBUG_RELAY
+RBLN_COMPILE_ONLY  RBLN_COMP_DTYPE  RBLN_COMP_DTYPE_MODE  RBLN_CHIPLET_SIZE
+RBLN_DUMMY_DEVICE  RBLN_APPLY_TIMER  RBLN_BATCH_ATTN_OPT  ...
+```
+
+`RBLN_VERBOSE`(파이썬 로깅)를 올려도 효과가 없었던 이유가 이것으로 설명된다 — 컴파일러 진단은
+별도 레벨을 쓴다. `RBLN_COMPILER_LOG_LEVEL` 로 재실행 중.
+
+같은 바이너리에서 나온, 눈여겨볼 제약 문자열:
+
+```
+is not supported since its first dimension is not divisible by 2
+                       and second dimension is not divisible by 64
+is not supported since its second dimension is not divisible by 32
+```
+
+텐서 차원 정합 제약이다. 다만 서로 형상이 다른 모델 4종이 모두 실패했으므로 **단일 형상 제약이
+원인일 가능성은 낮다** — 기록만 해둔다(추정을 결론으로 올리지 않는다).
+
+## 시도했으나 소득 없던 진단 경로
+
+| 경로 | 결과 |
+|---|---|
+| `RBLN_VERBOSE=debug` (파이썬 로깅) | 추가 정보 없음 — 컴파일러는 별도 레벨 사용 |
+| `RBLN_DEBUG_LEVEL=1` | `dev-only and cannot be used in a deploy build` — 거부 |
+| `TVM_LOG_DEBUG=1`, `TVM_BACKTRACE=1` | 추가 정보 없음. `Check failed:` 줄도 없음 |
+| Python 예외 `args` + cause chain 5단 | 비어 있음 |
+| `rebel.core_ori` 로 우회 | TVM 연산자 이중 등록으로 import 불가 |
+
+`Check failed:` 가 **전혀 없다**는 점이 시사적이다 — TVM check 실패가 아니라 Rebellions 자체
+네이티브 코드가 일반 메시지로 던지는 것으로 보인다. 실제로 그 문자열은 `librbln.so` 안에 있다
+(2회 등장).
+
 ## 다음 단계
 
 1. **벤더 지원 문의** — 이 문서 그대로. 핵심 질문: SDK 0.11.0 / 드라이버 3.0.0 조합에서
