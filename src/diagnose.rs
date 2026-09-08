@@ -187,9 +187,12 @@ pub fn classify(log: &str, exit_code: Option<i32>) -> Failure {
     if lc.contains("error occurred while compiling the model") {
         return Failure::new(
             "rbln-codegen",
-            "rebel-compiler failed during code generation",
-            "often model-version support: try a lower max-len, attn=eager, or a newer \
-             optimum-rbln image",
+            "rebel-compiler failed during code generation (detail suppressed by the SDK)",
+            // The hint here used to suggest a lower max-len, attn=eager or a newer image.
+            // All three were tested and none helped — see docs/RBLN-COMPILE-INCIDENT.md.
+            // Saying "try these" would send the next person round the same 90 minutes.
+            "not option-related in the case investigated here — check \
+             docs/RBLN-COMPILE-INCIDENT.md before re-running with different parameters",
         );
     }
     if lc.contains("fxb") && lc.contains("error") {
@@ -275,9 +278,16 @@ RuntimeError: Error occurred while compiling the model
         let f = classify(RBLN_CODEGEN, Some(1));
         assert_eq!(f.kind, "rbln-codegen");
         assert!(f.line().contains("code generation"), "{}", f.line());
-        assert!(f.line().contains("max-len"), "should say what to change: {}", f.line());
         // Not the useless generic we used to show.
         assert!(!f.line().contains("see logs"));
+        // And no longer a parameter suggestion: lowering max-len, switching to eager and
+        // attaching a device were all tested against this failure and none helped, so
+        // recommending them would cost the next person the same 90 minutes.
+        assert!(
+            !f.hint.contains("lower max-len") && !f.hint.contains("attn=eager"),
+            "hint should not recommend the disproven remedies: {}",
+            f.hint
+        );
     }
 
     /// The real failure log echoes the compile settings before failing:

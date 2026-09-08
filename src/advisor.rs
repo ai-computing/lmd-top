@@ -263,9 +263,14 @@ fn next_experiment(
         (n >= 2048).then_some(n / 2)
     };
     match failure_kind {
-        // Codegen and device-memory failures respond to a smaller compile-time context first:
-        // it is the cheapest parameter to change and the fastest to rebuild.
-        "rbln-codegen" | "furiosa-build" | "device-oom" => {
+        // rbln-codegen is deliberately absent: the SDK suppresses the reason, and lowering
+        // max-len, switching to eager and attaching a device were each tested against it
+        // without effect (docs/RBLN-COMPILE-INCIDENT.md). Proposing a parameter change would
+        // spend another build to learn nothing.
+        //
+        // Build-stage and device-memory failures do respond to a smaller compile-time context,
+        // which is the cheapest parameter to change and the fastest to rebuild.
+        "furiosa-build" | "device-oom" => {
             if let Some(half) = halve(opts.get("max-len")) {
                 // flash_attn partitions must keep dividing the new length.
                 if let Some(kv) = opts.get("kvpart").and_then(|v| v.parse::<i64>().ok()) {
@@ -303,8 +308,9 @@ fn next_experiment(
             opts.insert("max-len".into(), half.to_string());
             Some((opts, ("max-len", format!("halve it to {}", half))))
         }
-        // hf-auth, hf-missing, network, disk-full, store-io, unsupported-model: no option set
-        // fixes these, and pretending otherwise wastes another build.
+        // rbln-codegen, hf-auth, hf-missing, network, disk-full, store-io,
+        // unsupported-model: no option set fixes these, and pretending otherwise wastes
+        // another build.
         _ => None,
     }
 }
@@ -449,10 +455,12 @@ mod tests {
     }
 
     /// The point of the feature: after a failure, say what to try next — not just what to
-    /// avoid. This is the real Qwen3-4B/RBLN case from this cluster.
+    /// avoid. Uses a device-memory failure, which parameters genuinely do affect; the RBLN
+    /// codegen failure this session investigated deliberately proposes nothing, because
+    /// lowering max-len and switching to eager were both tested and neither helped.
     #[test]
     fn proposes_the_next_experiment_after_a_failure() {
-        let h = vec![compile(
+        let mut h = vec![compile(
             "j1",
             "Qwen/Qwen3-4B",
             "rbln",
@@ -460,6 +468,8 @@ mod tests {
             &[("tp", "4"), ("max-len", "8192"), ("kvpart", "4096"), ("attn", "flash_attn")],
             100,
         )];
+        h[0].failure_kind = "device-oom".into();
+        let h = h;
         let a = advise(&h, "Qwen/Qwen3-4B", "rbln");
         assert!(a.best.is_none(), "nothing has worked yet");
         let next = a.next.clone().expect("a next experiment");
@@ -491,7 +501,15 @@ mod tests {
     /// No option set fixes a missing token or a full disk — proposing one wastes a build.
     #[test]
     fn environmental_failures_get_no_experiment() {
-        for kind in ["hf-auth", "hf-missing", "network", "disk-full", "store-io", "unsupported-model"] {
+        for kind in [
+            "rbln-codegen",
+            "hf-auth",
+            "hf-missing",
+            "network",
+            "disk-full",
+            "store-io",
+            "unsupported-model",
+        ] {
             let mut h = vec![compile(
                 "j1", "m/x", "rbln", Outcome::Fail, &[("tp", "4"), ("max-len", "8192")], 100,
             )];
@@ -512,7 +530,7 @@ mod tests {
             compile("j2", "m/x", "rbln", Outcome::Fail, &[("max-len", "4096"), ("tp", "4")], 200),
         ];
         for r in &mut h {
-            r.failure_kind = "rbln-codegen".into();
+            r.failure_kind = "device-oom".into();
         }
         let a = advise(&h, "m/x", "rbln");
         // Halving 8192 gives 4096, which also failed → propose nothing rather than a repeat.
