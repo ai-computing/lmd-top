@@ -336,7 +336,8 @@ RuntimeError: Error occurred while compiling the model
 /// Recorded for successes as well as failures: a version skew is only visible as the
 /// difference between the two.
 pub fn toolchain(log: &str) -> std::collections::BTreeMap<String, String> {
-    log.lines()
+    let mut out: std::collections::BTreeMap<String, String> = log
+        .lines()
         .rev()
         .find_map(|l| l.trim().strip_prefix("LMD_TOOLCHAIN "))
         .map(|rest| {
@@ -346,45 +347,41 @@ pub fn toolchain(log: &str) -> std::collections::BTreeMap<String, String> {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // A disagreement the recipe measured against the vendor's own declared pins. Stored under
+    // a reserved key so it cannot collide with a package name.
+    if let Some(detail) = log
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix("LMD_DEPS_MISMATCH "))
+    {
+        out.insert("_mismatch".into(), detail.trim().to_string());
+    }
+    out
 }
 
-/// A dependency skew that is known to break a vendor toolchain here.
+/// A dependency set that disagrees with what the vendor package itself declares.
 ///
-/// One entry so far, and it is observed rather than inferred: on this cluster optimum-rbln
-/// 0.11 with transformers 5.x failed to compile three different models across three parameter
-/// sets, always with the same opaque codegen error, while the graph itself converted fine.
-/// transformers 5 is a major release and 0.11 predates it. Keep this list to things actually
-/// seen to fail — a guessed compatibility matrix would send people down the wrong path.
+/// Deliberately *not* an inferred compatibility matrix. An earlier version of this guessed
+/// that optimum-rbln 0.11 could not work with transformers 5 — it looked obvious, transformers
+/// 5 being a major release — and told operators to downgrade. Reading the package metadata on
+/// the host showed the opposite: optimum-rbln 0.11.0.post1 *pins* `transformers==5.8.1` and
+/// `torch==2.11.0+cpu`. The installed set was exactly what the vendor asked for, and the
+/// advice would have broken a working environment.
+///
+/// So the only mismatch reported here is one the recipe measured: it compares installed
+/// versions against the vendor package's own declared requirements and prints
+/// `LMD_DEPS_MISMATCH …`. No version knowledge lives in lmd-top.
 pub fn toolchain_skew(
     versions: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
-    let major = |pkg: &str| -> Option<u32> {
-        versions
-            .get(pkg)?
-            .split(['.', '-', '+'])
-            .next()?
-            .parse()
-            .ok()
-    };
-    let minor = |pkg: &str| -> Option<u32> {
-        versions.get(pkg)?.split('.').nth(1)?.parse().ok()
-    };
-    if let (Some(0), Some(orb_minor), Some(tf_major)) =
-        (major("optimum-rbln"), minor("optimum-rbln"), major("transformers"))
-    {
-        if orb_minor <= 11 && tf_major >= 5 {
-            return Some(format!(
-                "optimum-rbln {} with transformers {} — this combination failed every compile \
-                 observed here. Pin transformers <5 on the compile host, or set \
-                 LMD_COMPILE_IMAGE_RBLN to a pinned image so the build stops inheriting the \
-                 node's python environment",
-                versions.get("optimum-rbln").map(String::as_str).unwrap_or("?"),
-                versions.get("transformers").map(String::as_str).unwrap_or("?"),
-            ));
-        }
-    }
-    None
+    versions.get("_mismatch").map(|detail| {
+        format!(
+            "installed packages disagree with what the vendor SDK declares: {} — reinstall the \
+             vendor SDK's pinned dependencies on the compile host, or set a pinned compile image",
+            detail
+        )
+    })
 }
 
 #[cfg(test)]
@@ -401,12 +398,23 @@ mod toolchain_tests {
         // A package the recipe could not find is omitted rather than recorded as "absent".
         assert_eq!(toolchain("LMD_TOOLCHAIN furiosa-llm=absent torch=2.4.0\n").len(), 1);
         assert!(toolchain("no such line here").is_empty());
+        // A measured mismatch travels alongside the versions.
+        let with_bad = toolchain(
+            "LMD_TOOLCHAIN transformers=4.40.0\nLMD_DEPS_MISMATCH transformers 4.40.0 != required 5.8.1\n",
+        );
+        assert_eq!(
+            with_bad.get("_mismatch").map(String::as_str),
+            Some("transformers 4.40.0 != required 5.8.1")
+        );
     }
 
-    /// The skew this cluster demonstrated: optimum-rbln 0.11 against transformers 5.
+    /// Only a mismatch the recipe *measured* is reported. This cluster is the cautionary
+    /// case: optimum-rbln 0.11.0.post1 pins transformers==5.8.1 and torch==2.11.0+cpu, so the
+    /// installed set was exactly correct — an inferred "transformers 5 is too new" rule would
+    /// have told the operator to break a healthy environment.
     #[test]
-    fn flags_the_observed_skew_and_nothing_else() {
-        let observed: std::collections::BTreeMap<String, String> = [
+    fn reports_only_a_measured_mismatch() {
+        let vendor_consistent: std::collections::BTreeMap<String, String> = [
             ("optimum-rbln", "0.11.0.post1"),
             ("transformers", "5.8.1"),
             ("torch", "2.11.0+cpu"),
@@ -414,31 +422,19 @@ mod toolchain_tests {
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-        let why = toolchain_skew(&observed).expect("skew flagged");
-        assert!(why.contains("transformers"), "{}", why);
-        assert!(why.contains("Pin transformers <5"), "{}", why);
-        // And names the durable fix, not just the immediate one.
-        assert!(why.contains("LMD_COMPILE_IMAGE_RBLN"), "{}", why);
+        assert_eq!(
+            toolchain_skew(&vendor_consistent),
+            None,
+            "the vendor's own pins must never be reported as a skew"
+        );
 
-        // A supported pairing is not flagged.
-        let ok: std::collections::BTreeMap<String, String> = [
-            ("optimum-rbln", "0.11.0.post1"),
-            ("transformers", "4.48.0"),
-        ]
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-        assert_eq!(toolchain_skew(&ok), None);
-        // Neither is a future optimum-rbln that may well support transformers 5.
-        let future: std::collections::BTreeMap<String, String> = [
-            ("optimum-rbln", "0.14.0"),
-            ("transformers", "5.8.1"),
-        ]
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-        assert_eq!(toolchain_skew(&future), None, "do not claim what we have not seen");
-        // And an unknown toolchain says nothing.
+        // When the recipe measures a real disagreement, it travels under `_mismatch`.
+        let mut measured = vendor_consistent.clone();
+        measured.insert("_mismatch".into(), "transformers 4.40.0 != required 5.8.1".into());
+        let why = toolchain_skew(&measured).expect("measured mismatch is reported");
+        assert!(why.contains("transformers 4.40.0"), "{}", why);
+        assert!(why.contains("vendor SDK declares"), "{}", why);
+
         assert_eq!(toolchain_skew(&Default::default()), None);
     }
 }

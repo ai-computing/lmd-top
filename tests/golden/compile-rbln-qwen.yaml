@@ -38,6 +38,27 @@ data:
                 parts.append(f"{pkg}=absent")
         print("LMD_TOOLCHAIN " + " ".join(parts), flush=True)
 
+        # Compare what is installed against what the vendor SDK itself declares, rather than
+        # against a compatibility matrix maintained by hand. optimum-rbln pins its dependencies
+        # exactly, so this is a precise check — and it is the vendor's opinion, not ours.
+        bad = []
+        try:
+            for req in md.requires("optimum-rbln") or []:
+                spec = req.split(";")[0].strip()
+                if "==" not in spec:
+                    continue
+                name, want = (p.strip() for p in spec.split("==", 1))
+                try:
+                    have = md.version(name)
+                except Exception:
+                    continue
+                if have != want:
+                    bad.append(f"{name} {have} != required {want}")
+        except Exception:
+            pass
+        if bad:
+            print("LMD_DEPS_MISMATCH " + "; ".join(bad[:4]), flush=True)
+
 
     _report_toolchain()
 
