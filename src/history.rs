@@ -128,6 +128,28 @@ pub fn recorded_ids() -> std::collections::BTreeSet<String> {
 /// Print the history as a table (`--history`).
 pub fn print_log() {
     let recs = load();
+    print_table(&recs);
+    print_patterns(&recs);
+}
+
+/// Recurring-failure summary — the answer to "it fails often but I cannot see the pattern".
+fn print_patterns(recs: &[Record]) {
+    let pats = crate::advisor::patterns(recs);
+    if pats.is_empty() {
+        return;
+    }
+    println!("\nrecurring failures:");
+    for p in &pats {
+        println!("  {}", p.line());
+    }
+    if pats.iter().all(|p| p.correlates.is_none()) {
+        println!(
+            "  (no option separates the failures from the successes yet — more builds will tell)"
+        );
+    }
+}
+
+fn print_table(recs: &[Record]) {
     if recs.is_empty() {
         println!("no history yet ({})", path().display());
         println!("compile and serving outcomes are recorded as jobs finish.");
@@ -137,7 +159,7 @@ pub fn print_log() {
         "{:<20} {:<8} {:<26} {:<9} {:<9} {}",
         "WHEN", "KIND", "MODEL", "VENDOR", "OUTCOME", "OPTIONS / CAUSE"
     );
-    for r in &recs {
+    for r in recs {
         let opts = r
             .options
             .iter()
