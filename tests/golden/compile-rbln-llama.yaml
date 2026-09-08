@@ -58,6 +58,22 @@ data:
         else:
             shutil.copy2(src, dst)
     print("COMPILE_DONE", os.listdir(output))
+  bootstrap.sh: |
+    #!/bin/sh
+    # Prepare a bare ubuntu image to run the RBLN compile recipe against the node's own
+    # rebel-compiler install (hostPath), then hand over to it. Mounted from a ConfigMap.
+    #
+    # Only used when no LMD_COMPILE_IMAGE_RBLN is configured. tzdata is needed because
+    # pandas -> pytz reads /usr/share/zoneinfo, which minimal images do not ship.
+    set -e
+
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq --no-install-recommends \
+      python3.10 libnuma1 libgomp1 ca-certificates tzdata >/dev/null 2>&1
+    ln -sf /usr/bin/python3.10 /usr/local/bin/python3
+
+    exec python3 /scripts/compile.py
 ---
 # RBLN: no registry image configured, so this borrows the target node's host rebel-compiler stack via hostPath (rbln_create_runtimes=False).
 apiVersion: batch/v1
@@ -102,9 +118,8 @@ spec:
       - name: compile
         image: ubuntu:22.04
         command:
-        - bash
-        - -c
-        - set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq --no-install-recommends python3.10 libnuma1 libgomp1 ca-certificates tzdata >/dev/null 2>&1; ln -sf /usr/bin/python3.10 /usr/local/bin/python3; python3 /scripts/compile.py
+        - sh
+        - /scripts/bootstrap.sh
         env:
         - name: HF_TOKEN
           valueFrom:

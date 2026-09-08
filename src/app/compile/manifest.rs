@@ -17,6 +17,9 @@ use crate::ymap;
 /// and run by hand; the Job mounts them from a ConfigMap.
 const RECIPE_RBLN: &str = include_str!("../../../assets/recipes/rbln-compile.py");
 const RECIPE_FURIOSA: &str = include_str!("../../../assets/recipes/furiosa-compile.sh");
+/// Bootstrap for the RBLN host-stack fallback: prepares a bare image, then execs the recipe.
+const RECIPE_RBLN_BOOTSTRAP: &str =
+    include_str!("../../../assets/recipes/rbln-host-bootstrap.sh");
 
 /// Shared model store — compile output and the HF cache both live here.
 const STORE_MOUNT: &str = "/mnt/store";
@@ -39,6 +42,8 @@ pub enum CompileManifestOutcome {
 struct ContainerPlan {
     /// Recipe file contents and the ConfigMap key it is mounted as.
     recipe: (&'static str, &'static str),
+    /// An additional mounted file, when the vendor needs one (a bootstrap wrapper).
+    extra_file: Option<(&'static str, &'static str)>,
     /// `command` for the container.
     command: Vec<String>,
     /// Environment beyond the shared set.
@@ -198,11 +203,16 @@ pub fn build_compile_manifest(
         },
     };
 
+    let mut data = serde_yaml::Mapping::new();
+    data.insert(recipe_key.into(), s(recipe_body));
+    if let Some((body, key)) = plan.extra_file {
+        data.insert(key.into(), s(body));
+    }
     let config_map = ymap! {
         "apiVersion" => s("v1"),
         "kind" => s("ConfigMap"),
         "metadata" => ymap! { "name" => s(cm_name), "namespace" => s(ns) },
-        "data" => ymap! { recipe_key => s(recipe_body) },
+        "data" => serde_yaml::Value::Mapping(data),
     };
 
     let opts_summary: String = form
@@ -244,6 +254,7 @@ fn furiosa_plan(form: &CompileForm, repo_dir: &str) -> ContainerPlan {
     };
     ContainerPlan {
         recipe: (RECIPE_FURIOSA, "compile.sh"),
+        extra_file: None,
         command: vec!["sh".into(), "/scripts/compile.sh".into()],
         extra_env: vec![
             // The downloader cannot write to the SMB-backed store (os error 95), so the HF cache
@@ -270,6 +281,7 @@ fn rbln_plan(host_stack: bool, form: &CompileForm) -> ContainerPlan {
     if !host_stack {
         return ContainerPlan {
             recipe: (RECIPE_RBLN, "compile.py"),
+            extra_file: None,
             command: vec!["python3".into(), "/scripts/compile.py".into()],
             extra_env: [vec![env_val("HF_HOME", format!("{}/hub", STORE_MOUNT))], params]
                 .concat(),
@@ -289,15 +301,8 @@ fn rbln_plan(host_stack: bool, form: &CompileForm) -> ContainerPlan {
     ];
     ContainerPlan {
         recipe: (RECIPE_RBLN, "compile.py"),
-        command: vec![
-            "bash".into(),
-            "-c".into(),
-            "set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; \
-             apt-get install -y -qq --no-install-recommends python3.10 libnuma1 libgomp1 \
-             ca-certificates tzdata >/dev/null 2>&1; \
-             ln -sf /usr/bin/python3.10 /usr/local/bin/python3; python3 /scripts/compile.py"
-                .into(),
-        ],
+        command: vec!["sh".into(), "/scripts/bootstrap.sh".into()],
+        extra_file: Some((RECIPE_RBLN_BOOTSTRAP, "bootstrap.sh")),
         extra_env: [
             vec![
                 env_val("HF_HOME", format!("{}/hub", STORE_MOUNT)),
