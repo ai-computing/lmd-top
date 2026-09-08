@@ -75,22 +75,46 @@ local = "/work/out"
 
 cfg = dict(
     rbln_npu=get("RBLN_NPU", "RBLN-CA22"),
-    rbln_num_devices=int(get("RBLN_TENSOR_PARALLEL_SIZE", "1")),
     rbln_max_seq_len=int(get("RBLN_MAX_SEQ_LEN", "4096")),
     rbln_batch_size=int(get("RBLN_BATCH_SIZE", "1")),
 )
+
+# The kwarg naming the chip count differs across optimum-rbln versions: 0.11 takes
+# `rbln_num_devices`, 0.10 takes `rbln_tensor_parallel_size`. Rather than keep a version
+# matrix — which is the thing that keeps going wrong — ask the library: it rejects an
+# unknown kwarg by name, so try the candidates and keep the one it accepts.
+TP_KWARGS = ("rbln_tensor_parallel_size", "rbln_num_devices")
+tp = int(get("RBLN_TENSOR_PARALLEL_SIZE", "1"))
 attn = get("RBLN_ATTN_IMPL", "flash_attn")
 if attn:
     cfg["rbln_attn_impl"] = attn
 if attn == "flash_attn":
     cfg["rbln_kvcache_partition_len"] = int(get("RBLN_KVCACHE_PARTITION_LEN", "16384"))
 
-print("RBLN_CONFIG", cfg)
 # create_runtimes=False: compile without claiming a device, so serving may hold the chips.
+def _from_pretrained(config):
+    """Compile, choosing the tensor-parallel kwarg this optimum-rbln actually accepts."""
+    last = None
+    for name in TP_KWARGS:
+        attempt = dict(config)
+        attempt[name] = tp
+        try:
+            print(f"RBLN_CONFIG {attempt}", flush=True)
+            return M.from_pretrained(
+                os.environ["MODEL_ID"], export=True, rbln_create_runtimes=False, **attempt
+            )
+        except ValueError as exc:
+            # Only a rejection of *this* kwarg justifies trying the next name; any other
+            # ValueError is a real problem and must not be masked by a retry.
+            if "Unexpected arguments" not in str(exc) or name.removeprefix("rbln_") not in str(exc):
+                raise
+            print(f"  {name} not accepted by this version, trying the next name", flush=True)
+            last = exc
+    raise last if last else RuntimeError("no tensor-parallel kwarg accepted")
+
+
 try:
-    model = M.from_pretrained(
-        os.environ["MODEL_ID"], export=True, rbln_create_runtimes=False, **cfg
-    )
+    model = _from_pretrained(cfg)
 except Exception as exc:
     # rebel-compiler raises a bare RuntimeError from a frozen module, so the traceback alone
     # says only "Error occurred while compiling the model". Whatever detail exists lives in the
