@@ -1184,18 +1184,46 @@ mod tests {
         assert_eq!(dform.get("devices"), "4"); // 아티팩트 TP
         a.deploy_form_submit();
         let (_, dyaml) = submitted(&a);
-        assert!(dyaml.contains("kind: Deployment"));
-        assert!(dyaml.contains("model-store"));
-        assert!(dyaml.contains("rebellions.ai/ATOM: 4"));
-        // RBLN serving uses either a configured vllm_rbln image (`vllm serve`) or the host-stack fallback (`api_server --model`).
-        assert!(
-            dyaml.contains("\"serve\"") || dyaml.contains("api_server --model="),
-            "RBLN serving command"
+        let ddocs = docs_of(&dyaml);
+        let serve = ddocs
+            .iter()
+            .find(|d| {
+                d["kind"].as_str() == Some("Deployment")
+                    && !d["metadata"]["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .ends_with("-epp")
+            })
+            .expect("serving Deployment");
+        let c = &serve["spec"]["template"]["spec"]["containers"][0];
+        assert_eq!(
+            c["resources"]["limits"]["rebellions.ai/ATOM"].as_str(),
+            Some("4"),
+            "reserves the artifact's TP worth of ATOM devices"
         );
-        assert!(dyaml.contains("VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK"));
+        let vols: Vec<&str> = serve["spec"]["template"]["spec"]["volumes"]
+            .as_sequence()
+            .expect("volumes")
+            .iter()
+            .filter_map(|v| v["persistentVolumeClaim"]["claimName"].as_str())
+            .collect();
+        assert!(vols.contains(&"model-store"), "mounts the shared store");
+        // RBLN serving: a configured vllm_rbln image runs `serve`, the host-stack fallback runs
+        // the mounted recipe. Either way the device count reaches the runtime.
+        let cmdline = format!("{:?}{:?}", c["args"], c["command"]);
+        assert!(
+            cmdline.contains("serve"),
+            "RBLN serving command: {}",
+            cmdline
+        );
+        let envs: Vec<&str> = c["env"]
+            .as_sequence()
+            .map(|v| v.iter().filter_map(|e| e["name"].as_str()).collect())
+            .unwrap_or_default();
+        assert!(envs.contains(&"VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK"));
         // routing=llm-d(기본) → 게이트웨이 라우팅 리소스 동봉.
         assert!(
-            dyaml.contains("kind: InferencePool"),
+            ddocs.iter().any(|d| d["kind"].as_str() == Some("InferencePool")),
             "generates InferencePool"
         );
         assert!(dyaml.contains("kind: HTTPRoute"), "generates HTTPRoute");
@@ -1214,6 +1242,19 @@ mod tests {
             serde_yaml::from_str::<serde_yaml::Value>(doc)
                 .expect("deploy manifest doc is valid YAML");
         }
+    }
+
+    /// The serving Deployment, as opposed to the EPP Deployment the routing docs add.
+    fn serving_deployment(docs: &[serde_yaml::Value]) -> &serde_yaml::Value {
+        docs.iter()
+            .find(|d| {
+                d["kind"].as_str() == Some("Deployment")
+                    && !d["metadata"]["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .ends_with("-epp")
+            })
+            .expect("a serving Deployment")
     }
 
     /// Parse a generated multi-document manifest. Manifests are data now, so tests assert on
@@ -1470,34 +1511,72 @@ mod tests {
         fa.open_deploy_form();
         fa.deploy_form_submit();
         let (_, fy) = submitted(&fa);
-        assert!(fy.contains("furiosaai/furiosa-llm:latest"));
-        assert!(
-            fy.contains("\"serve\", \"furiosa-ai/Qwen3-4B-FP8\""),
+        let fdocs = docs_of(&fy);
+        let fserve = serving_deployment(&fdocs);
+        let fc = &fserve["spec"]["template"]["spec"]["containers"][0];
+        assert_eq!(
+            fc["image"].as_str(),
+            Some("furiosaai/furiosa-llm:latest"),
+            "default furiosa image"
+        );
+        let fargs: Vec<&str> = fc["args"]
+            .as_sequence()
+            .expect("args")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            &fargs[..2],
+            &["serve", "furiosa-ai/Qwen3-4B-FP8"],
             "serve subcommand + model positional"
         );
-        assert!(fy.contains("--tensor-parallel-size"));
-        assert!(fy.contains("hf-token"), "furiosa needs HF_TOKEN secret");
-        assert!(fy.contains("furiosa.ai/rngd:"));
+        assert!(fargs.contains(&"--tensor-parallel-size"));
+        let secrets: Vec<&str> = fc["env"]
+            .as_sequence()
+            .expect("env")
+            .iter()
+            .filter_map(|e| e["valueFrom"]["secretKeyRef"]["name"].as_str())
+            .collect();
+        assert!(secrets.contains(&"hf-token"), "furiosa needs HF_TOKEN secret");
         assert!(
-            fy.contains("value: /rngd/"),
+            fc["resources"]["limits"]["furiosa.ai/rngd"].as_str().is_some(),
+            "reserves RNGD devices"
+        );
+        let froute = fdocs
+            .iter()
+            .find(|d| d["kind"].as_str() == Some("HTTPRoute"))
+            .expect("HTTPRoute");
+        assert_eq!(
+            froute["spec"]["rules"][0]["matches"][0]["path"]["value"]
+                .as_str()
+                .map(|p| p.starts_with("/rngd/")),
+            Some(true),
             "furiosa → /rngd/<model> route"
         );
-        for doc in fy.split("\n---\n") {
-            serde_yaml::from_str::<serde_yaml::Value>(doc)
-                .expect("furiosa deploy doc is valid YAML");
-        }
 
         // GPU: `vllm serve <path>` on nvidia.com/gpu, 컴파일 불필요.
         let mut gp = mk("vLLM", "Qwen/Qwen2.5-7B-Instruct");
         gp.open_deploy_form();
         gp.deploy_form_submit();
         let (_, gy) = submitted(&gp);
-        assert!(gy.contains("\"serve\""));
-        assert!(gy.contains("nvidia.com/gpu:"));
-        assert!(gy.contains("value: /gpu/"), "gpu → /gpu/<model> route");
-        for doc in gy.split("\n---\n") {
-            serde_yaml::from_str::<serde_yaml::Value>(doc).expect("gpu deploy doc is valid YAML");
-        }
+        let gdocs = docs_of(&gy);
+        let gc = &serving_deployment(&gdocs)["spec"]["template"]["spec"]["containers"][0];
+        assert_eq!(gc["args"][0].as_str(), Some("serve"));
+        assert!(
+            gc["resources"]["limits"]["nvidia.com/gpu"].as_str().is_some(),
+            "reserves GPUs"
+        );
+        let groute = gdocs
+            .iter()
+            .find(|d| d["kind"].as_str() == Some("HTTPRoute"))
+            .expect("HTTPRoute");
+        assert_eq!(
+            groute["spec"]["rules"][0]["matches"][0]["path"]["value"]
+                .as_str()
+                .map(|p| p.starts_with("/gpu/")),
+            Some(true),
+            "gpu → /gpu/<model> route"
+        );
 
         // routing=direct 이면 라우팅 리소스 없음(Deployment 만).
         let mut d = mk("vLLM", "Qwen/Qwen2.5-7B-Instruct");
@@ -1509,11 +1588,15 @@ mod tests {
         }
         d.deploy_form_submit();
         let (_, dy) = submitted(&d);
+        let kinds: Vec<String> = docs_of(&dy)
+            .iter()
+            .filter_map(|x| x["kind"].as_str().map(String::from))
+            .collect();
         assert!(
-            !dy.contains("kind: InferencePool"),
-            "direct = no routing resources"
+            !kinds.iter().any(|k| k == "InferencePool" || k == "HTTPRoute"),
+            "direct = no routing resources, got {:?}",
+            kinds
         );
-        assert!(!dy.contains("kind: HTTPRoute"));
     }
 
     #[test]

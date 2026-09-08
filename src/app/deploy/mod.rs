@@ -1,15 +1,20 @@
-//! Serving deploy flow — deploy-spec derivation, form construction, capacity
-//! fit, preflight, manifest rendering, and llm-d routing docs. Split out of
-//! `app.rs` (see `impl App`).
+//! Serving deploy flow — deploy-spec derivation, form construction, capacity fit and
+//! preflight. Manifest rendering lives in the submodules:
+//!
+//! - [`serving`]: the serving Deployment (and any recipe ConfigMap it needs).
+//! - [`routing`]: the llm-d gateway path — EPP, InferencePool, HTTPRoute.
+
+pub mod routing;
+pub mod serving;
 
 use super::*;
+use serving::{Images, ServePlan};
 
 /// Serving spec derived from the current selection:
 /// (model, model_id, engine, vendor, mount, devices_default, serve_tp_default).
 type DeploySpec = (String, String, String, &'static str, String, String, Option<String>);
 
-impl App {
-    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
+impl App {    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
         if let Some(a) = self.selected_artifact() {
             let model_id = Self::artifact_model_id(a);
             let repo_dir = model_id.replace('/', "--");
@@ -590,8 +595,8 @@ impl App {
         let Some(form) = self.deploy_form.take() else {
             return;
         };
-        // model_id/mount 는 Deployment 의 args·env·YAML 스칼라로 그대로 들어간다. 문법이 아닌 값을
-        // 통과시키면 매니페스트가 깨지거나 컨테이너 커맨드로 새어 나간다(BUG-06).
+        // model_id/mount 는 Deployment 의 args·env 로 들어간다. 문법이 아닌 값은 거부한다 —
+        // 직렬화가 YAML 탈출은 막지만, 애초에 모델 id 가 아닌 문자열은 배포할 대상이 아니다.
         let bad_field = [
             ("model", form.model_id.clone()),
             ("mount", form.mount.clone()),
@@ -606,389 +611,72 @@ impl App {
             self.deploy_form = Some(form); // 폼 유지: 값만 고쳐 다시 Enter
             return;
         }
-        let name = form.model_id.replace(['/', '.'], "-").to_lowercase();
-        let name = format!("serve-{}", name);
+
+        let name = format!("serve-{}", form.model_id.replace(['/', '.'], "-").to_lowercase());
         let replicas = form.get("replicas");
         let devices = form.get("devices");
-        let serve_tp = if form.vendor == "furiosa" {
-            let tp = form.get("tp");
-            if tp.is_empty() {
-                "8".to_string()
+        let or = |key: &str, def: &str| {
+            let v = form.get(key);
+            if v.is_empty() {
+                def.to_string()
             } else {
-                tp
+                v
             }
+        };
+        // Furiosa serving TP is a PE count, distinct from the RNGD card count it requests.
+        let serve_tp = if form.vendor == "furiosa" {
+            or("tp", "8")
         } else {
             devices.clone()
         };
-        let port = {
-            let p = form.get("port");
-            if p.is_empty() {
-                "8000".to_string()
-            } else {
-                p
-            }
-        };
         let (res_key, product_label) = match form.vendor {
-            "rbln" => ("rebellions.ai/ATOM", "rebellions.ai/npu.product: RBLN-CA22"),
-            "furiosa" => ("furiosa.ai/rngd", "furiosa.ai/npu.product: rngd"),
-            _ => ("nvidia.com/gpu", ""),
+            "rbln" => (
+                "rebellions.ai/ATOM",
+                Some(("rebellions.ai/npu.product", "RBLN-CA22")),
+            ),
+            "furiosa" => (
+                "furiosa.ai/rngd",
+                Some(("furiosa.ai/npu.product", "rngd")),
+            ),
+            _ => ("nvidia.com/gpu", None),
         };
-        let place = form.place.clone();
-        let place_host = place.split('(').next().unwrap_or("any").trim().to_string();
-        // 배치 스펙 — spread=topologySpread, 특정=nodeSelector hostname, any=제약 없음(디바이스 resource 로 스케줄).
-        let placement_yaml = if place_host == "spread" {
-            format!(
-                "\x20     topologySpreadConstraints:\n\
-                 \x20       - {{ maxSkew: 1, topologyKey: kubernetes.io/hostname, whenUnsatisfiable: DoNotSchedule, labelSelector: {{ matchLabels: {{ app: {name} }} }} }}\n",
-                name = name
-            )
-        } else if place_host != "any" && !place_host.is_empty() {
-            format!(
-                "\x20     nodeSelector: {{ kubernetes.io/hostname: {} }}\n",
-                place_host
-            )
-        } else if !product_label.is_empty() {
-            format!("\x20     nodeSelector: {{ {} }}\n", product_label)
-        } else {
-            String::new()
-        };
-        // Vendor-specific serving specs. NPU engines do not accept the generic vLLM `--model` form.
+        // A store-backed Furiosa artifact is served by path; everything else by HF id.
         let served = if form.vendor == "furiosa" && form.mount.starts_with("/mnt/store/") {
             form.mount.clone()
         } else {
             form.model_id.clone()
         };
-        let (image, note, container_spec, volumes_block) = match form.vendor {
-            "furiosa" => {
-                let img = self
-                    .img_furiosa
-                    .clone()
-                    .unwrap_or_else(|| "furiosaai/furiosa-llm:latest".into());
-                let store_backed = form.mount.starts_with("/mnt/store/");
-                let store_mount = if store_backed {
-                    "\x20           - { name: store, mountPath: /mnt/store, readOnly: true }\n"
-                } else {
-                    ""
-                };
-                let fxb_args = if store_backed {
-                    format!(
-                        ", \"--fxb\", \"{}/model.fxb\"",
-                        form.mount.trim_end_matches('/')
-                    )
-                } else {
-                    String::new()
-                };
-                let spec = format!(
-                    "\x20         args: [\"serve\", \"{model}\", \"--served-model-name\", \"{served_name}\", \"--port\", \"{port}\", \"--tensor-parallel-size\", \"{serve_tp}\"{fxb_args}]\n\
-                     \x20         ports: [{{ containerPort: {port} }}]\n\
-                     \x20         env:\n\
-                     \x20           - {{ name: HF_HOME, value: /model-cache }}\n\
-                     \x20           - {{ name: HF_TOKEN, valueFrom: {{ secretKeyRef: {{ name: hf-token, key: HF_TOKEN }} }} }}\n\
-                     \x20         resources: {{ limits: {{ {res_key}: {devices} }}, requests: {{ cpu: \"4\", memory: \"16Gi\", {res_key}: {devices} }} }}\n\
-                     \x20         volumeMounts:\n\
-                     \x20           - {{ name: cache, mountPath: /model-cache }}\n\
-                     {store_mount}",
-                    model = form.model_id,
-                    served_name = form.model_id,
-                    port = port,
-                    devices = devices,
-                    serve_tp = serve_tp,
-                    fxb_args = fxb_args,
-                    res_key = res_key,
-                    store_mount = store_mount
-                );
-                let vols = if store_backed {
-                    "\x20     volumes:\n\x20       - { name: cache, emptyDir: {} }\n\x20       - { name: store, persistentVolumeClaim: { claimName: model-store } }\n".to_string()
-                } else {
-                    "\x20     volumes:\n\x20       - { name: cache, emptyDir: {} }\n".to_string()
-                };
-                (img, "# Furiosa: furiosa-llm serve. Store-backed artifacts use the HF id plus --fxb so config/tokenizer still come from HF. Serving TP is PE count; resource devices are RNGD count.".to_string(), spec, vols)
-            }
-            "rbln" => {
-                if let Some(img) = self.img_serving.clone() {
-                    let spec = format!(
-                        "\x20         args: [\"serve\", \"{mount}\", \"--served-model-name\", \"{served}\", \"--port\", \"{port}\", \"--tensor-parallel-size\", \"{devices}\", \"--max-num-seqs\", \"1\"]\n\
-                         \x20         ports: [{{ containerPort: {port} }}]\n\
-                         \x20         env:\n\
-                         \x20           - {{ name: VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK, value: \"{devices}\" }}\n\
-                         \x20         resources: {{ limits: {{ {res_key}: {devices} }}, requests: {{ cpu: \"8\", memory: \"32Gi\", {res_key}: {devices} }} }}\n\
-                         \x20         volumeMounts:\n\
-                         \x20           - {{ name: store, mountPath: /mnt/store, readOnly: true }}\n",
-                        mount = form.mount, served = served, port = port, devices = devices, res_key = res_key
-                    );
-                    let vols = "\x20     volumes:\n\x20       - { name: store, persistentVolumeClaim: { claimName: model-store } }\n".to_string();
-                    (img, "# RBLN: vllm_rbln runtime image from LMD_SERVING_IMAGE; loads the compiled artifact from model-store.".to_string(), spec, vols)
-                } else {
-                    let cmd = format!(
-                        "set -eux\n\
-                         export DEBIAN_FRONTEND=noninteractive\n\
-                         apt-get update -qq\n\
-                         apt-get install -y -qq --no-install-recommends python3.10 python3.10-dev python3-pip libdrm2 libnuma1 libgomp1 ca-certificates tzdata g++ libc6-dev >/dev/null\n\
-                         ln -sf /usr/bin/python3.10 /usr/local/bin/python3\n\
-                         python3 -m pip install -q --target=/opt/py-overrides --upgrade prometheus-fastapi-instrumentator\n\
-                         export PYTHONPATH=\"/opt/py-overrides:${{PYTHONPATH}}\"\n\
-                         exec python3 -m vllm.entrypoints.openai.api_server --model={mount} --served-model-name={served} --enforce-eager --max-num-seqs 1 --host=0.0.0.0 --port={port}\n",
-                        mount = form.mount,
-                        served = served,
-                        port = port
-                    );
-                    let spec = format!(
-                        "\x20         command: [\"bash\", \"-c\"]\n\
-                         \x20         args:\n\
-                         \x20           - |-\n\
-                         {cmd_indented}\
-                         \x20         ports: [{{ containerPort: {port} }}]\n\
-                         \x20         env:\n\
-                         \x20           - {{ name: PYTHONPATH, value: \"/home/gspark/.local/lib/python3.10/site-packages:/host-sys-local-pkgs:/host-sys-pkgs\" }}\n\
-                         \x20           - {{ name: PYTHONUNBUFFERED, value: \"1\" }}\n\
-                         \x20           - {{ name: VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK, value: \"{devices}\" }}\n\
-                         \x20           - {{ name: LD_LIBRARY_PATH, value: \"/host-rbln-lib:/host-libs\" }}\n\
-                         \x20           - {{ name: PATH, value: \"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-rbln-bin\" }}\n\
-                         \x20         resources: {{ limits: {{ {res_key}: {devices} }}, requests: {{ cpu: \"8\", memory: \"32Gi\", {res_key}: {devices} }} }}\n\
-                         \x20         volumeMounts:\n\
-                         \x20           - {{ name: store, mountPath: /mnt/store, readOnly: true }}\n\
-                         \x20           - {{ name: host-local-pkgs, mountPath: /home/gspark/.local/lib/python3.10/site-packages, readOnly: true }}\n\
-                         \x20           - {{ name: host-sys-local-pkgs, mountPath: /host-sys-local-pkgs, readOnly: true }}\n\
-                         \x20           - {{ name: host-sys-pkgs, mountPath: /host-sys-pkgs, readOnly: true }}\n\
-                         \x20           - {{ name: host-libs, mountPath: /host-libs, readOnly: true }}\n\
-                         \x20           - {{ name: host-rbln-lib, mountPath: /host-rbln-lib, readOnly: true }}\n\
-                         \x20           - {{ name: host-rbln-bin, mountPath: /host-rbln-bin, readOnly: true }}\n\
-                         \x20           - {{ name: shm, mountPath: /dev/shm }}\n",
-                        cmd_indented = cmd.lines().map(|l| format!("             {}\n", l)).collect::<String>(),
-                        port = port,
-                        devices = devices,
-                        res_key = res_key
-                    );
-                    let vols = "\x20     volumes:\n\
-                                \x20       - { name: store, persistentVolumeClaim: { claimName: model-store } }\n\
-                                \x20       - { name: host-local-pkgs, hostPath: { path: /home/gspark/.local/lib/python3.10/site-packages, type: Directory } }\n\
-                                \x20       - { name: host-sys-local-pkgs, hostPath: { path: /usr/local/lib/python3.10/dist-packages, type: Directory } }\n\
-                                \x20       - { name: host-sys-pkgs, hostPath: { path: /usr/lib/python3/dist-packages, type: Directory } }\n\
-                                \x20       - { name: host-libs, hostPath: { path: /usr/lib/x86_64-linux-gnu, type: Directory } }\n\
-                                \x20       - { name: host-rbln-lib, hostPath: { path: /usr/lib, type: Directory } }\n\
-                                \x20       - { name: host-rbln-bin, hostPath: { path: /usr/bin, type: Directory } }\n\
-                                \x20       - { name: shm, emptyDir: { medium: Memory, sizeLimit: 16Gi } }\n"
-                        .to_string();
-                    ("ubuntu:22.04".to_string(), "# RBLN: using host RBLN stack fallback on the target node; loads the compiled artifact from model-store.".to_string(), spec, vols)
-                }
-            }
-            _ => {
-                let img = self
-                    .img_serving
-                    .clone()
-                    .unwrap_or_else(|| "vllm/vllm-openai:latest".into());
-                let spec = format!(
-                    "\x20         args: [\"serve\", \"{mount}\", \"--served-model-name\", \"{served}\", \"--port\", \"{port}\", \"--tensor-parallel-size\", \"{devices}\"]\n\
-                     \x20         ports: [{{ containerPort: {port} }}]\n\
-                     \x20         resources: {{ limits: {{ {res_key}: {devices} }}, requests: {{ cpu: \"4\", memory: \"16Gi\", {res_key}: {devices} }} }}\n\
-                     \x20         volumeMounts:\n\
-                     \x20           - {{ name: store, mountPath: /mnt/store, readOnly: true }}\n",
-                    mount = form.mount, served = served, port = port, devices = devices, res_key = res_key
-                );
-                let vols = "\x20     volumes:\n\x20       - { name: store, persistentVolumeClaim: { claimName: model-store } }\n".to_string();
-                (img, "# GPU: vLLM loads the model/store path directly; no compile step required.".to_string(), spec, vols)
-            }
+        let place = form.place.clone();
+        let plan = ServePlan {
+            name: &name,
+            ns: &self.ns,
+            replicas: replicas.clone(),
+            devices: devices.clone(),
+            serve_tp,
+            port: or("port", "8000"),
+            served: served.clone(),
+            res_key,
+            product_label,
+            place_host: place.split('(').next().unwrap_or("any").trim().to_string(),
+            place_label: place.clone(),
         };
-        let yaml = format!(
-            "# Deployment manifest preview. Review, then apply with `kubectl apply -f -`.\n\
-             # Serving model {model_id}. Engine: {engine}.\n\
-             # Placement: {place}. Total device demand = {replicas} x {devices}.\n\
-             # If the image contains a TODO- placeholder, set LMD_SERVING_IMAGE before applying.\n\
-             {note}\n\
-             apiVersion: apps/v1\n\
-             kind: Deployment\n\
-             metadata: {{ name: {name}, namespace: {ns} }}\n\
-             spec:\n\
-             \x20 replicas: {replicas}\n\
-             \x20 selector: {{ matchLabels: {{ app: {name} }} }}\n\
-             \x20 template:\n\
-             \x20   metadata: {{ labels: {{ app: {name}, llm-d.ai/inferenceServing: \"true\", llm-d.ai/model: {name} }} }}\n\
-             \x20   spec:\n\
-             {placement}\
-             {volumes_block}\
-             \x20     containers:\n\
-             \x20       - name: server\n\
-             \x20         image: {image}   # {engine}\n\
-             {container_spec}",
-            model_id = form.model_id,
-            engine = form.engine,
-            note = note,
-            place = place,
-            name = name,
-            ns = self.ns,
-            replicas = replicas,
-            devices = devices,
-            placement = placement_yaml,
-            volumes_block = volumes_block,
-            container_spec = container_spec,
-            image = image,
-        );
-        // routing=llm-d → 게이트웨이 라우팅 리소스(InferencePool+EPP+HTTPRoute)를 뒤에 동봉.
-        let yaml = if form.get("routing") == "llm-d" {
-            format!("{}{}", yaml, self.routing_docs(&name, form.vendor, &served))
-        } else {
-            yaml
+        let images = Images {
+            furiosa: self.img_furiosa.as_deref(),
+            serving: self.img_serving.as_deref(),
         };
-        // 자동화: YAML 을 덤프하지 않고 바로 apply 확인 팝업. (YAML 은 팝업에서 e=vi 편집·v=검증)
+
+        let mut manifest = serving::serving_manifest(&form, &plan, &images);
+        // routing=llm-d → 게이트웨이 라우팅 리소스(EPP+InferencePool+HTTPRoute)를 뒤에 동봉.
+        if form.get("routing") == "llm-d" {
+            let routes = routing::routing_docs(&self.ns, &name, form.vendor, &served);
+            manifest.docs.extend(routes.docs);
+        }
+
         self.confirm = Some(Pending::Apply {
             title: format!("deploy {} ×{}", form.model, replicas),
-            yaml,
+            yaml: manifest.to_yaml(),
         });
         self.confirm_yes = false;
-    }
-
-    /// llm-d 게이트웨이 라우팅 리소스 문서들(서빙 Deployment 뒤에 붙임).
-    /// 실기 배선 그대로: SA, RoleBinding×2(공유 Role llmd-router-epp-sa/-non-sa 참조),
-    /// plugins ConfigMap, EPP Deployment/Service, InferencePool(app={name} 선택), HTTPRoute.
-    /// 경로 = /accel/model. EPP 는 pool 멤버 파드로 model/부하 인지 라우팅.
-    pub(super) fn routing_docs(&self, name: &str, vendor: &str, served: &str) -> String {
-        let accel = match vendor {
-            "furiosa" => "rngd",
-            "rbln" => "atom",
-            _ => "gpu",
-        };
-        let slug = served
-            .rsplit('/')
-            .next()
-            .unwrap_or(served)
-            .to_lowercase()
-            .replace(['.', '_'], "-");
-        let path = format!("/{}/{}", accel, slug);
-        let ns = &self.ns;
-        // EPP core-metrics-extractor 파라미터 — 실동작 EPP(manifests/epp/*)와 동일한 표준 정합.
-        // Furiosa 는 furiosa_llm_* 메트릭명을 명시해야 scorer 가 큐/KV 신호를 읽는다.
-        // vLLM/RBLN(vllm:*)은 파라미터 없이 기본값(defaultEngine=vllm)이면 충분.
-        let metrics_extractor = if vendor == "furiosa" {
-            "\x20\x20\x20\x20\x20 parameters:\n\
-             \x20\x20\x20\x20\x20\x20\x20 defaultEngine: vllm\n\
-             \x20\x20\x20\x20\x20\x20\x20 engineConfigs:\n\
-             \x20\x20\x20\x20\x20\x20\x20 - name: vllm\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20\x20 queuedRequestsSpec: furiosa_llm_num_requests_waiting\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20\x20 runningRequestsSpec: furiosa_llm_num_requests_running\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20\x20 kvUsageSpec: furiosa_llm_kv_cache_usage_percent\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20\x20 loraSpec: \"\"\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20\x20 cacheInfoSpec: furiosa_llm_cache_config_info\n"
-        } else {
-            ""
-        };
-        format!(
-            "---\n\
-             # ── llm-d 라우팅: 게이트웨이 {path} → InferencePool({name}-pool) → EPP → 이 서빙 ──\n\
-             # (공유 Role llmd-router-epp-sa/-non-sa 는 클러스터에 이미 존재한다고 가정)\n\
-             apiVersion: v1\n\
-             kind: ServiceAccount\n\
-             metadata: {{ name: {name}-epp, namespace: {ns} }}\n\
-             ---\n\
-             apiVersion: rbac.authorization.k8s.io/v1\n\
-             kind: RoleBinding\n\
-             metadata: {{ name: {name}-epp-sa, namespace: {ns} }}\n\
-             roleRef: {{ apiGroup: rbac.authorization.k8s.io, kind: Role, name: llmd-router-epp-sa }}\n\
-             subjects:\n\
-             \x20 - {{ kind: ServiceAccount, name: {name}-epp, namespace: {ns} }}\n\
-             ---\n\
-             apiVersion: rbac.authorization.k8s.io/v1\n\
-             kind: RoleBinding\n\
-             metadata: {{ name: {name}-epp-non-sa, namespace: {ns} }}\n\
-             roleRef: {{ apiGroup: rbac.authorization.k8s.io, kind: Role, name: llmd-router-epp-non-sa }}\n\
-             subjects:\n\
-             \x20 - {{ kind: ServiceAccount, name: {name}-epp, namespace: {ns} }}\n\
-             ---\n\
-             # EPP 는 InferencePool 멤버십 검증 위해 TokenReview(auth 위임) 권한 필요 — 실동작 EPP 와 동일.\n\
-             apiVersion: rbac.authorization.k8s.io/v1\n\
-             kind: ClusterRoleBinding\n\
-             metadata: {{ name: {name}-epp-auth-delegator }}\n\
-             roleRef: {{ apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: system:auth-delegator }}\n\
-             subjects:\n\
-             \x20 - {{ kind: ServiceAccount, name: {name}-epp, namespace: {ns} }}\n\
-             ---\n\
-             apiVersion: v1\n\
-             kind: ConfigMap\n\
-             metadata: {{ name: {name}-epp, namespace: {ns} }}\n\
-             data:\n\
-             \x20 default-plugins.yaml: |\n\
-             \x20\x20\x20 apiVersion: inference.networking.x-k8s.io/v1alpha1\n\
-             \x20\x20\x20 kind: EndpointPickerConfig\n\
-             \x20\x20\x20 plugins:\n\
-             \x20\x20\x20 - type: queue-scorer\n\
-             \x20\x20\x20 - type: kv-cache-utilization-scorer\n\
-             \x20\x20\x20 - type: prefix-cache-scorer\n\
-             \x20\x20\x20 - type: no-hit-lru-scorer\n\
-             \x20\x20\x20 - type: metrics-data-source\n\
-             \x20\x20\x20\x20\x20 parameters:\n\
-             \x20\x20\x20\x20\x20\x20\x20 scheme: http\n\
-             \x20\x20\x20\x20\x20\x20\x20 path: /metrics\n\
-             \x20\x20\x20\x20\x20\x20\x20 insecureSkipVerify: true\n\
-             \x20\x20\x20 - type: core-metrics-extractor\n\
-             {metrics_extractor}\
-             \x20\x20\x20 schedulingProfiles:\n\
-             \x20\x20\x20 - name: default\n\
-             \x20\x20\x20\x20\x20 plugins:\n\
-             \x20\x20\x20\x20\x20 - {{ pluginRef: queue-scorer, weight: 2 }}\n\
-             \x20\x20\x20\x20\x20 - {{ pluginRef: kv-cache-utilization-scorer, weight: 2 }}\n\
-             \x20\x20\x20\x20\x20 - {{ pluginRef: prefix-cache-scorer, weight: 3 }}\n\
-             \x20\x20\x20\x20\x20 - {{ pluginRef: no-hit-lru-scorer, weight: 2 }}\n\
-             ---\n\
-             apiVersion: apps/v1\n\
-             kind: Deployment\n\
-             metadata: {{ name: {name}-epp, namespace: {ns} }}\n\
-             spec:\n\
-             \x20 replicas: 1\n\
-             \x20 selector: {{ matchLabels: {{ app: {name}-epp }} }}\n\
-             \x20 template:\n\
-             \x20   metadata: {{ labels: {{ app: {name}-epp }} }}\n\
-             \x20   spec:\n\
-             \x20     serviceAccountName: {name}-epp\n\
-             \x20     containers:\n\
-             \x20       - name: epp\n\
-             \x20         image: ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:main\n\
-             \x20         args: [\"--pool-name\", \"{name}-pool\", \"--pool-namespace\", \"{ns}\", \"--pool-group\", \"inference.networking.k8s.io\", \"--config-file\", \"/config/default-plugins.yaml\", \"--zap-encoder\", \"json\", \"--tracing=false\"]\n\
-             \x20         ports:\n\
-             \x20           - {{ name: grpc, containerPort: 9002 }}\n\
-             \x20           - {{ name: grpc-health, containerPort: 9003 }}\n\
-             \x20           - {{ name: metrics, containerPort: 9090 }}\n\
-             \x20         livenessProbe: {{ grpc: {{ port: 9003, service: inference-extension }}, initialDelaySeconds: 5, periodSeconds: 10 }}\n\
-             \x20         readinessProbe: {{ grpc: {{ port: 9003, service: inference-extension }}, periodSeconds: 2 }}\n\
-             \x20         env:\n\
-             \x20           - {{ name: NAMESPACE, valueFrom: {{ fieldRef: {{ fieldPath: metadata.namespace }} }} }}\n\
-             \x20           - {{ name: POD_NAME, valueFrom: {{ fieldRef: {{ fieldPath: metadata.name }} }} }}\n\
-             \x20         volumeMounts:\n\
-             \x20           - {{ name: plugins, mountPath: /config }}\n\
-             \x20     volumes:\n\
-             \x20       - {{ name: plugins, configMap: {{ name: {name}-epp }} }}\n\
-             ---\n\
-             apiVersion: v1\n\
-             kind: Service\n\
-             metadata: {{ name: {name}-epp, namespace: {ns} }}\n\
-             spec:\n\
-             \x20 selector: {{ app: {name}-epp }}\n\
-             \x20 ports:\n\
-             \x20   - {{ name: grpc-ext-proc, port: 9002, targetPort: 9002 }}\n\
-             \x20   - {{ name: http-metrics, port: 9090, targetPort: 9090 }}\n\
-             ---\n\
-             apiVersion: inference.networking.k8s.io/v1\n\
-             kind: InferencePool\n\
-             metadata: {{ name: {name}-pool, namespace: {ns} }}\n\
-             spec:\n\
-             \x20 selector: {{ matchLabels: {{ app: {name} }} }}\n\
-             \x20 targetPorts:\n\
-             \x20   - {{ number: 8000 }}\n\
-             \x20 endpointPickerRef: {{ group: \"\", kind: Service, name: {name}-epp, port: {{ number: 9002 }}, failureMode: FailClose }}\n\
-             ---\n\
-             apiVersion: gateway.networking.k8s.io/v1\n\
-             kind: HTTPRoute\n\
-             metadata: {{ name: {name}-route, namespace: {ns} }}\n\
-             spec:\n\
-             \x20 parentRefs:\n\
-             \x20   - {{ name: llm-d-gateway }}\n\
-             \x20 rules:\n\
-             \x20   - matches:\n\
-             \x20       - {{ path: {{ type: PathPrefix, value: {path} }} }}\n\
-             \x20     filters:\n\
-             \x20       - {{ type: URLRewrite, urlRewrite: {{ path: {{ type: ReplacePrefixMatch, replacePrefixMatch: /v1 }} }} }}\n\
-             \x20     backendRefs:\n\
-             \x20       - {{ group: inference.networking.k8s.io, kind: InferencePool, name: {name}-pool }}\n",
-            name = name, ns = ns, path = path, metrics_extractor = metrics_extractor
-        )
     }
 }
 
@@ -996,34 +684,158 @@ impl App {
 mod deploy_routing_tests {
     use super::*;
 
-    // 표준 정합: 실동작 EPP(manifests/epp/*)와 동일한 플러그인·RBAC·probe 를 생성해야 한다.
-    #[test]
-    fn routing_docs_has_metric_source_plugins_and_auth() {
-        let a = App::new();
-        let doc = a.routing_docs("myserve", "rbln", "meta-llama/Llama-3.1-8B-Instruct");
-        // scorer 가 실제 메트릭을 읽으려면 이 두 플러그인이 필수(이전엔 누락 → EPP 스코어링 무력).
-        assert!(doc.contains("type: metrics-data-source"), "metrics source plugin");
-        assert!(doc.contains("type: core-metrics-extractor"), "metrics extractor plugin");
-        assert!(doc.contains("type: no-hit-lru-scorer"));
-        // EPP 는 TokenReview 위임 권한 필요.
-        assert!(doc.contains("kind: ClusterRoleBinding"));
-        assert!(doc.contains("name: system:auth-delegator"));
-        // 헬스 probe.
-        assert!(doc.contains("livenessProbe"));
-        assert!(doc.contains("readinessProbe"));
-        // (llm-d.ai/* 표준 라벨은 서빙 Deployment 쪽에 붙음 — routing_docs 아님)
+    /// Parse the routing documents into objects, keyed by (kind, name) — assertions can then be
+    /// about the wiring rather than about substrings that happen to appear in the file.
+    fn objects(ns: &str, name: &str, vendor: &str, served: &str) -> Vec<serde_yaml::Value> {
+        let yaml = routing::routing_docs(ns, name, vendor, served).to_yaml();
+        serde_yaml::Deserializer::from_str(&yaml)
+            .map(|d| {
+                <serde_yaml::Value as serde::Deserialize>::deserialize(d)
+                    .expect("routing docs are valid YAML")
+            })
+            .filter(|v: &serde_yaml::Value| !v.is_null())
+            .collect()
     }
 
-    // 벤더별 메트릭명: Furiosa 는 furiosa_llm_* 를 명시, vLLM/RBLN 은 기본값(파라미터 없음).
+    fn find<'a>(docs: &'a [serde_yaml::Value], kind: &str) -> &'a serde_yaml::Value {
+        docs.iter()
+            .find(|d| d["kind"].as_str() == Some(kind))
+            .unwrap_or_else(|| panic!("routing docs should contain a {}", kind))
+    }
+
+    /// The generated EPP must match the wiring proven in-cluster (`manifests/epp/*`): without the
+    /// metrics source and extractor plugins the scorers read nothing and routing is inert.
+    #[test]
+    fn routing_docs_has_metric_source_plugins_and_auth() {
+        let docs = objects("llm-serving", "myserve", "rbln", "meta-llama/Llama-3.1-8B-Instruct");
+
+        // The EPP config is a YAML document embedded in the ConfigMap — parse it too.
+        let cm = docs
+            .iter()
+            .find(|d| d["kind"].as_str() == Some("ConfigMap"))
+            .expect("EPP ConfigMap");
+        let cfg: serde_yaml::Value =
+            serde_yaml::from_str(cm["data"]["default-plugins.yaml"].as_str().expect("plugins"))
+                .expect("embedded EPP config parses as YAML");
+        let types: Vec<&str> = cfg["plugins"]
+            .as_sequence()
+            .expect("plugins list")
+            .iter()
+            .filter_map(|p| p["type"].as_str())
+            .collect();
+        for want in [
+            "metrics-data-source",
+            "core-metrics-extractor",
+            "no-hit-lru-scorer",
+            "queue-scorer",
+            "kv-cache-utilization-scorer",
+            "prefix-cache-scorer",
+        ] {
+            assert!(types.contains(&want), "EPP plugins missing {}: {:?}", want, types);
+        }
+        // Every scorer in the profile refers to a declared plugin, with a weight.
+        for entry in cfg["schedulingProfiles"][0]["plugins"]
+            .as_sequence()
+            .expect("profile plugins")
+        {
+            let r = entry["pluginRef"].as_str().expect("pluginRef");
+            assert!(types.contains(&r), "profile references undeclared plugin {}", r);
+            assert!(entry["weight"].as_u64().is_some(), "{} needs a weight", r);
+        }
+
+        // EPP verifies pool membership through TokenReview, so it needs auth delegation.
+        let crb = find(&docs, "ClusterRoleBinding");
+        assert_eq!(crb["roleRef"]["name"].as_str(), Some("system:auth-delegator"));
+        assert_eq!(
+            crb["subjects"][0]["name"].as_str(),
+            Some("myserve-epp"),
+            "the binding must name this deployment's own SA"
+        );
+
+        // Health probes on the EPP container.
+        let epp = docs
+            .iter()
+            .find(|d| {
+                d["kind"].as_str() == Some("Deployment")
+                    && d["metadata"]["name"].as_str() == Some("myserve-epp")
+            })
+            .expect("EPP Deployment");
+        let c = &epp["spec"]["template"]["spec"]["containers"][0];
+        assert!(!c["livenessProbe"].is_null() && !c["readinessProbe"].is_null());
+
+        // The pool selects the serving pods and points at the EPP service.
+        let pool = find(&docs, "InferencePool");
+        assert_eq!(pool["spec"]["selector"]["matchLabels"]["app"].as_str(), Some("myserve"));
+        assert_eq!(pool["spec"]["endpointPickerRef"]["name"].as_str(), Some("myserve-epp"));
+
+        // And the route sends traffic to the pool, not straight to a Service — which is exactly
+        // the misconfiguration that used to bypass the EPP entirely.
+        let route = find(&docs, "HTTPRoute");
+        let backend = &route["spec"]["rules"][0]["backendRefs"][0];
+        assert_eq!(backend["kind"].as_str(), Some("InferencePool"));
+        assert_eq!(backend["name"].as_str(), Some("myserve-pool"));
+    }
+
+    /// Furiosa exposes `furiosa_llm_*`, so the extractor must be told the metric names;
+    /// vLLM/RBLN expose `vllm:*`, which the defaults already read.
     #[test]
     fn furiosa_extractor_specifies_furiosa_metric_names() {
-        let a = App::new();
-        let furiosa = a.routing_docs("qwen-embed", "furiosa", "Qwen/Qwen3-Embedding-8B");
-        assert!(furiosa.contains("furiosa_llm_num_requests_waiting"));
-        assert!(furiosa.contains("furiosa_llm_kv_cache_usage_percent"));
-        assert!(furiosa.contains("furiosa_llm_cache_config_info"));
+        let extractor = |vendor: &str| -> serde_yaml::Value {
+            let docs = objects("llm-serving", "svc", vendor, "Qwen/Qwen3-Embedding-8B");
+            let cm = docs
+                .iter()
+                .find(|d| d["kind"].as_str() == Some("ConfigMap"))
+                .expect("EPP ConfigMap");
+            let cfg: serde_yaml::Value =
+                serde_yaml::from_str(cm["data"]["default-plugins.yaml"].as_str().unwrap()).unwrap();
+            cfg["plugins"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .find(|p| p["type"].as_str() == Some("core-metrics-extractor"))
+                .cloned()
+                .expect("core-metrics-extractor")
+        };
 
-        let rbln = a.routing_docs("koni", "rbln", "koni/x");
-        assert!(!rbln.contains("furiosa_llm_"), "vLLM/RBLN uses vllm:* defaults, no furiosa specs");
+        let f = extractor("furiosa");
+        let engine = &f["parameters"]["engineConfigs"][0];
+        assert_eq!(
+            engine["queuedRequestsSpec"].as_str(),
+            Some("furiosa_llm_num_requests_waiting")
+        );
+        assert_eq!(
+            engine["kvUsageSpec"].as_str(),
+            Some("furiosa_llm_kv_cache_usage_percent")
+        );
+        assert_eq!(
+            engine["cacheInfoSpec"].as_str(),
+            Some("furiosa_llm_cache_config_info")
+        );
+
+        let r = extractor("rbln");
+        assert!(
+            r["parameters"].is_null(),
+            "vLLM/RBLN should take the extractor defaults, got {:?}",
+            r["parameters"]
+        );
+    }
+
+    /// The route path is derived from the accelerator family and the model slug.
+    #[test]
+    fn route_path_names_accelerator_and_model() {
+        for (vendor, want) in [
+            ("furiosa", "/rngd/qwen3-4b-fp8"),
+            ("rbln", "/atom/qwen3-4b-fp8"),
+            ("gpu", "/gpu/qwen3-4b-fp8"),
+        ] {
+            let docs = objects("llm-serving", "svc", vendor, "furiosa-ai/Qwen3.4B_FP8");
+            let route = find(&docs, "HTTPRoute");
+            assert_eq!(
+                route["spec"]["rules"][0]["matches"][0]["path"]["value"].as_str(),
+                Some(want),
+                "{} route path",
+                vendor
+            );
+        }
     }
 }
