@@ -196,7 +196,7 @@ fn arg_sets(args: &[String]) -> Vec<(String, String)> {
 /// come from its pack rather than from a match arm here.
 fn plan_vendor(v: &str) -> Result<&'static str> {
     accel::by_id(v).map(|p| p.id).ok_or_else(|| {
-        let known: Vec<&str> = accel::PACKS.iter().map(|p| p.id).collect();
+        let known: Vec<&str> = accel::packs().iter().map(|p| p.id).collect();
         anyhow::anyhow!(
             "unsupported --vendor '{}': expected {}",
             v,

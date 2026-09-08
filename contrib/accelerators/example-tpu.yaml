@@ -1,0 +1,37 @@
+# Example runtime accelerator pack.
+# Copy to ~/.config/lmd-top/accelerators/<name>.yaml — loaded at startup, no rebuild.
+#
+# A declaration covers the *data* half of a pack: telemetry series (with their unit and
+# aggregation), the labels that identify a device, and the Kubernetes scheduling identity.
+# Code-shaped behaviour — a compile recipe, a memory-fit model — needs a built-in pack, so a
+# declared accelerator is serve-only and `--plan compile` will decline it.
+#
+# Validation refuses, with a reason on stderr:
+#   - a `kind` belonging to a built-in accelerator (it would make lookups ambiguous)
+#   - a labels.key equal to labels.id (a per-node ordinal cannot identify a device: BUG-19)
+#   - a missing util series, an unknown field/unit/agg, or health without its series
+#
+# units: percent | ratio | bytes | mib | celsius | watt | millijoule | count
+# aggs:  max (default) | avg | sum        health: zero-is-healthy | non-zero-is-alive
+
+id: tpu
+aliases: [edge-tpu]
+label: TPU
+display: Google TPU
+family: Google TPU
+kind: custom
+engine: vLLM-TPU
+exporter: tpu
+accent: 3
+resource_key: google.com/tpu
+route_segment: tpu
+max_tensor_parallel: 8
+labels:
+  key: uuid
+  id: chip
+  node: hostname
+series:
+  - { field: util,      metric: tpu_chip_utilization, unit: ratio, agg: avg, missing: TPU util unavailable }
+  - { field: temp,      metric: tpu_chip_temperature, unit: celsius }
+  - { field: mem_used,  metric: tpu_hbm_used_bytes,   unit: bytes }
+  - { field: mem_total, metric: tpu_hbm_total_bytes,  unit: bytes }

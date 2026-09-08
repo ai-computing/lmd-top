@@ -12,14 +12,24 @@ pub enum AccelKind {
     Gpu,
     Rbln,
     Rngd,
+    /// A device class declared at runtime (see `accel::packs`). The payload is the pack's slot
+    /// in the registry, so `accel::by_kind` stays a bijection — a declared accelerator gets
+    /// its own class rather than borrowing an existing one's colour and capabilities.
+    Other(u16),
 }
 impl AccelKind {
     /// 벤더 계열 라벨(fallback). GPU 는 모델이 다양하므로 generic "GPU" — 실제 모델은 Accel.model.
     pub fn label(&self) -> &'static str {
+        crate::accel::by_kind(*self).label
+    }
+
+    /// Stable sort rank: built-in classes keep their declaration order, declared ones follow.
+    pub fn rank(&self) -> u16 {
         match self {
-            AccelKind::Gpu => "GPU",
-            AccelKind::Rbln => "RBLN",
-            AccelKind::Rngd => "RNGD",
+            AccelKind::Gpu => 0,
+            AccelKind::Rbln => 1,
+            AccelKind::Rngd => 2,
+            AccelKind::Other(slot) => 3 + slot,
         }
     }
 }
@@ -1099,7 +1109,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
     // accelerator changes nothing here — it appears in `accel::PACKS`.
     let devices = async {
         let mut set = tokio::task::JoinSet::new();
-        for pack in crate::accel::PACKS.iter().copied() {
+        for pack in crate::accel::packs().iter().copied() {
             let prom = p.clone();
             set.spawn(async move { collect_pack(&prom, pack).await });
         }
@@ -1112,7 +1122,7 @@ pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
         all
     };
     let (mut accel, nodes) = tokio::join!(devices, collect_nodes(p));
-    accel.sort_by(|a, b| (a.kind as u8, &a.node, &a.id).cmp(&(b.kind as u8, &b.node, &b.id)));
+    accel.sort_by(|a, b| (a.kind.rank(), &a.node, &a.id).cmp(&(b.kind.rank(), &b.node, &b.id)));
     // 통합 메모리(GB10 등): 별도 VRAM 없음 → 노드(호스트) 메모리 풀로 backfill.
     for a in accel
         .iter_mut()

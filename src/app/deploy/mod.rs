@@ -14,22 +14,36 @@ use serving::{Images, ServePlan};
 /// (model, model_id, engine, vendor, mount, devices_default, serve_tp_default).
 type DeploySpec = (String, String, String, &'static str, String, String, Option<String>);
 
-impl App {    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
+impl App {    /// Which accelerator serves an artifact, given the engine string discovered on it
+    /// (`detect_engine`, or set by the headless planner).
+    ///
+    /// Resolved against the packs so a newly declared accelerator is recognised without a
+    /// branch here: an exact engine match first, then the accelerator's short label or long
+    /// display name appearing in a variant spelling (e.g. "vLLM-RBLN (nightly)").
+    pub(super) fn vendor_for_engine(engine: &str) -> &'static str {
+        let packs = crate::accel::packs();
+        packs
+            .iter()
+            .find(|p| p.engine.eq_ignore_ascii_case(engine))
+            .or_else(|| {
+                packs
+                    .iter()
+                    .find(|p| !p.label.is_empty() && engine.contains(p.label))
+            })
+            .or_else(|| {
+                packs
+                    .iter()
+                    .find(|p| !p.display.is_empty() && engine.contains(p.display))
+            })
+            .map(|p| p.id)
+            .unwrap_or("gpu")
+    }
+
+    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
         if let Some(a) = self.selected_artifact() {
             let model_id = Self::artifact_model_id(a);
             let repo_dir = model_id.replace('/', "--");
-            // The artifact records its serving engine; the pack whose engine name it carries
-            // identifies the accelerator, so a new one is recognised without a branch here.
-            let vendor = crate::accel::PACKS
-                .iter()
-                .find(|p| p.caps.compiles_ahead_of_time && a.engine.contains(p.label))
-                .or_else(|| {
-                    crate::accel::PACKS
-                        .iter()
-                        .find(|p| a.engine.contains(p.display))
-                })
-                .map(|p| p.id)
-                .unwrap_or("gpu");
+            let vendor = Self::vendor_for_engine(&a.engine);
             let mount = if a.mount.is_empty() {
                 format!("/mnt/store/compiled/{}", repo_dir)
             } else {

@@ -21,8 +21,8 @@ impl App {
                         1 => x.temp.partial_cmp(&y.temp).unwrap_or(Equal),
                         2 => x.mem_used_gb.partial_cmp(&y.mem_used_gb).unwrap_or(Equal),
                         3 => x.power.partial_cmp(&y.power).unwrap_or(Equal),
-                        _ => (x.kind as u8, x.node.as_str(), x.id.as_str()).cmp(&(
-                            y.kind as u8,
+                        _ => (x.kind.rank(), x.node.as_str(), x.id.as_str()).cmp(&(
+                            y.kind.rank(),
                             y.node.as_str(),
                             y.id.as_str(),
                         )),
