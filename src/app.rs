@@ -100,6 +100,19 @@ pub enum Pending {
         title: String,
         url: String,
     }, // kubectl apply -f <url> — 상류 릴리스 매니페스트(예: Gateway/Inference CRD) 설치
+    /// Create or replace a Kubernetes Secret from a value typed in the TUI.
+    ///
+    /// The value is deliberately *not* in the confirm prompt, the audit log, or any preview.
+    /// It reaches kubectl over stdin rather than as an argument, so it never appears in the
+    /// process table either — a token pasted into an ops tool should not be visible to
+    /// `ps` on a shared host.
+    SetSecret {
+        name: String,
+        key: String,
+        value: String,
+        /// What this secret is for, shown to the operator instead of the value.
+        purpose: String,
+    },
     Cordon {
         node: String,
         on: bool,
@@ -135,6 +148,14 @@ impl Pending {
             Pending::Rollback { name } => {
                 format!("rollout undo {} (revert to previous revision)?", name)
             }
+            // The value is intentionally absent — this string is shown on screen and, for
+            // in-flight mutations, in the header.
+            Pending::SetSecret {
+                name, key, purpose, ..
+            } => format!(
+                "store {} in secret {}/{} (value hidden)?",
+                purpose, name, key
+            ),
             Pending::Drain { pod } => format!(
                 "drain endpoint {} (relabel out of routing; in-flight streams finish)?",
                 pod
@@ -462,6 +483,8 @@ pub struct App {
     pub action_menu: Option<ActionMenu>, // Enter context action menu (Info/Compile/Deploy/Stop…)
     pub objectives: HashMap<String, Objective>, // per-model serving objective (SLO) — user input
     pub objective_form: Option<ObjectiveForm>, // objective edit form
+    /// Masked secret entry (HF token). Never rendered, never previewed — see `SecretForm`.
+    pub secret_form: Option<crate::ops::SecretForm>,
     pub logs_mode: bool,                 // logs overlay
     pub logs_target: String,             // logs target pod
     pub logs: Vec<String>,               // log lines
@@ -558,6 +581,7 @@ impl App {
             action_menu: None,
             objectives: HashMap::new(),
             objective_form: None,
+            secret_form: None,
             logs_mode: false,
             logs_target: String::new(),
             logs: Vec::new(),
@@ -2053,11 +2077,88 @@ mod tests {
         assert_eq!(a.order().first().copied(), Some(1)); // count 5 먼저(내림)
     }
 
+    /// The secret form must never put the value on screen: a terminal keeps scrollback and a
+    /// screen share keeps everything. Renders a real frame and searches every cell.
+    #[test]
+    fn secret_form_never_renders_the_value() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let _g = crate::ui::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut a = App::new();
+        a.mode = Mode::Admin;
+        a.ns = "llm-serving".into();
+        a.view = View::Setup;
+        let mut form = crate::ops::SecretForm::new(
+            "hf-token",
+            "token",
+            "HuggingFace token",
+            "huggingface.co/settings/tokens",
+        );
+        let secret = "hf_ZZTOPsecretVALUE9876";
+        for c in secret.chars() {
+            form.push(c);
+        }
+        a.secret_form = Some(form);
+        assert_eq!(crate::ui::Overlay::top(&a), Some(crate::ui::Overlay::SecretForm));
+
+        let mut fx = crate::ui::FxState::disabled();
+        let mut t = Terminal::new(TestBackend::new(120, 34)).unwrap();
+        t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+        let buf = t.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf.cell((x, y)).unwrap().symbol());
+            }
+        }
+        assert!(!text.contains(secret), "the value was rendered");
+        assert!(!text.contains("hf_ZZTOP"), "a prefix of the value was rendered");
+        assert!(!text.contains("secretVALUE"), "part of the value was rendered");
+        // The mask and the destination are shown, so the operator knows what is happening.
+        assert!(text.contains('•'), "the masked value should be visible as dots");
+        assert!(text.contains("hf-token"), "the destination secret is named");
+    }
+
+    /// Nor may it reach the confirm prompt — that string is shown on screen and, while the
+    /// mutation is in flight, in the header.
+    #[test]
+    fn secret_confirm_prompt_omits_the_value() {
+        let p = Pending::SetSecret {
+            name: "hf-token".into(),
+            key: "token".into(),
+            purpose: "HuggingFace token".into(),
+            value: "hf_ZZTOPsecretVALUE9876".into(),
+        };
+        let prompt = p.prompt();
+        assert!(!prompt.contains("hf_ZZTOP"), "prompt leaked the value: {}", prompt);
+        assert!(prompt.contains("hidden"), "and says so: {}", prompt);
+        assert!(prompt.contains("hf-token/token"), "names the destination: {}", prompt);
+    }
+
     #[test]
     fn overlay_precedence_single_source() {
         use crate::ui::Overlay;
-        // PRECEDENCE must include every variant exactly once; missing entries are not drawn/consumed.
-        assert_eq!(Overlay::PRECEDENCE.len(), 14);
+        // PRECEDENCE must include every variant exactly once — a variant missing from it is
+        // never drawn and never consumes input. Derived from `is_open`'s match rather than a
+        // hardcoded count: that match is exhaustive by compiler check, so it is the authority
+        // on how many variants exist, and adding one cannot silently pass this test.
+        let src = include_str!("ui/mod.rs");
+        let is_open = &src[src
+            .find("pub fn is_open(self, app: &App) -> bool")
+            .expect("is_open exists")..];
+        let variants = is_open[..is_open.find("\n    }").expect("end of fn")]
+            .matches("Overlay::")
+            .count();
+        assert_eq!(
+            Overlay::PRECEDENCE.len(),
+            variants,
+            "PRECEDENCE has {} entries but Overlay has {} variants — a variant missing here is \
+             never drawn and never receives input",
+            Overlay::PRECEDENCE.len(),
+            variants
+        );
         let mut seen = std::collections::HashSet::new();
         for ov in Overlay::PRECEDENCE {
             assert!(

@@ -925,3 +925,56 @@ pub(super) fn place_picker_overlay(f: &mut Frame, app: &App) {
         area,
     );
 }
+
+/// Masked secret entry. Draws the value's *length* and nothing else — the characters never
+/// reach a buffer cell, so a screen share or a terminal scrollback cannot leak the token.
+pub(super) fn secret_form_overlay(f: &mut Frame, app: &App) {
+    let Some(form) = app.secret_form.as_ref() else {
+        return;
+    };
+    let area = centered(f.area(), 74, 11);
+    f.render_widget(Clear, area);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("  secret  ", Style::default().fg(C_DIM())),
+        Span::styled(
+            format!("{}/{}", form.name, form.key),
+            Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  in namespace {}", app.ns),
+            Style::default().fg(C_DIM()),
+        ),
+    ]));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", form.purpose),
+        Style::default().fg(Color::White),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  value   ", Style::default().fg(C_DIM())),
+        Span::styled(
+            format!("[ {}_ ]", form.masked()),
+            Style::default()
+                .fg(C_WARN())
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", form.help),
+        Style::default().fg(C_DIM()),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  the value is masked here, kept out of the audit log, and passed to kubectl on stdin",
+        Style::default().fg(C_DIM()),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  so it never appears in the process table.",
+        Style::default().fg(C_DIM()),
+    )));
+    f.render_widget(
+        Paragraph::new(lines).block(block("enter secret · type/paste · Enter store · Esc cancel")),
+        area,
+    );
+}

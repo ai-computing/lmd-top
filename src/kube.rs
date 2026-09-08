@@ -82,6 +82,76 @@ pub async fn get_jsonpath(args: &[&str], jp: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Minimal base64 (standard alphabet, padded). A Secret's data must be base64, and pulling in
+/// a crate for 20 lines is not worth it in a build that deliberately keeps its dependency
+/// list short.
+fn base64(input: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(A[(n >> 18 & 63) as usize] as char);
+        out.push(A[(n >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            A[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Create or replace an opaque Secret with one key.
+///
+/// The value goes to kubectl over **stdin**, never as an argument: `kubectl create secret
+/// --from-literal=token=…` would put the token in the process table for every user on the
+/// host. `apply` makes this an upsert, so re-entering a rotated token just works.
+/// The returned string is kubectl's own output and contains no secret material.
+pub fn apply_secret(ns: &str, name: &str, key: &str, value: &str) -> Result<String> {
+    use std::io::Write;
+    let manifest = format!(
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: {}\n  namespace: {}\ntype: Opaque\ndata:\n  {}: {}\n",
+        name,
+        ns,
+        key,
+        base64(value.as_bytes())
+    );
+    let mut child = std::process::Command::new("kubectl")
+        .args(["apply", "-n", ns, "-f", "-", "--request-timeout=20s"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(spawn_err)?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| anyhow!("cannot write to kubectl"))?
+        .write_all(manifest.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        // kubectl echoes the manifest on some errors; keep only the message lines.
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(anyhow!(
+            "creating secret {}/{} failed: {}",
+            name,
+            key,
+            err.lines().next().unwrap_or("unknown error").trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Apply an upstream release manifest by URL: `kubectl apply -f <url>` (server-side).
 /// For Setup(Doctor) CRD installs (Gateway API / Inference Extension). Sync (worker thread).
 pub fn apply_url(url: &str) -> Result<String> {
@@ -680,5 +750,31 @@ mod tests {
         // Manifest with no Job (Deployment, etc.) → empty list (no pre-deletion).
         let dep = "apiVersion: apps/v1\nkind: Deployment\nmetadata: { name: srv }\n";
         assert!(job_names(dep).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::base64;
+
+    #[test]
+    fn base64_matches_the_standard_alphabet_and_padding() {
+        // RFC 4648 test vectors.
+        for (input, want) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(input.as_bytes()), want, "base64({:?})", input);
+        }
+        // A realistic HF token shape round-trips through a decoder.
+        let tok = "hf_ABCdefGHIjklMNOpqrSTUvwxYZ0123456789";
+        let enc = base64(tok.as_bytes());
+        assert!(!enc.contains('\n'), "no wrapping — k8s wants one line");
+        assert_eq!(enc.len() % 4, 0, "padded to a multiple of 4");
     }
 }

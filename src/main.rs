@@ -446,6 +446,22 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                 .map_err(|e| e.to_string());
             mk("stop(scale→0)".into(), name, "stop", r)
         }
+        Pending::SetSecret {
+            name,
+            key,
+            value,
+            purpose,
+        } => {
+            let r = kube::apply_secret(ns, &name, &key, &value)
+                .map(|o| OkInfo {
+                    // Neither the audit detail nor the toast may contain the value.
+                    audit_detail: o.lines().next().unwrap_or("applied").to_string(),
+                    notify: format!("{} stored in secret {}/{}", purpose, name, key),
+                    clear_preview: false,
+                })
+                .map_err(|e| e.to_string());
+            mk("set-secret".into(), format!("{}/{}", name, key), "set secret", r)
+        }
         Pending::Cordon { node, on } => {
             let act = if on { "cordon" } else { "uncordon" };
             let r = kube::cordon(&node, on)
@@ -1283,6 +1299,42 @@ fn ui_loop(
                     // Serving objective edit form overlay.
                     if top == Some(ui::Overlay::ObjectiveForm) {
                         handle_edit_form!(app, objective_form, objective_form_submit, k.code);
+                        continue;
+                    }
+                    // Masked secret entry. Enter stores it (behind a confirm), Esc discards.
+                    if top == Some(ui::Overlay::SecretForm) {
+                        match k.code {
+                            KeyCode::Esc => app.secret_form = None,
+                            KeyCode::Backspace => {
+                                if let Some(f) = app.secret_form.as_mut() {
+                                    f.backspace();
+                                }
+                            }
+                            KeyCode::Enter => {
+                                let form = app.secret_form.take().expect("open");
+                                if form.is_empty() {
+                                    app.notify("nothing entered — secret unchanged".to_string());
+                                } else {
+                                    let (name, key, purpose) =
+                                        (form.name.clone(), form.key.clone(), form.purpose.clone());
+                                    app.confirm = Some(Pending::SetSecret {
+                                        name,
+                                        key,
+                                        purpose,
+                                        value: form.into_value(),
+                                    });
+                                    app.confirm_yes = false;
+                                }
+                            }
+                            // Everything printable goes into the value — no `q` shortcut here,
+                            // because a token may legitimately contain one.
+                            KeyCode::Char(c) => {
+                                if let Some(f) = app.secret_form.as_mut() {
+                                    f.push(c);
+                                }
+                            }
+                            _ => {}
+                        }
                         continue;
                     }
                     // Route edit form (rename text / retarget selection).
