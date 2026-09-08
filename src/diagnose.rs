@@ -163,6 +163,26 @@ pub fn classify(log: &str, exit_code: Option<i32>) -> Failure {
         );
     }
 
+    // The recipe prints whatever detail the vendor compiler's exception carried, since the
+    // traceback alone says only "Error occurred while compiling the model".
+    if let Some(detail) = log
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix("LMD_COMPILE_CAUSE "))
+        .or_else(|| {
+            log.lines()
+                .rev()
+                .find_map(|l| l.trim().strip_prefix("LMD_COMPILE_ERROR "))
+        })
+    {
+        let detail = detail.trim();
+        // Only worth surfacing when it says more than the generic wrapper already did.
+        if !detail.is_empty() && !detail.to_lowercase().contains("error occurred while compiling")
+        {
+            return Failure::new("vendor-compiler", clip(detail), "");
+        }
+    }
+
     // ── Vendor compiler internals: generic, but say which stage and what to try ──
     if lc.contains("error occurred while compiling the model") {
         return Failure::new(
@@ -307,6 +327,28 @@ RuntimeError: Error occurred while compiling the model
             assert_eq!(f.kind, want, "classifying {:?} gave {:?}", log, f);
             assert!(!f.summary.is_empty());
         }
+    }
+
+    /// When the recipe manages to extract the vendor compiler's own detail, that outranks the
+    /// generic wrapper — the whole point is to stop reporting "an error occurred".
+    #[test]
+    fn vendor_detail_outranks_the_generic_wrapper() {
+        let log = format!(
+            "{}\nLMD_COMPILE_ERROR RuntimeError (\'Error occurred while compiling the model\',)\n\
+             LMD_COMPILE_CAUSE CompileError (\'unsupported op aten::foo at layer 3\',)\n",
+            RBLN_CODEGEN
+        );
+        let f = classify(&log, Some(1));
+        assert_eq!(f.kind, "vendor-compiler");
+        assert!(f.summary.contains("unsupported op"), "{}", f.summary);
+
+        // A cause line that only restates the wrapper is not an improvement, so the
+        // stage-level classification stands.
+        let vague = format!(
+            "{}\nLMD_COMPILE_ERROR RuntimeError (\'Error occurred while compiling the model\',)\n",
+            RBLN_CODEGEN
+        );
+        assert_eq!(classify(&vague, Some(1)).kind, "rbln-codegen");
     }
 
     #[test]
