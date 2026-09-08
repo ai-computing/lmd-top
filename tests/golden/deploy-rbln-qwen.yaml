@@ -1,0 +1,170 @@
+# title: deploy Qwen2.5-0.5B-Instruct ×1
+# Deployment manifest preview. Review, then apply with `kubectl apply -f -`.
+# Serving model Qwen/Qwen2.5-0.5B-Instruct. Engine: vLLM-RBLN.
+# Placement: any. Total device demand = 1 x 4.
+# If the image contains a TODO- placeholder, set LMD_SERVING_IMAGE before applying.
+# RBLN: using host RBLN stack fallback on the target node; loads the compiled artifact from model-store.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: serve-qwen-qwen2-5-0-5b-instruct, namespace: llm-serving }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: serve-qwen-qwen2-5-0-5b-instruct } }
+  template:
+    metadata: { labels: { app: serve-qwen-qwen2-5-0-5b-instruct, llm-d.ai/inferenceServing: "true", llm-d.ai/model: serve-qwen-qwen2-5-0-5b-instruct } }
+    spec:
+      nodeSelector: { rebellions.ai/npu.product: RBLN-CA22 }
+      volumes:
+        - { name: store, persistentVolumeClaim: { claimName: model-store } }
+        - { name: host-local-pkgs, hostPath: { path: /home/gspark/.local/lib/python3.10/site-packages, type: Directory } }
+        - { name: host-sys-local-pkgs, hostPath: { path: /usr/local/lib/python3.10/dist-packages, type: Directory } }
+        - { name: host-sys-pkgs, hostPath: { path: /usr/lib/python3/dist-packages, type: Directory } }
+        - { name: host-libs, hostPath: { path: /usr/lib/x86_64-linux-gnu, type: Directory } }
+        - { name: host-rbln-lib, hostPath: { path: /usr/lib, type: Directory } }
+        - { name: host-rbln-bin, hostPath: { path: /usr/bin, type: Directory } }
+        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 16Gi } }
+      containers:
+        - name: server
+          image: ubuntu:22.04   # vLLM-RBLN
+          command: ["bash", "-c"]
+          args:
+            - |-
+             set -eux
+             export DEBIAN_FRONTEND=noninteractive
+             apt-get update -qq
+             apt-get install -y -qq --no-install-recommends python3.10 python3.10-dev python3-pip libdrm2 libnuma1 libgomp1 ca-certificates tzdata g++ libc6-dev >/dev/null
+             ln -sf /usr/bin/python3.10 /usr/local/bin/python3
+             python3 -m pip install -q --target=/opt/py-overrides --upgrade prometheus-fastapi-instrumentator
+             export PYTHONPATH="/opt/py-overrides:${PYTHONPATH}"
+             exec python3 -m vllm.entrypoints.openai.api_server --model=/mnt/store/compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/rbln-ca22-tp4-s8192 --served-model-name=Qwen/Qwen2.5-0.5B-Instruct --enforce-eager --max-num-seqs 1 --host=0.0.0.0 --port=8000
+          ports: [{ containerPort: 8000 }]
+          env:
+            - { name: PYTHONPATH, value: "/home/gspark/.local/lib/python3.10/site-packages:/host-sys-local-pkgs:/host-sys-pkgs" }
+            - { name: PYTHONUNBUFFERED, value: "1" }
+            - { name: VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK, value: "4" }
+            - { name: LD_LIBRARY_PATH, value: "/host-rbln-lib:/host-libs" }
+            - { name: PATH, value: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/host-rbln-bin" }
+          resources: { limits: { rebellions.ai/ATOM: 4 }, requests: { cpu: "8", memory: "32Gi", rebellions.ai/ATOM: 4 } }
+          volumeMounts:
+            - { name: store, mountPath: /mnt/store, readOnly: true }
+            - { name: host-local-pkgs, mountPath: /home/gspark/.local/lib/python3.10/site-packages, readOnly: true }
+            - { name: host-sys-local-pkgs, mountPath: /host-sys-local-pkgs, readOnly: true }
+            - { name: host-sys-pkgs, mountPath: /host-sys-pkgs, readOnly: true }
+            - { name: host-libs, mountPath: /host-libs, readOnly: true }
+            - { name: host-rbln-lib, mountPath: /host-rbln-lib, readOnly: true }
+            - { name: host-rbln-bin, mountPath: /host-rbln-bin, readOnly: true }
+            - { name: shm, mountPath: /dev/shm }
+---
+# ── llm-d 라우팅: 게이트웨이 /atom/qwen2-5-0-5b-instruct → InferencePool(serve-qwen-qwen2-5-0-5b-instruct-pool) → EPP → 이 서빙 ──
+# (공유 Role llmd-router-epp-sa/-non-sa 는 클러스터에 이미 존재한다고 가정)
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: serve-qwen-qwen2-5-0-5b-instruct-epp, namespace: llm-serving }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serve-qwen-qwen2-5-0-5b-instruct-epp-sa, namespace: llm-serving }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: llmd-router-epp-sa }
+subjects:
+  - { kind: ServiceAccount, name: serve-qwen-qwen2-5-0-5b-instruct-epp, namespace: llm-serving }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serve-qwen-qwen2-5-0-5b-instruct-epp-non-sa, namespace: llm-serving }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: llmd-router-epp-non-sa }
+subjects:
+  - { kind: ServiceAccount, name: serve-qwen-qwen2-5-0-5b-instruct-epp, namespace: llm-serving }
+---
+# EPP 는 InferencePool 멤버십 검증 위해 TokenReview(auth 위임) 권한 필요 — 실동작 EPP 와 동일.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: serve-qwen-qwen2-5-0-5b-instruct-epp-auth-delegator }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: system:auth-delegator }
+subjects:
+  - { kind: ServiceAccount, name: serve-qwen-qwen2-5-0-5b-instruct-epp, namespace: llm-serving }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: serve-qwen-qwen2-5-0-5b-instruct-epp, namespace: llm-serving }
+data:
+  default-plugins.yaml: |
+    apiVersion: inference.networking.x-k8s.io/v1alpha1
+    kind: EndpointPickerConfig
+    plugins:
+    - type: queue-scorer
+    - type: kv-cache-utilization-scorer
+    - type: prefix-cache-scorer
+    - type: no-hit-lru-scorer
+    - type: metrics-data-source
+      parameters:
+        scheme: http
+        path: /metrics
+        insecureSkipVerify: true
+    - type: core-metrics-extractor
+    schedulingProfiles:
+    - name: default
+      plugins:
+      - { pluginRef: queue-scorer, weight: 2 }
+      - { pluginRef: kv-cache-utilization-scorer, weight: 2 }
+      - { pluginRef: prefix-cache-scorer, weight: 3 }
+      - { pluginRef: no-hit-lru-scorer, weight: 2 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: serve-qwen-qwen2-5-0-5b-instruct-epp, namespace: llm-serving }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: serve-qwen-qwen2-5-0-5b-instruct-epp } }
+  template:
+    metadata: { labels: { app: serve-qwen-qwen2-5-0-5b-instruct-epp } }
+    spec:
+      serviceAccountName: serve-qwen-qwen2-5-0-5b-instruct-epp
+      containers:
+        - name: epp
+          image: ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:main
+          args: ["--pool-name", "serve-qwen-qwen2-5-0-5b-instruct-pool", "--pool-namespace", "llm-serving", "--pool-group", "inference.networking.k8s.io", "--config-file", "/config/default-plugins.yaml", "--zap-encoder", "json", "--tracing=false"]
+          ports:
+            - { name: grpc, containerPort: 9002 }
+            - { name: grpc-health, containerPort: 9003 }
+            - { name: metrics, containerPort: 9090 }
+          livenessProbe: { grpc: { port: 9003, service: inference-extension }, initialDelaySeconds: 5, periodSeconds: 10 }
+          readinessProbe: { grpc: { port: 9003, service: inference-extension }, periodSeconds: 2 }
+          env:
+            - { name: NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+            - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+          volumeMounts:
+            - { name: plugins, mountPath: /config }
+      volumes:
+        - { name: plugins, configMap: { name: serve-qwen-qwen2-5-0-5b-instruct-epp } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: serve-qwen-qwen2-5-0-5b-instruct-epp, namespace: llm-serving }
+spec:
+  selector: { app: serve-qwen-qwen2-5-0-5b-instruct-epp }
+  ports:
+    - { name: grpc-ext-proc, port: 9002, targetPort: 9002 }
+    - { name: http-metrics, port: 9090, targetPort: 9090 }
+---
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata: { name: serve-qwen-qwen2-5-0-5b-instruct-pool, namespace: llm-serving }
+spec:
+  selector: { matchLabels: { app: serve-qwen-qwen2-5-0-5b-instruct } }
+  targetPorts:
+    - { number: 8000 }
+  endpointPickerRef: { group: "", kind: Service, name: serve-qwen-qwen2-5-0-5b-instruct-epp, port: { number: 9002 }, failureMode: FailClose }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: serve-qwen-qwen2-5-0-5b-instruct-route, namespace: llm-serving }
+spec:
+  parentRefs:
+    - { name: llm-d-gateway }
+  rules:
+    - matches:
+        - { path: { type: PathPrefix, value: /atom/qwen2-5-0-5b-instruct } }
+      filters:
+        - { type: URLRewrite, urlRewrite: { path: { type: ReplacePrefixMatch, replacePrefixMatch: /v1 } } }
+      backendRefs:
+        - { group: inference.networking.k8s.io, kind: InferencePool, name: serve-qwen-qwen2-5-0-5b-instruct-pool }

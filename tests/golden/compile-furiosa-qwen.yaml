@@ -1,0 +1,29 @@
+# title: compile Qwen3-4B-FP8 → rngd-tp8-pp1-s8192
+# Compile Job preview. Review, then apply with `kubectl apply -f -`.
+# Model furiosa-ai/Qwen3-4B-FP8 -> furiosa compile -> shared store compiled/furiosa-ai--Qwen3-4B-FP8/furiosa/rngd-tp8-pp1-s8192.
+# Compile-time fixed options: tp=8  pp=1  max-len=8192  batch=1  chunk=none  block=16  quant=none  devices=1
+# Furiosa: run fxb build directly for furiosa-ai quantized checkpoints. Installs aarch64 cross-compiler, builds locally, then copies to model-store.
+apiVersion: batch/v1
+kind: Job
+metadata: { name: compile-furiosa-ai--qwen3-4b-fp8-rngd-tp8-pp1-s8192, namespace: llm-serving }
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector: {  }
+      volumes:
+        - { name: store, persistentVolumeClaim: { claimName: model-store } }
+        - { name: work, emptyDir: {} }
+      containers:
+        - name: compile
+          image: furiosaai/furiosa-llm:latest
+          resources: { requests: { cpu: "8", memory: "16Gi" } }
+          env:
+            - { name: HF_HOME, value: /work/hub }
+            - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true } } }
+          volumeMounts:
+            - { name: store, mountPath: /mnt/store }
+            - { name: work, mountPath: /work }
+          command: ["sh", "-c", "set -e; apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq gcc-aarch64-linux-gnu build-essential >/dev/null 2>&1; mkdir -p /work/hub/hub; if [ -d '/mnt/store/hub/hub/models--furiosa-ai--Qwen3-4B-FP8' ]; then echo 'reuse prefetched weights from store'; cp -r '/mnt/store/hub/hub/models--furiosa-ai--Qwen3-4B-FP8' /work/hub/hub/ && export HF_HUB_OFFLINE=1; fi; mkdir -p /work/out; fxb build 'furiosa-ai/Qwen3-4B-FP8' /work/out/model -tp '8' -pp '1' --max-model-len '8192' --concurrency 8; mkdir -p '/mnt/store/compiled/furiosa-ai--Qwen3-4B-FP8/furiosa/rngd-tp8-pp1-s8192'; cp -r /work/out/. '/mnt/store/compiled/furiosa-ai--Qwen3-4B-FP8/furiosa/rngd-tp8-pp1-s8192'/; echo COMPILE_DONE; ls -la '/mnt/store/compiled/furiosa-ai--Qwen3-4B-FP8/furiosa/rngd-tp8-pp1-s8192'"]

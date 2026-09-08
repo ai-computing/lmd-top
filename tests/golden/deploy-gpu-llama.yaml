@@ -1,0 +1,139 @@
+# title: deploy Llama-3.1-8B-Instruct ×1
+# Deployment manifest preview. Review, then apply with `kubectl apply -f -`.
+# Serving model meta-llama/Llama-3.1-8B-Instruct. Engine: vLLM.
+# Placement: any. Total device demand = 1 x 1.
+# If the image contains a TODO- placeholder, set LMD_SERVING_IMAGE before applying.
+# GPU: vLLM loads the model/store path directly; no compile step required.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: serve-meta-llama-llama-3-1-8b-instruct, namespace: llm-serving }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: serve-meta-llama-llama-3-1-8b-instruct } }
+  template:
+    metadata: { labels: { app: serve-meta-llama-llama-3-1-8b-instruct, llm-d.ai/inferenceServing: "true", llm-d.ai/model: serve-meta-llama-llama-3-1-8b-instruct } }
+    spec:
+      volumes:
+        - { name: store, persistentVolumeClaim: { claimName: model-store } }
+      containers:
+        - name: server
+          image: vllm/vllm-openai:latest   # vLLM
+          args: ["serve", "meta-llama/Llama-3.1-8B-Instruct", "--served-model-name", "meta-llama/Llama-3.1-8B-Instruct", "--port", "8000", "--tensor-parallel-size", "1"]
+          ports: [{ containerPort: 8000 }]
+          resources: { limits: { nvidia.com/gpu: 1 }, requests: { cpu: "4", memory: "16Gi", nvidia.com/gpu: 1 } }
+          volumeMounts:
+            - { name: store, mountPath: /mnt/store, readOnly: true }
+---
+# ── llm-d 라우팅: 게이트웨이 /gpu/llama-3-1-8b-instruct → InferencePool(serve-meta-llama-llama-3-1-8b-instruct-pool) → EPP → 이 서빙 ──
+# (공유 Role llmd-router-epp-sa/-non-sa 는 클러스터에 이미 존재한다고 가정)
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: serve-meta-llama-llama-3-1-8b-instruct-epp, namespace: llm-serving }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serve-meta-llama-llama-3-1-8b-instruct-epp-sa, namespace: llm-serving }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: llmd-router-epp-sa }
+subjects:
+  - { kind: ServiceAccount, name: serve-meta-llama-llama-3-1-8b-instruct-epp, namespace: llm-serving }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serve-meta-llama-llama-3-1-8b-instruct-epp-non-sa, namespace: llm-serving }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: llmd-router-epp-non-sa }
+subjects:
+  - { kind: ServiceAccount, name: serve-meta-llama-llama-3-1-8b-instruct-epp, namespace: llm-serving }
+---
+# EPP 는 InferencePool 멤버십 검증 위해 TokenReview(auth 위임) 권한 필요 — 실동작 EPP 와 동일.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: serve-meta-llama-llama-3-1-8b-instruct-epp-auth-delegator }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: system:auth-delegator }
+subjects:
+  - { kind: ServiceAccount, name: serve-meta-llama-llama-3-1-8b-instruct-epp, namespace: llm-serving }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: serve-meta-llama-llama-3-1-8b-instruct-epp, namespace: llm-serving }
+data:
+  default-plugins.yaml: |
+    apiVersion: inference.networking.x-k8s.io/v1alpha1
+    kind: EndpointPickerConfig
+    plugins:
+    - type: queue-scorer
+    - type: kv-cache-utilization-scorer
+    - type: prefix-cache-scorer
+    - type: no-hit-lru-scorer
+    - type: metrics-data-source
+      parameters:
+        scheme: http
+        path: /metrics
+        insecureSkipVerify: true
+    - type: core-metrics-extractor
+    schedulingProfiles:
+    - name: default
+      plugins:
+      - { pluginRef: queue-scorer, weight: 2 }
+      - { pluginRef: kv-cache-utilization-scorer, weight: 2 }
+      - { pluginRef: prefix-cache-scorer, weight: 3 }
+      - { pluginRef: no-hit-lru-scorer, weight: 2 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: serve-meta-llama-llama-3-1-8b-instruct-epp, namespace: llm-serving }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: serve-meta-llama-llama-3-1-8b-instruct-epp } }
+  template:
+    metadata: { labels: { app: serve-meta-llama-llama-3-1-8b-instruct-epp } }
+    spec:
+      serviceAccountName: serve-meta-llama-llama-3-1-8b-instruct-epp
+      containers:
+        - name: epp
+          image: ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:main
+          args: ["--pool-name", "serve-meta-llama-llama-3-1-8b-instruct-pool", "--pool-namespace", "llm-serving", "--pool-group", "inference.networking.k8s.io", "--config-file", "/config/default-plugins.yaml", "--zap-encoder", "json", "--tracing=false"]
+          ports:
+            - { name: grpc, containerPort: 9002 }
+            - { name: grpc-health, containerPort: 9003 }
+            - { name: metrics, containerPort: 9090 }
+          livenessProbe: { grpc: { port: 9003, service: inference-extension }, initialDelaySeconds: 5, periodSeconds: 10 }
+          readinessProbe: { grpc: { port: 9003, service: inference-extension }, periodSeconds: 2 }
+          env:
+            - { name: NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+            - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+          volumeMounts:
+            - { name: plugins, mountPath: /config }
+      volumes:
+        - { name: plugins, configMap: { name: serve-meta-llama-llama-3-1-8b-instruct-epp } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: serve-meta-llama-llama-3-1-8b-instruct-epp, namespace: llm-serving }
+spec:
+  selector: { app: serve-meta-llama-llama-3-1-8b-instruct-epp }
+  ports:
+    - { name: grpc-ext-proc, port: 9002, targetPort: 9002 }
+    - { name: http-metrics, port: 9090, targetPort: 9090 }
+---
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata: { name: serve-meta-llama-llama-3-1-8b-instruct-pool, namespace: llm-serving }
+spec:
+  selector: { matchLabels: { app: serve-meta-llama-llama-3-1-8b-instruct } }
+  targetPorts:
+    - { number: 8000 }
+  endpointPickerRef: { group: "", kind: Service, name: serve-meta-llama-llama-3-1-8b-instruct-epp, port: { number: 9002 }, failureMode: FailClose }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: { name: serve-meta-llama-llama-3-1-8b-instruct-route, namespace: llm-serving }
+spec:
+  parentRefs:
+    - { name: llm-d-gateway }
+  rules:
+    - matches:
+        - { path: { type: PathPrefix, value: /gpu/llama-3-1-8b-instruct } }
+      filters:
+        - { type: URLRewrite, urlRewrite: { path: { type: ReplacePrefixMatch, replacePrefixMatch: /v1 } } }
+      backendRefs:
+        - { group: inference.networking.k8s.io, kind: InferencePool, name: serve-meta-llama-llama-3-1-8b-instruct-pool }
