@@ -165,10 +165,15 @@ pub fn advise(history: &[Record], model: &str, vendor: &str) -> Advice {
             reason: format!(
                 "failed on {} ({})",
                 rel.label(),
-                if rec.detail.is_empty() {
-                    rec.failure_kind.clone()
-                } else {
-                    rec.detail.clone()
+                // Prefer the cause as recorded, but with today's advice rather than the
+                // advice that was current when the record was written.
+                match (
+                    rec.detail.split(" — ").next().filter(|c| !c.is_empty()),
+                    crate::diagnose::advice_for_kind(&rec.failure_kind),
+                ) {
+                    (Some(cause), Some(hint)) => format!("{} — {}", cause, hint),
+                    (Some(cause), None) => cause.to_string(),
+                    (None, _) => rec.failure_kind.clone(),
                 }
             ),
         });

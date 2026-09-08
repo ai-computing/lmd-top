@@ -4,7 +4,7 @@
 > `rebel-compiler` 가 이유를 숨기고 있어 벤더 지원이 필요하다. 이 문서는 그 지원 요청에
 > 그대로 쓸 수 있도록 쓰였다.
 >
-> Furiosa 컴파일은 같은 기간에 **정상 동작**했다(76분, 성공).
+> Furiosa 컴파일은 같은 기간에 **정상 동작**했다(`furiosa-ai/Qwen3-4B-FP8`, 76분, 성공).
 
 ## 증상
 
@@ -38,6 +38,7 @@ Traceback ...
 | transformers | 5.8.1 |
 | torch | 2.11.0+cpu |
 | 실행 형태 | `ubuntu:22.04` 컨테이너 + 노드 site-packages hostPath 마운트 |
+| (대조) Furiosa | furiosa-llm 2026.3.0, torch 2.10.0+cpu, transformers 5.1.0 — 컨테이너 내부 |
 
 의존성은 **optimum-rbln 0.11.0.post1 이 스스로 선언한 핀과 정확히 일치**한다
 (`importlib.metadata.requires` 조회): `transformers==5.8.1`, `torch==2.11.0+cpu`,
@@ -61,7 +62,25 @@ Traceback ...
        deploy build (raw: "1"). Unset it or use a development build.
 ```
 
-## 왜 Furiosa 는 멀쩡한가 (구조적 차이)
+## 대조군: Furiosa 는 정상이고, 오류 메시지도 쓸 만하다
+
+같은 모델(`Qwen/Qwen2.5-0.5B-Instruct`)을 Furiosa 로 컴파일해봤다. 실패했지만 **정확한 이유를
+말한다**:
+
+```
+error: no model registry entry for architecture=Qwen2ForCausalLM, hidden_size=896,
+       intermediate_size=4864, num_hidden_layers=Some(24), quant_method=None
+```
+
+`quant_method=None` — furiosa-llm 은 furiosa-ai 사전양자화 체크포인트를 빌드하는 도구이고,
+이 모델은 양자화되지 않았다. **의도된 동작이며 테스트 선택이 잘못된 것이다**(lmd-top 의
+`furiosa-build` 분류와 힌트가 이 경우를 정확히 맞혔다). Furiosa 컴파일 경로는 건강하다 —
+`furiosa-ai/Qwen3-4B-FP8` 성공이 그 증거다.
+
+대비가 이 문제의 핵심을 보여준다: 같은 상황에서 한 벤더는 아키텍처·차원·양자화 여부까지
+말해주고, 다른 벤더는 `Error occurred while compiling the model` 한 줄을 준다.
+
+## 왜 RBLN 만 호스트 환경에 노출되는가 (구조적 차이)
 
 - **Furiosa**: `furiosaai/furiosa-llm` **컨테이너 이미지 안에서** 컴파일 → 호스트 환경과 무관
 - **RBLN**: `LMD_COMPILE_IMAGE_RBLN` 미설정 시 노드의 rebel-compiler 를 **hostPath 로 빌려 씀**

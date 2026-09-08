@@ -196,7 +196,18 @@ fn print_table(recs: &[Record]) {
                 None => opts,
             }
         } else {
-            format!("{}  ✗ {}", opts, r.detail)
+            // Re-derive the advice from the failure kind: the stored detail is what we
+            // concluded when the job ran, and some of it has since been disproven.
+            let cause = r
+                .detail
+                .split(" — ")
+                .next()
+                .unwrap_or(&r.detail)
+                .to_string();
+            match crate::diagnose::advice_for_kind(&r.failure_kind) {
+                Some(hint) => format!("{}  ✗ {} — {}", opts, cause, hint),
+                None => format!("{}  ✗ {}", opts, cause),
+            }
         };
         let tail = format!("{}{}", tail, tools);
         println!(
