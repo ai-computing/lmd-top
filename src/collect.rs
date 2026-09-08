@@ -189,6 +189,13 @@ pub struct CompileJob {
     pub duration_secs: Option<u64>, // 완료된 경우 소요 초
     pub phase: String,              // 진행 힌트(파드 로그 마지막 줄 또는 상태)
     pub progress: Option<f32>,      // 로그에서 파싱한 진행률 0.0~1.0(없으면 indeterminate 바)
+    /// Classified cause when the Job failed — replaces the old "see logs", and is what gets
+    /// written to history before `ttlSecondsAfterFinished` removes the Job.
+    pub failure: Option<crate::diagnose::Failure>,
+    /// Compile options read off the Job's environment (tp, max-len, attn…).
+    pub options: std::collections::BTreeMap<String, String>,
+    /// HuggingFace source id from the Job's MODEL_ID env, for history keying.
+    pub source: String,
 }
 
 /// Store 뷰용 — 모델이 "어디에(경로/볼륨)" 저장되고 "어떤 옵션으로" 컴파일/서빙되는지.
@@ -1394,6 +1401,9 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         snap.pvcs = list.split_whitespace().map(|s| s.to_string()).collect();
     }
 
+    // History: serving observations feed the compile-option advisor.
+    record_serving(&snap);
+
     snap.warnings = warn;
     snap
 }
@@ -2115,23 +2125,43 @@ async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
             (Some(s), Some(c)) if c >= s => Some(c - s),
             _ => None,
         };
+        // Compile options and source come off the Job's own environment, so history records
+        // what was actually built rather than re-deriving it from the name.
+        let (options, source) = job_options(j);
+        let pod = snap
+            .pods
+            .iter()
+            .find(|p| p.name.starts_with(name))
+            .map(|p| p.name.clone());
+
+        // Failure cause: classify the log while the Job still exists. `ttlSecondsAfterFinished`
+        // deletes it an hour later, and "failed — see logs" was unactionable even before that.
+        let failure = if status == "Failed" {
+            let log = match &pod {
+                Some(p) => kube::log_tail(&cfg.ns, p, 80).await.unwrap_or_default(),
+                None => String::new(),
+            };
+            let exit = match &pod {
+                Some(p) => kube::pod_exit_code(&cfg.ns, p).await,
+                None => None,
+            };
+            Some(crate::diagnose::classify(&log, exit))
+        } else {
+            None
+        };
+
         // 진행 힌트: 활성 Job 은 파드 로그 마지막 비어있지 않은 줄. 완료/실패는 상태로 대체.
         let phase = if active {
-            let pod = snap
-                .pods
-                .iter()
-                .find(|p| p.name.starts_with(name))
-                .map(|p| p.name.clone());
-            match pod {
-                Some(p) => kube::last_log_line(&cfg.ns, &p)
+            match &pod {
+                Some(p) => kube::last_log_line(&cfg.ns, p)
                     .await
                     .unwrap_or_else(|| "starting…".to_string()),
                 None => "starting…".to_string(),
             }
         } else if status == "Complete" {
             "COMPILE_DONE".to_string()
-        } else if status == "Failed" {
-            "failed — see logs".to_string()
+        } else if let Some(f) = &failure {
+            f.line()
         } else {
             "pending…".to_string()
         };
@@ -2153,8 +2183,12 @@ async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
             duration_secs,
             phase,
             progress,
+            failure,
+            options,
+            source,
         });
     }
+    record_finished_jobs(&snap.compiles);
     // 진행 중 → 최근 순: Running 먼저, 그다음 나이 어린 것.
     snap.compiles.sort_by(|a, b| {
         let rank = |s: &str| match s {
@@ -2167,6 +2201,151 @@ async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
             .cmp(&rank(&b.status))
             .then(a.age_secs.cmp(&b.age_secs))
     });
+}
+
+/// Compile options and HF source from a Job's container environment.
+///
+/// Read from the Job rather than parsed back out of its name: the name is a lossy summary
+/// (`rbln-ca22-tp4-s8192` omits batch, attn and quantisation), and history needs the full set
+/// to be able to recommend one.
+fn job_options(job: &serde_json::Value) -> (BTreeMap<String, String>, String) {
+    let mut opts = BTreeMap::new();
+    let mut source = String::new();
+    let envs = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for e in envs {
+        let (Some(k), Some(v)) = (e["name"].as_str(), e["value"].as_str()) else {
+            continue;
+        };
+        // Map the recipe's environment names back onto form option keys.
+        let key = match k {
+            "MODEL_ID" | "SOURCE" => {
+                source = v.to_string();
+                continue;
+            }
+            "RBLN_TENSOR_PARALLEL_SIZE" | "TENSOR_PARALLEL_SIZE" | "TP" => "tp",
+            "PIPELINE_PARALLEL_SIZE" | "PP" => "pp",
+            "RBLN_MAX_SEQ_LEN" | "MAX_SEQ_LEN_TO_CAPTURE" | "MAX_LEN" => "max-len",
+            "RBLN_BATCH_SIZE" | "BUCKET_BATCH_SIZE" => "batch",
+            "RBLN_ATTN_IMPL" => "attn",
+            "RBLN_KVCACHE_PARTITION_LEN" => "kvpart",
+            "RBLN_NPU" => "npu",
+            "RBLN_QUANTIZATION" | "USE_ACTIVATION_DQ" => "quant",
+            "PAGED_ATTENTION_BLOCK_SIZE" => "block",
+            "PREFILL_CHUNK_SIZE" => "chunk",
+            _ => continue,
+        };
+        opts.insert(key.to_string(), v.to_string());
+    }
+    (opts, source)
+}
+
+/// Record how a serving deployment is actually performing, so the advisor can prefer option
+/// sets that served well over ones that merely compiled.
+///
+/// Only under real load (`tps > 0`) — an idle deployment says nothing about its options. At
+/// most one record per deployment per hour, since this runs on every collect tick.
+fn record_serving(snap: &Snapshot) {
+    let with_traffic: Vec<&PerfRow> = snap
+        .perf_rows
+        .iter()
+        .filter(|r| r.tps.is_finite() && r.tps > 0.0)
+        .collect();
+    if with_traffic.is_empty() {
+        return;
+    }
+    let hour = now_secs() / 3600;
+    let known = crate::history::recorded_ids();
+    for row in with_traffic {
+        let id = format!("serve:{}:{}", row.model, hour);
+        if known.contains(&id) {
+            continue;
+        }
+        // Options and source come from the serving artifact discovered on the deployment.
+        let art = snap.artifacts.iter().find(|a| a.model == row.model);
+        let options: BTreeMap<String, String> = art
+            .map(|a| a.opts.iter().cloned().collect())
+            .unwrap_or_default();
+        let vendor = art
+            .map(|a| crate::app::App::vendor_for_engine(&a.engine).to_string())
+            .unwrap_or_else(|| "gpu".to_string());
+        let model = art
+            .map(|a| {
+                if a.source.is_empty() {
+                    a.model.clone()
+                } else {
+                    a.source.clone()
+                }
+            })
+            .unwrap_or_else(|| row.model.clone());
+        crate::history::append(&crate::history::Record {
+            ts: now_secs(),
+            kind: "serve".into(),
+            id,
+            model,
+            vendor,
+            options,
+            outcome: crate::history::Outcome::Ok,
+            duration_secs: None,
+            failure_kind: String::new(),
+            detail: String::new(),
+            tps: Some(row.tps),
+            ttft_p95: Some(row.ttft_p95).filter(|v| v.is_finite()),
+        });
+    }
+}
+
+/// Write a history record for each newly-finished compile Job.
+///
+/// Deduplicated by Job name, so a Job that stays visible across many ticks is recorded once,
+/// and the record outlives the Job itself — which is the whole point.
+fn record_finished_jobs(jobs: &[CompileJob]) {
+    let terminal: Vec<&CompileJob> = jobs
+        .iter()
+        .filter(|j| j.status == "Complete" || j.status == "Failed")
+        .collect();
+    if terminal.is_empty() {
+        return;
+    }
+    let known = crate::history::recorded_ids();
+    for j in terminal {
+        if known.contains(&j.name) {
+            continue;
+        }
+        let ok = j.status == "Complete";
+        crate::history::append(&crate::history::Record {
+            ts: now_secs(),
+            kind: if j.name.starts_with("prefetch-") {
+                "prefetch".into()
+            } else {
+                "compile".into()
+            },
+            id: j.name.clone(),
+            // Prefer the Job's own MODEL_ID. Falling back to the name means undoing the
+            // DNS-safe encoding (`org--name`), or the family key would not match anything.
+            model: if j.source.is_empty() {
+                j.model.replacen("--", "/", 1)
+            } else {
+                j.source.clone()
+            },
+            vendor: crate::accel::by_id(&j.vendor)
+                .map(|p| p.id.to_string())
+                .unwrap_or_else(|| j.vendor.to_lowercase()),
+            options: j.options.clone(),
+            outcome: if ok {
+                crate::history::Outcome::Ok
+            } else {
+                crate::history::Outcome::Fail
+            },
+            duration_secs: j.duration_secs,
+            failure_kind: j.failure.as_ref().map(|f| f.kind.to_string()).unwrap_or_default(),
+            detail: j.failure.as_ref().map(|f| f.line()).unwrap_or_default(),
+            tps: None,
+            ttft_p95: None,
+        });
+    }
 }
 
 /// 컴파일 로그 한 줄에서 진행률(0.0~1.0)을 best-effort 파싱. 정규식 없이 순수 스캔.

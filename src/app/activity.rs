@@ -179,7 +179,15 @@ impl App {
                 job: Some(c.name.clone()),
                 running_compile: running,
                 progress: c.progress,
-                phase: if running { c.phase.clone() } else { String::new() },
+                // A finished job's phase used to be dropped, which threw away exactly the
+                // thing worth showing: why a failed compile failed. The Job is deleted an
+                // hour later (ttlSecondsAfterFinished), so this row is the last chance to
+                // read it in the UI.
+                phase: if running || c.failure.is_some() {
+                    c.phase.clone()
+                } else {
+                    String::new()
+                },
             });
         }
 
@@ -245,3 +253,77 @@ impl App {
         self.activity_rows().into_iter().nth(i)
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collect::{CompileJob, Snapshot};
+
+    /// A failed compile must carry its classified cause into the Activity row. The Job is
+    /// removed an hour after it finishes, so if the row shows nothing the reason is lost —
+    /// which is what "failed — see logs" amounted to.
+    #[test]
+    fn a_failed_compile_shows_why_in_activity() {
+        let failure = crate::diagnose::classify(
+            "Traceback (most recent call last):\nRuntimeError: Error occurred while compiling the model\n",
+            Some(1),
+        );
+        let mut a = App::new();
+        a.snap = Snapshot {
+            compiles: vec![CompileJob {
+                name: "compile-qwen--qwen3-4b-rbln-ca22-tp4-s8192".into(),
+                model: "qwen--qwen3-4b".into(),
+                vendor: "RBLN".into(),
+                target: "rbln-ca22-tp4-s8192".into(),
+                status: "Failed".into(),
+                age_secs: 400,
+                duration_secs: Some(402),
+                phase: failure.line(),
+                progress: None,
+                failure: Some(failure.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let row = a
+            .activity_rows()
+            .into_iter()
+            .find(|r| r.job.as_deref() == Some("compile-qwen--qwen3-4b-rbln-ca22-tp4-s8192"))
+            .expect("the failed compile appears in Activity");
+        assert_eq!(row.sev, 2, "failure severity");
+        assert!(
+            row.phase.contains("code generation"),
+            "the cause must reach the row, got {:?}",
+            row.phase
+        );
+        assert!(!row.phase.contains("see logs"));
+    }
+
+    /// A completed job needs no phase text — its outcome is the status.
+    #[test]
+    fn a_completed_compile_needs_no_phase_text() {
+        let mut a = App::new();
+        a.snap = Snapshot {
+            compiles: vec![CompileJob {
+                name: "compile-ok".into(),
+                model: "m".into(),
+                vendor: "RNGD".into(),
+                target: "rngd-tp8".into(),
+                status: "Complete".into(),
+                age_secs: 10,
+                duration_secs: Some(60),
+                phase: "COMPILE_DONE".into(),
+                progress: Some(1.0),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let row = a
+            .activity_rows()
+            .into_iter()
+            .find(|r| r.job.as_deref() == Some("compile-ok"))
+            .expect("row");
+        assert_eq!(row.sev, 0);
+        assert!(row.phase.is_empty());
+    }
+}
+

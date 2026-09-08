@@ -17,6 +17,10 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
     let h = (form.fields.len() as u16)
         + (fit.tips.len() as u16)
         + (app.compile_preflight(form).len() as u16)
+        + {
+            let a = app.compile_advice(&form.model_id, form.vendor);
+            1 + a.avoid.len().min(2) as u16
+        }
         + 14;
     let area = centered(full, 92, h.min(full.height.saturating_sub(2)));
     f.render_widget(Clear, area);
@@ -115,6 +119,36 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
             Style::default().fg(tcol),
         )));
     }
+    // What has actually worked here before. Silent when there is no history — a recommendation
+    // drawn from nothing would read as authoritative.
+    let advice = app.compile_advice(&form.model_id, form.vendor);
+    if let Some(best) = &advice.best {
+        lines.push(Line::from(vec![
+            Span::styled("  ↺ history  ", Style::default().fg(C_DIM())),
+            Span::styled(
+                best.options_line(),
+                Style::default().fg(C_OK()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  ({})", best.reason),
+                Style::default().fg(C_DIM()),
+            ),
+        ]));
+    }
+    for bad in advice.avoid.iter().take(2) {
+        lines.push(Line::from(vec![
+            Span::styled("   ✗ avoid   ", Style::default().fg(C_BAD())),
+            Span::styled(bad.options_line(), Style::default().fg(C_WARN())),
+            Span::styled(format!("  ({})", bad.reason), Style::default().fg(C_DIM())),
+        ]));
+    }
+    if advice.best.is_none() && advice.avoid.is_empty() && advice.compiles_seen == 0 {
+        lines.push(Line::from(Span::styled(
+            "  ↺ history  no previous build of this model on this accelerator yet",
+            Style::default().fg(C_DIM()),
+        )));
+    }
+
     let pf = app.compile_preflight(form);
     let pf_ok = pf.iter().all(|(ok, _)| *ok);
     lines.push(Line::from(Span::styled(

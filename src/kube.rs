@@ -122,6 +122,35 @@ pub fn logs(ns: &str, pod: &str, tail: u32) -> Result<Vec<String>> {
 }
 
 /// Last non-empty line of pod logs (for progress hints). async, short timeout. None on failure.
+/// Tail a pod's log (async, for the collect tick). Used to classify why a Job failed — the
+/// reason has to be captured before `ttlSecondsAfterFinished` deletes the Job.
+pub async fn log_tail(ns: &str, pod: &str, lines: u32) -> Option<String> {
+    let mut cmd = Command::new("kubectl");
+    cmd.args([
+        "logs",
+        pod,
+        "-n",
+        ns,
+        &format!("--tail={}", lines),
+        "--request-timeout=6s",
+    ]);
+    let out = run(cmd, "logs", Duration::from_secs(10)).await.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Container exit code of a Job's pod, when it has terminated.
+pub async fn pod_exit_code(ns: &str, pod: &str) -> Option<i32> {
+    let v = get_json(&["get", "pod", pod, "-n", ns, "-o", "json"]).await.ok()?;
+    v["status"]["containerStatuses"]
+        .as_array()?
+        .iter()
+        .find_map(|cs| cs["state"]["terminated"]["exitCode"].as_i64())
+        .map(|c| c as i32)
+}
+
 pub async fn last_log_line(ns: &str, pod: &str) -> Option<String> {
     let out = Command::new("kubectl")
         .args(["logs", pod, "-n", ns, "--tail=5", "--request-timeout=4s"])

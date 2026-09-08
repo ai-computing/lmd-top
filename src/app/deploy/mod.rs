@@ -20,7 +20,7 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
     /// Resolved against the packs so a newly declared accelerator is recognised without a
     /// branch here: an exact engine match first, then the accelerator's short label or long
     /// display name appearing in a variant spelling (e.g. "vLLM-RBLN (nightly)").
-    pub(super) fn vendor_for_engine(engine: &str) -> &'static str {
+    pub fn vendor_for_engine(engine: &str) -> &'static str {
         let packs = crate::accel::packs();
         packs
             .iter()

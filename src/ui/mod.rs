@@ -3788,6 +3788,14 @@ fn activity_panel(f: &mut Frame, area: Rect, app: &App, active: bool) {
                         Style::default().fg(C_DIM()),
                     ));
                 }
+            } else if !r.phase.is_empty() {
+                // A finished job's phase is its classified failure cause. Showing "Failed"
+                // alone sent the operator to `kubectl logs` for a Job that gets deleted an
+                // hour later; the cause and the fix belong on the row.
+                status_spans.push(Span::styled(
+                    truncw(&r.phase, 78),
+                    Style::default().fg(C_WARN()),
+                ));
             }
             Row::new(vec![
                 Cell::from(kind),
