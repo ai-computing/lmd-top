@@ -442,6 +442,10 @@ pub struct App {
     pub zoom: bool,      // focus (zoom) — hide header/tabs and maximize body
     pub paused: bool,    // pause screen refresh (data frozen, for reading)
     pub detail_scroll: u16, // vertical scroll within detail
+    /// Line count of the detail pane as last rendered — the only place that height is known.
+    /// `scroll_detail` clamps against it, so `j` stops at the end of the content instead of
+    /// scrolling into a blank pane (BUG-15). 0 = not yet rendered (no clamp).
+    pub detail_lines: std::cell::Cell<u16>,
     pub dev_sel: usize, // device cursor within Node detail: 0=node summary, 1..=n=that device's history
     pub panel_focus: usize, // active (focused) panel index in multi-panel views (moved with Ctrl-w + hjkl)
     pub panel_move: bool, // vi/tmux-style panel-focus mode — armed by Ctrl-w, hjkl/arrows move, Esc exits
@@ -536,6 +540,7 @@ impl App {
             zoom: false,
             paused: false,
             detail_scroll: 0,
+            detail_lines: std::cell::Cell::new(0),
             dev_sel: 0,
             panel_focus: 0,
             panel_move: false,
@@ -732,6 +737,18 @@ impl App {
         } else {
             None
         }
+    }
+
+    /// Look a model up by deployment name. Actions must resolve their parameters from the
+    /// action-menu subject (frozen when the menu opened), never from the live selection —
+    /// otherwise a selection change mid-menu silently retargets the action (BUG-02).
+    pub fn model_by_name(&self, name: &str) -> Option<&crate::collect::ModelRow> {
+        self.snap.models.iter().find(|m| m.name == name)
+    }
+
+    /// Same rule as `model_by_name`, for routes (the action subject is the route path).
+    pub fn route_by_path(&self, path: &str) -> Option<crate::collect::Route> {
+        self.snap.routes.iter().find(|r| r.path == path).cloned()
     }
 
     /// Route selected in Flow (only when panel 0 is focused).
@@ -1307,7 +1324,7 @@ mod tests {
         a.compile_preview();
         let form = a.compile_form.clone().expect("rbln form");
         assert!(
-            a.compile_already_stored(&form).is_some(),
+            crate::app::compile::preflight::compile_already_stored(&a.snap.stored, &form).is_some(),
             "정확 일치 산출물 감지"
         );
         let pf = a.compile_preflight(&form);
@@ -1327,7 +1344,7 @@ mod tests {
             f.value = "16384".into();
         }
         assert!(
-            a.compile_already_stored(&form2).is_none(),
+            crate::app::compile::preflight::compile_already_stored(&a.snap.stored, &form2).is_none(),
             "옵션 다르면 재컴파일 아님"
         );
     }
@@ -1985,6 +2002,247 @@ mod tests {
         // 작은 터미널에서도 패닉 없이.
         let mut t2 = Terminal::new(TestBackend::new(40, 12)).unwrap();
         t2.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+    }
+
+    /// 사용자 리포트 회귀: "컴파일 옵션 고를 때 커서가 플로팅 창이 아닌 다른 창에서 움직인다".
+    ///
+    /// 두 가지가 겹친 문제였다 — (1) 휠이 항상 배경 리스트를 움직였고(overlay 무시),
+    /// (2) 모달이 떠 있어도 배경 패널이 밝은 선택 바를 그대로 유지해 화면에 커서가 둘로 보였다.
+    /// 이 테스트는 (2)를 고정한다: 모달 중 배경 선택 바는 dim(track), 모달이 없으면 밝게(HL).
+    #[test]
+    fn background_selection_dims_while_a_modal_overlay_is_open() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        // 렌더 전역 상태(modal 플래그·테마)를 읽으므로 다른 렌더 테스트와 직렬화한다.
+        let _g = crate::ui::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let bg_of_selected_row = |app: &App| -> Option<ratatui::style::Color> {
+            let mut fx = crate::ui::FxState::disabled();
+            let mut t = Terminal::new(TestBackend::new(120, 34)).unwrap();
+            t.draw(|f| crate::ui::draw(f, app, &mut fx)).unwrap();
+            let buf = t.backend().buffer().clone();
+            // 배경 리스트는 왼쪽 패널 — 오버레이가 덮지 않는 x<13 구간에서 배경색이 칠해진 셀.
+            for y in 0..buf.area.height {
+                for x in 1..13u16 {
+                    let c = buf.cell((x, y))?;
+                    if c.bg != ratatui::style::Color::Reset {
+                        return Some(c.bg);
+                    }
+                }
+            }
+            None
+        };
+        let mk = || {
+            let mut a = App::new();
+            a.mode = Mode::Admin;
+            a.view = View::Library;
+            a.catalog = crate::catalog::load();
+            a
+        };
+        // 모달 없음 → 밝은 선택 바.
+        let plain = mk();
+        let bright = bg_of_selected_row(&plain).expect("background list draws a selection bar");
+        assert_eq!(
+            bright,
+            crate::ui::C_HL(),
+            "with no overlay the panel selection should be the bright highlight"
+        );
+        // compile 폼(모달) 열림 → 배경 선택 바는 dim.
+        let mut modal = mk();
+        modal.compile_form_for("rbln");
+        assert!(modal.compile_form.is_some(), "compile form should open");
+        let dim = bg_of_selected_row(&modal).expect("background row still drawn as context");
+        assert_eq!(
+            dim,
+            crate::ui::C_TRACK(),
+            "while a modal overlay owns input the panel selection must dim, so the floating \
+             window's marker is the only live cursor"
+        );
+        assert_ne!(dim, bright, "the two states must be visually distinct");
+    }
+
+    /// BUG-15 회귀: 상세 스크롤은 렌더된 콘텐츠 끝에서 멈춰야 한다(빈 화면까지 안 감).
+    #[test]
+    fn detail_scroll_clamps_to_rendered_content() {
+        let mut a = App::new();
+        a.detail_lines.set(12);
+        for _ in 0..200 {
+            a.scroll_detail(1);
+        }
+        assert_eq!(a.detail_scroll, 11, "must stop at the last rendered line");
+        for _ in 0..200 {
+            a.scroll_detail(-1);
+        }
+        assert_eq!(a.detail_scroll, 0, "must stop at the first line");
+        // 아직 렌더된 적 없으면(0) 클램프하지 않는다 — 첫 프레임 전 입력을 삼키지 않기 위해.
+        let mut b = App::new();
+        b.scroll_detail(5);
+        assert_eq!(b.detail_scroll, 5);
+    }
+
+    /// BUG-06 회귀: 주입 문자열이 매니페스트 생성까지 도달하지 못해야 하고,
+    /// 정상 입력은 여전히 유효 YAML 이어야 한다. (--plan 헤드리스 경로와 동일한 진입점)
+    #[test]
+    fn malformed_model_id_never_reaches_a_manifest() {
+        let hostile = [
+            "Qwen/x; echo PWNED; #", // Job 의 sh -c 로 셸 주입
+            "Qwen/Qwen2.5\"-0.5B",   // YAML 스칼라 탈출
+            "Qwen/foo\nbar",         // 문서 경계 탈출
+            "Qwen/$(id)",
+            "a/b/c",
+        ];
+        for vendor in ["rbln", "furiosa"] {
+            for id in hostile {
+                let mut a = App::new();
+                a.ns = "llm-serving".into();
+                let r = a.plan_compile_for_model(id, vendor, &[]);
+                assert!(r.is_err(), "{} compile should reject {:?}", vendor, id);
+                let mut b = App::new();
+                b.ns = "llm-serving".into();
+                assert!(
+                    b.plan_deploy_for_model(id, vendor, &[]).is_err(),
+                    "{} deploy should reject {:?}",
+                    vendor,
+                    id
+                );
+            }
+            // 정상 id 는 통과하고, 생성물은 유효 YAML 이어야 한다.
+            let mut ok = App::new();
+            ok.ns = "llm-serving".into();
+            let (_, yaml) = ok
+                .plan_compile_for_model("furiosa-ai/Qwen3-4B-FP8", vendor, &[])
+                .unwrap_or_else(|e| panic!("{} compile of a valid id failed: {}", vendor, e));
+            let mut docs = 0usize;
+            for d in serde_yaml::Deserializer::from_str(&yaml) {
+                let v = <serde_yaml::Value as serde::Deserialize>::deserialize(d)
+                    .unwrap_or_else(|e| panic!("{}: generated doc is invalid YAML: {}", vendor, e));
+                if !v.is_null() {
+                    docs += 1;
+                }
+            }
+            assert!(docs > 0, "{}: manifest should have documents", vendor);
+        }
+    }
+
+    /// BUG-17 회귀: `--plan deploy --model X` 는 **X** 의 매니페스트를 내야 한다.
+    /// plan 이 raw 인덱스를 display-order 선택으로 넘겨 클러스터에 있던 엉뚱한 아티팩트를
+    /// 배포하는 매니페스트를 조용히 만들어 냈다.
+    #[test]
+    fn deploy_plan_targets_the_requested_model() {
+        use crate::collect::ModelArtifact;
+        let art = |model: &str, family: &str| ModelArtifact {
+            model: model.into(),
+            family: family.into(),
+            engine: "vLLM".into(),
+            node: String::new(),
+            image: String::new(),
+            source: format!("org/{}", model),
+            mount: String::new(),
+            opts: Vec::new(),
+        };
+        for vendor in ["rbln", "furiosa", "gpu"] {
+            let mut a = App::new();
+            a.ns = "llm-serving".into();
+            // 이미 클러스터에 여러 아티팩트가 있고, 정렬/그룹핑이 순서를 바꾸는 상황을 만든다.
+            a.snap.artifacts = vec![
+                art("zzz-last", "zzz"),
+                art("aaa-first", "aaa"),
+                art("mmm-middle", "mmm"),
+            ];
+            let want = "Qwen/Qwen2.5-0.5B-Instruct";
+            let (title, yaml) = a
+                .plan_deploy_for_model(want, vendor, &[])
+                .unwrap_or_else(|e| panic!("{}: plan failed: {}", vendor, e));
+            let expect_name = "serve-qwen-qwen2-5-0-5b-instruct";
+            assert!(
+                yaml.contains(expect_name),
+                "{}: manifest should deploy {} (expected name {}), title={:?}",
+                vendor,
+                want,
+                expect_name,
+                title
+            );
+            for other in ["serve-zzz-last", "serve-aaa-first", "serve-mmm-middle"] {
+                assert!(
+                    !yaml.contains(other),
+                    "{}: manifest must not target the unrelated artifact {}",
+                    vendor,
+                    other
+                );
+            }
+        }
+    }
+
+    /// BUG-03 회귀: 선택된 오버레이 행의 글자가 배경과 같은 색이면 안 된다.
+    /// 액션 메뉴·팔레트는 선택 행에 `bg(C_HL())` 을 깔면서 라벨엔 `fg(C_HL())` 을 줘
+    /// fg == bg → 선택 항목이 통째로 사라졌다. 4개 테마 전부 검사한다.
+    #[test]
+    fn overlay_selected_row_is_readable_in_every_theme() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let _g = crate::ui::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // 같은 행에서 fg==bg 인 (글자가 있는) 셀을 찾는다.
+        let invisible_cell = |buf: &ratatui::buffer::Buffer| -> Option<(u16, u16, String)> {
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    let c = buf.cell((x, y))?;
+                    if c.symbol().trim().is_empty() {
+                        continue;
+                    }
+                    if c.fg == c.bg && c.fg != ratatui::style::Color::Reset {
+                        return Some((x, y, c.symbol().to_string()));
+                    }
+                }
+            }
+            None
+        };
+        let mut fx = crate::ui::FxState::disabled();
+        for theme in 0..4 {
+            crate::app::set_theme(theme);
+            // (a) 액션 메뉴 — 선택 행에 하이라이트 배경이 깔리는 대표 케이스.
+            let mut a = App::new();
+            a.snap.models = vec![crate::collect::ModelRow {
+                name: "model-a".into(),
+                ready: 1,
+                desired: 1,
+                status: "● Running".into(),
+                route: String::new(),
+                engine: "vLLM".into(),
+                accel: String::new(),
+                running: None,
+                waiting: None,
+                tps: None,
+                kv: None,
+                ttft: None,
+            }];
+            a.mode = Mode::Admin;
+            a.view = View::Overview;
+            a.open_action_menu();
+            assert!(a.action_menu.is_some(), "theme {}: menu should open", theme);
+            let mut t = Terminal::new(TestBackend::new(100, 26)).unwrap();
+            t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+            assert_eq!(
+                invisible_cell(t.backend().buffer()),
+                None,
+                "theme {}: action menu has fg==bg cells (invisible text)",
+                theme
+            );
+            // (b) 커맨드 팔레트 — 같은 패턴.
+            let mut b = App::new();
+            b.open_palette();
+            let mut t2 = Terminal::new(TestBackend::new(100, 26)).unwrap();
+            t2.draw(|f| crate::ui::draw(f, &b, &mut fx)).unwrap();
+            assert_eq!(
+                invisible_cell(t2.backend().buffer()),
+                None,
+                "theme {}: command palette has fg==bg cells (invisible text)",
+                theme
+            );
+        }
+        crate::app::set_theme(3); // 기본(soft)으로 복구 — 테마는 프로세스 전역 상태.
     }
 
     // Deploy 개편: Serving/Library 두 렌즈가 family›version›target 계층으로 렌더되는지 +

@@ -48,55 +48,15 @@ impl App {
                     .models
                     .iter()
                     .any(|m| m.name == a.model && m.desired > 0);
-                items.push(ActionItem {
-                    key: 'i',
-                    label: "Info",
-                    desc: "show full deployment detail",
-                    action: Action::Info,
-                });
-                items.push(ActionItem {
-                    key: 'l',
-                    label: "Logs",
-                    desc: "tail serving pod logs",
-                    action: Action::Logs,
-                });
-                items.push(ActionItem {
-                    key: 'y',
-                    label: "YAML",
-                    desc: "live Deployment YAML (read-only)",
-                    action: Action::Yaml,
-                });
-                items.push(ActionItem {
-                    key: 's',
-                    label: "Scale",
-                    desc: "toggle replicas 0/1",
-                    action: Action::Scale,
-                });
-                items.push(ActionItem {
-                    key: 'S',
-                    label: "Restart",
-                    desc: "rollout restart (rolling)",
-                    action: Action::Restart,
-                });
-                items.push(ActionItem {
-                    key: 'b',
-                    label: "Rollback",
-                    desc: "rollout undo → previous revision",
-                    action: Action::Rollback,
-                });
-                items.push(ActionItem {
-                    key: 'O',
-                    label: "Objective",
-                    desc: "set SLO target (TTFT/TPOT/E2E/tok·s) — drives advisor",
-                    action: Action::Objective,
-                });
+                items.push(ActionItem::info("show full deployment detail"));
+                items.push(ActionItem::logs("tail serving pod logs"));
+                items.push(ActionItem::yaml("live Deployment YAML (read-only)"));
+                items.push(ActionItem::scale());
+                items.push(ActionItem::restart());
+                items.push(ActionItem::rollback());
+                items.push(ActionItem::objective());
                 if running {
-                    items.push(ActionItem {
-                        key: 'x',
-                        label: "Stop",
-                        desc: "scale serving → 0 (frees devices)",
-                        action: Action::Stop,
-                    });
+                    items.push(ActionItem::stop("scale serving → 0 (frees devices)"));
                 }
                 (format!("actions · {}", a.model), a.model.clone())
             }
@@ -114,22 +74,12 @@ impl App {
                 }) else {
                     return;
                 };
-                items.push(ActionItem {
-                    key: 'i',
-                    label: "Info",
-                    desc: "build detail — format · target · size · path",
-                    action: Action::Info,
-                });
-                items.push(ActionItem {
-                    key: 'd',
-                    label: "Deploy",
-                    desc: if s.1 == "hf" {
-                        "serve source weights (GPU); Rebellions/Furiosa 는 먼저 컴파일 필요"
-                    } else {
-                        "serve this compiled build → Deployment"
-                    },
-                    action: Action::Deploy,
-                });
+                items.push(ActionItem::info("build detail — format · target · size · path"));
+                items.push(ActionItem::deploy(if s.1 == "hf" {
+                    "serve source weights (GPU); Rebellions/Furiosa 는 먼저 컴파일 필요"
+                } else {
+                    "serve this compiled build → Deployment"
+                }));
                 let label = if s.1 == "hf" {
                     format!("store · {} (source)", s.0)
                 } else {
@@ -142,12 +92,7 @@ impl App {
                 let Some(m) = self.selected_catalog_model() else {
                     return;
                 };
-                items.push(ActionItem {
-                    key: 'i',
-                    label: "Info",
-                    desc: "why ready / needs artifact (feasibility)",
-                    action: Action::Info,
-                });
+                items.push(ActionItem::info("why ready / needs artifact (feasibility)"));
                 if let Some(p) = self.preferred_catalog_placement(m) {
                     let vendor = Self::placement_vendor(p);
                     let model_id = Self::placement_model_id(m, p);
@@ -162,32 +107,13 @@ impl App {
                                 .copied()
                                 .unwrap_or("rbln")
                         };
-                        let (key, label, desc) = if cv == "furiosa" {
-                            (
-                                'f',
-                                "Compile→Furiosa",
-                                "furiosa-llm build → artifact in store",
-                            )
-                        } else {
-                            ('c', "Compile→RBLN", "optimum-rbln compile → .rbln in store")
-                        };
-                        items.push(ActionItem {
-                            key,
-                            label,
-                            desc,
-                            action: Action::Compile(cv),
-                        });
+                        items.push(ActionItem::compile(cv));
                     }
-                    items.push(ActionItem {
-                        key: 'd',
-                        label: "Deploy",
-                        desc: if p.requires_artifact {
-                            "generate Deployment; artifact path may need review"
-                        } else {
-                            "serving options → Deployment"
-                        },
-                        action: Action::Deploy,
-                    });
+                    items.push(ActionItem::deploy(if p.requires_artifact {
+                        "generate Deployment; artifact path may need review"
+                    } else {
+                        "serving options → Deployment"
+                    }));
                 }
                 (format!("catalog · {}", m.id), m.id.clone())
             }
@@ -197,34 +123,10 @@ impl App {
                     return;
                 };
                 let (source, in_store) = (z.source.clone(), self.zoo_in_store(&z.source));
-                items.push(ActionItem {
-                    key: 'i',
-                    label: "Info",
-                    desc: "model source / notes",
-                    action: Action::Info,
-                });
-                items.push(ActionItem {
-                    key: 'p',
-                    label: "Prefetch",
-                    desc: "download HF weights into the shared store cache",
-                    action: Action::Prefetch,
-                });
+                items.push(ActionItem::info("model source / notes"));
+                items.push(ActionItem::prefetch());
                 for v in Self::zoo_vendors(&source) {
-                    if v == "furiosa" {
-                        items.push(ActionItem {
-                            key: 'f',
-                            label: "Compile→Furiosa",
-                            desc: "furiosa-llm build → artifact in store",
-                            action: Action::Compile("furiosa"),
-                        });
-                    } else if v == "rbln" {
-                        items.push(ActionItem {
-                            key: 'c',
-                            label: "Compile→RBLN",
-                            desc: "optimum-rbln compile → .rbln in store",
-                            action: Action::Compile("rbln"),
-                        });
-                    }
+                    items.push(ActionItem::compile(v));
                 }
                 let note = if in_store {
                     "compiled build present — deploy from Deploy▸Library"
@@ -239,20 +141,10 @@ impl App {
                     return;
                 };
                 if row.pod.is_some() {
-                    items.push(ActionItem {
-                        key: 'l',
-                        label: "Logs",
-                        desc: "tail the operation's pod logs",
-                        action: Action::Logs,
-                    });
+                    items.push(ActionItem::logs("tail the operation's pod logs"));
                 }
                 if row.job.is_some() {
-                    items.push(ActionItem {
-                        key: 'D',
-                        label: "Delete",
-                        desc: "delete compile job (cancel / clean up)",
-                        action: Action::DeleteJob,
-                    });
+                    items.push(ActionItem::delete_job());
                 }
                 // subject = 삭제 대상 Job 이름(있으면), 없으면 요약 라벨.
                 let subject = row.job.clone().unwrap_or_else(|| row.label.clone());
@@ -263,26 +155,11 @@ impl App {
                 let Some(node) = self.selected_node().map(|n| (n.name.clone(), n.cordoned)) else {
                     return;
                 };
-                items.push(ActionItem {
-                    key: 'i',
-                    label: "Info",
-                    desc: "node detail — devices, occupancy, capacity",
-                    action: Action::Info,
-                });
+                items.push(ActionItem::info("node detail — devices, occupancy, capacity"));
                 if node.1 {
-                    items.push(ActionItem {
-                        key: 'u',
-                        label: "Uncordon",
-                        desc: "allow scheduling on this node",
-                        action: Action::Uncordon,
-                    });
+                    items.push(ActionItem::new('u', "Uncordon", "allow scheduling on this node", Action::Uncordon));
                 } else {
-                    items.push(ActionItem {
-                        key: 'C',
-                        label: "Cordon",
-                        desc: "block new scheduling on this node",
-                        action: Action::Cordon,
-                    });
+                    items.push(ActionItem::new('C', "Cordon", "block new scheduling on this node", Action::Cordon));
                 }
                 (format!("node · {}", node.0), node.0)
             }
@@ -291,90 +168,25 @@ impl App {
                     return;
                 };
                 let running = m.desired > 0;
-                items.push(ActionItem {
-                    key: 'i',
-                    label: "Info",
-                    desc: "model detail",
-                    action: Action::Info,
-                });
-                items.push(ActionItem {
-                    key: 'l',
-                    label: "Logs",
-                    desc: "tail pod logs",
-                    action: Action::Logs,
-                });
-                items.push(ActionItem {
-                    key: 'y',
-                    label: "YAML",
-                    desc: "live Deployment YAML (read-only)",
-                    action: Action::Yaml,
-                });
-                items.push(ActionItem {
-                    key: 's',
-                    label: "Scale",
-                    desc: "toggle replicas 0/1",
-                    action: Action::Scale,
-                });
-                items.push(ActionItem {
-                    key: 'S',
-                    label: "Restart",
-                    desc: "rollout restart (rolling)",
-                    action: Action::Restart,
-                });
-                items.push(ActionItem {
-                    key: 'b',
-                    label: "Rollback",
-                    desc: "rollout undo → previous revision",
-                    action: Action::Rollback,
-                });
-                items.push(ActionItem {
-                    key: 'O',
-                    label: "Objective",
-                    desc: "set SLO target (TTFT/TPOT/E2E/tok·s) — drives advisor",
-                    action: Action::Objective,
-                });
+                items.push(ActionItem::info("model detail"));
+                items.push(ActionItem::logs("tail pod logs"));
+                items.push(ActionItem::yaml("live Deployment YAML (read-only)"));
+                items.push(ActionItem::scale());
+                items.push(ActionItem::restart());
+                items.push(ActionItem::rollback());
+                items.push(ActionItem::objective());
                 if running {
-                    items.push(ActionItem {
-                        key: 'x',
-                        label: "Stop",
-                        desc: "scale → 0 (frees devices)",
-                        action: Action::Stop,
-                    });
+                    items.push(ActionItem::stop("scale → 0 (frees devices)"));
                 }
                 (format!("actions · {}", m.name), m.name.clone())
             }
             View::Pods => {
                 let Some(p) = self.selected_pod() else { return };
-                items.push(ActionItem {
-                    key: 'i',
-                    label: "Info",
-                    desc: "pod detail",
-                    action: Action::Info,
-                });
-                items.push(ActionItem {
-                    key: 'l',
-                    label: "Logs",
-                    desc: "tail pod logs",
-                    action: Action::Logs,
-                });
-                items.push(ActionItem {
-                    key: 'y',
-                    label: "YAML",
-                    desc: "live Pod YAML (read-only)",
-                    action: Action::Yaml,
-                });
-                items.push(ActionItem {
-                    key: 'r',
-                    label: "Drain",
-                    desc: "relabel out of routing — stop new requests, finish in-flight streams",
-                    action: Action::Drain,
-                });
-                items.push(ActionItem {
-                    key: 'D',
-                    label: "Delete",
-                    desc: "delete pod (reschedules)",
-                    action: Action::Delete,
-                });
+                items.push(ActionItem::info("pod detail"));
+                items.push(ActionItem::logs("tail pod logs"));
+                items.push(ActionItem::yaml("live Pod YAML (read-only)"));
+                items.push(ActionItem::new('r', "Drain", "relabel out of routing — stop new requests, finish in-flight streams", Action::Drain));
+                items.push(ActionItem::delete("delete pod (reschedules)"));
                 (format!("actions · {}", p.name), p.name.clone())
             }
             View::Routing if self.panel_focus == 0 => {
@@ -382,30 +194,10 @@ impl App {
                 let Some(r) = self.selected_route() else {
                     return;
                 };
-                items.push(ActionItem {
-                    key: 'i',
-                    label: "Backend",
-                    desc: "jump to backend model detail",
-                    action: Action::Info,
-                });
-                items.push(ActionItem {
-                    key: 'r',
-                    label: "Rename",
-                    desc: "change gateway path (/accel/model)",
-                    action: Action::RouteRename,
-                });
-                items.push(ActionItem {
-                    key: 't',
-                    label: "Retarget",
-                    desc: "point path at another pool/service",
-                    action: Action::RouteRetarget,
-                });
-                items.push(ActionItem {
-                    key: 'D',
-                    label: "Delete",
-                    desc: "remove this route rule",
-                    action: Action::RouteDelete,
-                });
+                items.push(ActionItem::new('i', "Backend", "jump to backend model detail", Action::Info));
+                items.push(ActionItem::new('r', "Rename", "change gateway path (/accel/model)", Action::RouteRename));
+                items.push(ActionItem::new('t', "Retarget", "point path at another pool/service", Action::RouteRetarget));
+                items.push(ActionItem::new('D', "Delete", "remove this route rule", Action::RouteDelete));
                 (format!("route · {}", r.path), r.path.clone())
             }
             _ => return,

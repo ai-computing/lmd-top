@@ -345,21 +345,25 @@ fn to_gb(v: f64) -> f64 {
     }
 }
 
-async fn q(cfg: &Config, promql: &str, warn: &mut Vec<String>) -> Vec<Series> {
-    match prom::query(&cfg.prom, promql).await {
-        Ok(v) => v,
-        Err(e) => {
-            warn.push(format!("prom[{}]: {}", short(promql), e));
-            Vec::new()
-        }
-    }
-}
-
 fn short(s: &str) -> String {
     s.chars().take(28).collect()
 }
 
-/// prom::query 결과에 q() 와 동일한 warn 처리 — tokio::join! 로 병렬 조회 후 결과 해소용.
+/// Surface a failed kubectl collector as a warning. A missing CRD ("the server doesn't have a
+/// resource type") is a normal cluster shape, not a fault, so it stays quiet — everything else
+/// (RBAC denial, unreachable API server, missing kubectl) must be visible, because an empty view
+/// and a permission error otherwise look identical (REG-08 / BUG-09).
+fn kube_warn(label: &str, e: &anyhow::Error, warn: &mut Vec<String>) {
+    let m = e.to_string();
+    if m.contains("doesn't have a resource type") || m.contains("could not find the requested resource")
+    {
+        return;
+    }
+    let reason = m.lines().last().unwrap_or("unknown error").trim();
+    warn.push(format!("kube[{}]: {}", label, reason));
+}
+
+/// prom::query 결과를 warn 으로 해소 — join!/query_all 로 병렬 조회한 뒤 사용.
 fn resolve(
     r: Result<Vec<Series>, anyhow::Error>,
     promql: &str,
@@ -926,7 +930,7 @@ async fn collect_furiosa(p: &str) -> Vec<Accel> {
                 model: String::new(),
                 id: s.l("device").to_string(),
                 node: s.l("hostname").to_string(),
-                util: norm_pct(s.value),
+                util: clamp_pct(s.value),
                 mem_used_gb: du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
                 mem_total_gb: dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
                 temp: temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
@@ -967,7 +971,7 @@ async fn collect_rbln(p: &str) -> Vec<Accel> {
                 model: String::new(),
                 id: s.l("name").to_string(),
                 node: s.l("node").to_string(),
-                util: norm_pct(s.value),
+                util: clamp_pct(s.value),
                 mem_used_gb: du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
                 mem_total_gb: dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
                 temp: temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
@@ -1017,7 +1021,7 @@ async fn collect_gpu(p: &str) -> Vec<Accel> {
                 model,
                 id: format!("gpu{}", gpu),
                 node: s.l("Hostname").to_string(),
-                util: norm_pct(s.value),
+                util: clamp_pct(s.value),
                 mem_used_gb: mu.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
                 mem_total_gb: mt.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
                 temp: temp.get(gpu).map(|x| x.value).unwrap_or(0.0),
@@ -1134,9 +1138,14 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     snap.ts = now_secs();
 
     // Prometheus 도달성 프로브 — 실패 시 빈 테이블을 "장비 없음"이 아니라 연결 문제로 구분.
-    snap.prom_ok = prom::query(&cfg.prom, "vector(1)").await.is_ok();
+    // 프로브는 2초·무재시도이며, 실패 시 서킷을 열어 이후 쿼리들이 네트워크를 건드리지 않게 한다.
+    // (서킷 없이는 도달 불가 클러스터의 collect 가 92초 걸려 첫 화면까지 프리즈됐다 — BUG-01.)
+    snap.prom_ok = prom::probe(&cfg.prom).await;
     if !snap.prom_ok {
-        warn.push(format!("Prometheus unreachable at {}", cfg.prom));
+        warn.push(format!(
+            "Prometheus unreachable at {} — metric columns stay empty (check LMD_PROM)",
+            cfg.prom
+        ));
     }
 
     // 가속기 + 노드는 fast tier(collect_fast) 재사용 — 중복 제거
@@ -1278,63 +1287,41 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     }
 
     // vLLM model metrics (모델 서버에 vLLM ServiceMonitor + 트래픽 있을 때 채워짐)
+    // vLLM 네이티브와 Furiosa-LLM 을 같은 service 키로 병합(한 service 는 둘 중 하나만 노출 → 충돌 없음).
+    // 10개 쿼리는 반드시 병렬(query_all) — 직렬 .await 였을 때 Prometheus 장애 시 이 블록만
+    // 120초 규모로 늘어나 collect 전체를 마비시켰다(BUG-01).
+    let vllm_qs: [&str; 10] = [
+        "sum by (service) (vllm:num_requests_running)",
+        "sum by (service) (vllm:num_requests_waiting)",
+        "sum by (service) (rate(vllm:generation_tokens_total[1m]))",
+        "max by (service) (vllm:kv_cache_usage_perc)",
+        "histogram_quantile(0.95, sum by (service,le) (rate(vllm:time_to_first_token_seconds_bucket[1m])))",
+        "sum by (service) (furiosa_llm_num_requests_running)",
+        "sum by (service) (furiosa_llm_num_requests_waiting)",
+        "sum by (service) (rate(furiosa_llm_generation_tokens_total[1m]))",
+        "max by (service) (furiosa_llm_kv_cache_usage_percent)",
+        "histogram_quantile(0.95, sum by (service,le) (rate(furiosa_llm_time_to_first_token_seconds_bucket[1m])))",
+    ];
+    let mut vres = prom::query_all(&cfg.prom, &vllm_qs).await.into_iter();
+    let mut next = |warn: &mut Vec<String>, i: usize| {
+        map_by(
+            resolve(vres.next().unwrap_or_else(|| Ok(Vec::new())), vllm_qs[i], warn),
+            "service",
+        )
+    };
     let mut vllm = Vllm {
         // service 라벨 = Deployment 이름(예: gemma4-rbln) → deploy 와 정확히 join.
-        run: map_by(q(cfg, "sum by (service) (vllm:num_requests_running)", &mut warn).await, "service"),
-        wait: map_by(q(cfg, "sum by (service) (vllm:num_requests_waiting)", &mut warn).await, "service"),
-        tps: map_by(
-            q(cfg, "sum by (service) (rate(vllm:generation_tokens_total[1m]))", &mut warn).await,
-            "service",
-        ),
-        kv: map_by(q(cfg, "max by (service) (vllm:kv_cache_usage_perc)", &mut warn).await, "service"),
-        ttft: map_by(
-            q(
-                cfg,
-                "histogram_quantile(0.95, sum by (service,le) (rate(vllm:time_to_first_token_seconds_bucket[1m])))",
-                &mut warn,
-            )
-            .await,
-            "service",
-        ),
+        run: next(&mut warn, 0),
+        wait: next(&mut warn, 1),
+        tps: next(&mut warn, 2),
+        kv: next(&mut warn, 3),
+        ttft: next(&mut warn, 4),
     };
-    // Furiosa-LLM(K-EXAONE): furiosa_llm_* 를 같은 service 키로 병합(한 service 는 둘 중 하나만 노출 → 충돌 없음).
-    vllm.run.extend(map_by(
-        q(
-            cfg,
-            "sum by (service) (furiosa_llm_num_requests_running)",
-            &mut warn,
-        )
-        .await,
-        "service",
-    ));
-    vllm.wait.extend(map_by(
-        q(
-            cfg,
-            "sum by (service) (furiosa_llm_num_requests_waiting)",
-            &mut warn,
-        )
-        .await,
-        "service",
-    ));
-    vllm.tps.extend(map_by(
-        q(
-            cfg,
-            "sum by (service) (rate(furiosa_llm_generation_tokens_total[1m]))",
-            &mut warn,
-        )
-        .await,
-        "service",
-    ));
-    vllm.kv.extend(map_by(
-        q(
-            cfg,
-            "max by (service) (furiosa_llm_kv_cache_usage_percent)",
-            &mut warn,
-        )
-        .await,
-        "service",
-    ));
-    vllm.ttft.extend(map_by(q(cfg, "histogram_quantile(0.95, sum by (service,le) (rate(furiosa_llm_time_to_first_token_seconds_bucket[1m])))", &mut warn).await, "service"));
+    vllm.run.extend(next(&mut warn, 5));
+    vllm.wait.extend(next(&mut warn, 6));
+    vllm.tps.extend(next(&mut warn, 7));
+    vllm.kv.extend(next(&mut warn, 8));
+    vllm.ttft.extend(next(&mut warn, 9));
 
     // ---------- kube: deployments / pods / routes / gateway / epp ----------
     collect_kube(cfg, &mut snap, &vllm, &mut warn).await;
@@ -1381,6 +1368,15 @@ pub async fn collect(cfg: &Config) -> Snapshot {
 
     // ---------- 플랫폼 부트스트랩 전제조건(Setup 뷰) ----------
     snap.setup = collect_setup(&cfg.ns).await;
+    // BUG-08: `kubectl get deploy -n <missing-ns>` returns success + an empty list, so no collector
+    // can tell "nothing deployed" from "wrong namespace". The Setup probe already knows — say so,
+    // rather than leaving the user with silently empty views (ENV-03).
+    if snap.setup.probed && !snap.setup.ns_exists {
+        warn.push(format!(
+            "namespace '{}' does not exist — every view stays empty (check LMD_NS)",
+            cfg.ns
+        ));
+    }
 
     // ---------- 대상 ns 실존 PVC 목록(prefetch/compile 대상 검증용) ----------
     // 없는 PVC 로 Job 을 만들면 pod 가 영구 Pending(FailedScheduling)이 되므로, 폼이 실존 PVC 만 제시하고
@@ -1525,13 +1521,16 @@ async fn collect_inventory(
     }
 }
 
-fn norm_pct(v: f64) -> f64 {
+/// Accelerator utilisation → percent. All three util sources are already 0–100 %:
+/// DCGM_FI_DEV_GPU_UTIL (observed max 96), furiosa_npu_core_utilization
+/// (furiosa-smi pe_usage_percentage) and RBLN_DEVICE_STATUS:UTILIZATION (rbln-stat util%).
+/// So there is nothing to rescale — the old "v<=1.0 → ratio" guess turned a real 1 % into 100 %.
+/// Only NaN and out-of-range readings are normalised.
+fn clamp_pct(v: f64) -> f64 {
     if v.is_nan() {
         0.0
-    } else if v <= 1.0 && v > 0.0 {
-        v * 100.0
     } else {
-        v
+        v.clamp(0.0, 100.0)
     }
 }
 
@@ -1581,7 +1580,11 @@ async fn node_kube() -> (BTreeMap<String, String>, BTreeMap<String, NodeMeta>) {
 
 async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut Vec<String>) {
     // routes: path -> backend (+ kind: Service|InferencePool)
-    if let Ok(v) = kube::get_json(&["get", "httproute", "-n", &cfg.ns, "-o", "json"]).await {
+    let r = kube::get_json(&["get", "httproute", "-n", &cfg.ns, "-o", "json"]).await;
+    if let Err(e) = &r {
+        kube_warn("httproute", e, warn);
+    }
+    if let Ok(v) = r {
         if let Some(items) = v["items"].as_array() {
             for r in items {
                 let route_name = r["metadata"]["name"].as_str().unwrap_or("").to_string();
@@ -1614,8 +1617,6 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                 }
             }
         }
-    } else {
-        warn.push("kube httproute".into());
     }
     let route_for = |backend: &str| -> String {
         snap.routes
@@ -1711,7 +1712,7 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     snap.pods.sort_by(|a, b| a.name.cmp(&b.name));
 
     collect_events(cfg, snap).await;
-    collect_gateway(cfg, snap).await;
+    collect_gateway(cfg, snap, warn).await;
 
     // EPP config (ConfigMap)
     if let Ok(v) =
@@ -1723,7 +1724,11 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     }
 
     // InferencePool 스펙(selector / EPP / endpoints) → prom Pool 과 병합
-    if let Ok(v) = kube::get_json(&["get", "inferencepool", "-n", &cfg.ns, "-o", "json"]).await {
+    let r = kube::get_json(&["get", "inferencepool", "-n", &cfg.ns, "-o", "json"]).await;
+    if let Err(e) = &r {
+        kube_warn("inferencepool", e, warn);
+    }
+    if let Ok(v) = r {
         if let Some(items) = v["items"].as_array() {
             for ip in items {
                 let name = ip["metadata"]["name"].as_str().unwrap_or("").to_string();
@@ -1789,8 +1794,11 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     }
 
     // InferenceObjective (SLO priority)
-    if let Ok(v) = kube::get_json(&["get", "inferenceobjective", "-n", &cfg.ns, "-o", "json"]).await
-    {
+    let r = kube::get_json(&["get", "inferenceobjective", "-n", &cfg.ns, "-o", "json"]).await;
+    if let Err(e) = &r {
+        kube_warn("inferenceobjective", e, warn);
+    }
+    if let Ok(v) = r {
         if let Some(items) = v["items"].as_array() {
             for o in items {
                 snap.objectives.push(Objective {
@@ -1808,7 +1816,11 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
         .sort_by_key(|o| std::cmp::Reverse(o.priority));
 
     // 오토스케일링 (KEDA ScaledObject + 상태)
-    if let Ok(v) = kube::get_json(&["get", "scaledobject", "-n", &cfg.ns, "-o", "json"]).await {
+    let r = kube::get_json(&["get", "scaledobject", "-n", &cfg.ns, "-o", "json"]).await;
+    if let Err(e) = &r {
+        kube_warn("scaledobject", e, warn);
+    }
+    if let Ok(v) = r {
         if let Some(items) = v["items"].as_array() {
             for so in items {
                 let target = so["spec"]["scaleTargetRef"]["name"]
@@ -1950,8 +1962,12 @@ async fn collect_events(cfg: &Config, snap: &mut Snapshot) {
 }
 
 /// Gateway 주소/상태(Programmed) → snap.gw_addr/gw_ok.
-async fn collect_gateway(cfg: &Config, snap: &mut Snapshot) {
-    if let Ok(v) = kube::get_json(&["get", "gateway", "-n", &cfg.ns, "-o", "json"]).await {
+async fn collect_gateway(cfg: &Config, snap: &mut Snapshot, warn: &mut Vec<String>) {
+    let r = kube::get_json(&["get", "gateway", "-n", &cfg.ns, "-o", "json"]).await;
+    if let Err(e) = &r {
+        kube_warn("gateway", e, warn);
+    }
+    if let Ok(v) = r {
         if let Some(g) = v["items"].as_array().and_then(|a| a.first()) {
             snap.gw_addr = g["status"]["addresses"][0]["value"]
                 .as_str()
@@ -2246,13 +2262,21 @@ fn match_model(deploy: &str, v_run: &BTreeMap<String, Series>) -> Option<String>
             .collect::<String>()
     };
     let dn = norm(deploy);
+    // 가장 "구체적인" 일치를 고른다. 첫 부분일치를 반환하면 BTreeMap 알파벳 순 때문에
+    // 짧은 이름이 항상 이겨, 형제 변형(`x` vs `x-fp8`)의 메트릭이 서로 뒤바뀐다(BUG-05).
+    // 우선순위: 완전일치 > 일치한 키가 긴 것 > (동률이면) 키 이름 순으로 안정 정렬.
+    let mut best: Option<(u8, usize, &String)> = None;
     for k in v_run.keys() {
         let kn = norm(k);
-        if !kn.is_empty() && (dn.contains(&kn) || kn.contains(&dn)) {
-            return Some(k.clone());
+        if kn.is_empty() || !(dn.contains(&kn) || kn.contains(&dn)) {
+            continue;
+        }
+        let rank = (u8::from(kn == dn), kn.len(), k);
+        if best.map(|b| rank > b).unwrap_or(true) {
+            best = Some(rank);
         }
     }
-    None
+    best.map(|(_, _, k)| k.clone())
 }
 
 fn parse_epp(text: &str) -> Option<EppCfg> {
@@ -2320,13 +2344,19 @@ mod tests {
     }
 
     #[test]
-    fn to_gb_and_norm_pct() {
+    fn to_gb_and_clamp_pct() {
         assert_eq!(to_gb(2.0e9), 2.0);
         assert_eq!(to_gb(f64::NAN), 0.0); // NaN → 0
-        assert_eq!(norm_pct(0.82), 82.0); // 0..1 비율 → %
-        assert_eq!(norm_pct(82.0), 82.0); // 이미 % 면 그대로
-        assert_eq!(norm_pct(f64::NAN), 0.0);
-        assert_eq!(norm_pct(0.0), 0.0); // 0 은 0 (비율 확대 안 함)
+        // BUG-04 회귀: 저사용률은 그대로 저사용률이어야 한다(0..1 을 비율로 오해해 ×100 하던 버그).
+        assert_eq!(clamp_pct(1.0), 1.0);
+        assert_eq!(clamp_pct(0.5), 0.5);
+        assert_eq!(clamp_pct(0.82), 0.82);
+        assert_eq!(clamp_pct(82.0), 82.0);
+        assert_eq!(clamp_pct(f64::NAN), 0.0);
+        assert_eq!(clamp_pct(0.0), 0.0);
+        // 범위 밖 판독값만 정규화.
+        assert_eq!(clamp_pct(140.0), 100.0);
+        assert_eq!(clamp_pct(-3.0), 0.0);
     }
 
     #[test]
@@ -2345,6 +2375,28 @@ mod tests {
             Some("koni-llama3.1-8b")
         );
         assert_eq!(match_model("totally-different", &m), None);
+    }
+
+    #[test]
+    fn match_model_prefers_most_specific_sibling() {
+        // BUG-05 회귀: `x` 와 `x-fp8` 을 동시 서빙할 때 각 배포가 자기 메트릭을 받아야 한다.
+        let mut m: BTreeMap<String, Series> = BTreeMap::new();
+        for k in ["qwen3-4b", "qwen3-4b-fp8"] {
+            m.insert(
+                k.into(),
+                Series {
+                    labels: BTreeMap::new(),
+                    value: 1.0,
+                },
+            );
+        }
+        assert_eq!(match_model("qwen3-4b-fp8", &m).as_deref(), Some("qwen3-4b-fp8"));
+        assert_eq!(match_model("qwen3-4b", &m).as_deref(), Some("qwen3-4b"));
+        // 접두 배포명(서빙 래퍼)도 자기 변형으로 붙어야 한다.
+        assert_eq!(
+            match_model("serve-qwen3-4b-fp8", &m).as_deref(),
+            Some("qwen3-4b-fp8")
+        );
     }
 
     #[test]

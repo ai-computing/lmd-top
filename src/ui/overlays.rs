@@ -445,7 +445,7 @@ pub(super) fn action_menu_overlay(f: &mut Frame, app: &App) {
         let base = if locked {
             Style::default().fg(C_DIM())
         } else if active {
-            Style::default().fg(C_HL()).add_modifier(Modifier::BOLD)
+            Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         };
@@ -531,7 +531,7 @@ pub(super) fn palette_overlay(f: &mut Frame, app: &App) {
         for (label, hint, idx, active) in rows.iter().skip(start).take(visible) {
             let marker = if *active { "▶ " } else { "  " };
             let base = if *active {
-                Style::default().fg(C_HL()).add_modifier(Modifier::BOLD)
+                Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
             };
@@ -590,7 +590,7 @@ pub(super) fn choice_row(
     editing: bool,
 ) -> Line<'static> {
     let name_style = if active {
-        Style::default().fg(C_HL()).add_modifier(Modifier::BOLD)
+        Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     };
@@ -770,7 +770,7 @@ pub(super) fn place_picker_overlay(f: &mut Frame, app: &App) {
             };
             let mut line = Line::from(vec![
                 Span::styled(
-                    format!("{} {:<24} ", if sel { "▎" } else { " " }, truncw(&r.label, 24)),
+                    format!("{} {} ", if sel { "▎" } else { " " }, padw(&r.label, 24)),
                     Style::default().fg(name_c).add_modifier(if sel {
                         Modifier::BOLD
                     } else {
@@ -834,7 +834,7 @@ pub(super) fn place_picker_overlay(f: &mut Frame, app: &App) {
         };
         let mut line = Line::from(vec![
             Span::styled(
-                format!("{} {:<20} ", if sel { "▎" } else { " " }, truncw(&r.label, 20)),
+                format!("{} {} ", if sel { "▎" } else { " " }, padw(&r.label, 20)),
                 Style::default().fg(name_c).add_modifier(if sel {
                     Modifier::BOLD
                 } else {

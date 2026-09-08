@@ -16,6 +16,7 @@ mod metrics;
 mod ops;
 mod palette;
 mod prom;
+mod quote;
 mod ui;
 
 use anyhow::Result;
@@ -43,6 +44,7 @@ use std::time::Duration;
 ///   nav mode     — Esc/q close, ↑↓ move, ←→ cycle choices, e=edit, digit=type, Enter=submit.
 macro_rules! handle_edit_form {
     ($app:expr, $form:ident, $submit:ident, $code:expr) => {{
+        use ratatui::crossterm::event::KeyCode;
         if $app.$form.as_ref().unwrap().editing {
             match $code {
                 KeyCode::Enter | KeyCode::Esc => $app.$form.as_mut().unwrap().editing = false,
@@ -53,10 +55,10 @@ macro_rules! handle_edit_form {
         } else {
             match $code {
                 KeyCode::Esc | KeyCode::Char('q') => $app.$form = None,
-                KeyCode::Up => $app.$form.as_mut().unwrap().move_cursor(-1),
-                KeyCode::Down => $app.$form.as_mut().unwrap().move_cursor(1),
-                KeyCode::Left => $app.$form.as_mut().unwrap().cycle(-1),
-                KeyCode::Right => $app.$form.as_mut().unwrap().cycle(1),
+                KeyCode::Up | KeyCode::Char('k') => $app.$form.as_mut().unwrap().move_cursor(-1),
+                KeyCode::Down | KeyCode::Char('j') => $app.$form.as_mut().unwrap().move_cursor(1),
+                KeyCode::Left | KeyCode::Char('h') => $app.$form.as_mut().unwrap().cycle(-1),
+                KeyCode::Right | KeyCode::Char('l') => $app.$form.as_mut().unwrap().cycle(1),
                 KeyCode::Char('e') => $app.$form.as_mut().unwrap().editing = true,
                 KeyCode::Backspace => $app.$form.as_mut().unwrap().backspace(),
                 KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -213,6 +215,16 @@ async fn run_plan(cfg: &Config, args: &[String]) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--plan requires --vendor <rbln|furiosa|gpu>"))?,
     )?;
     let overrides = arg_sets(args);
+    // Compile is an NPU-only concept: `compat::compilable_vendors` only ever returns rbln/furiosa,
+    // and every downstream branch is a two-way rbln/furiosa choice. Letting `gpu` through produced
+    // a manifest that mixed the RBLN script with the Furiosa image and an `rngd` store path —
+    // guaranteed to fail on apply (BUG-07). Reject it where the intent is still legible.
+    if op == "compile" && vendor == "gpu" {
+        anyhow::bail!(
+            "compile targets NPUs only (--vendor rbln|furiosa). GPU models are served from their \
+             Hugging Face weights directly — use `--plan deploy --vendor gpu`."
+        );
+    }
     let snap = collect(cfg).await;
     let mut app = App::new();
     app.ns = cfg.ns.clone();
@@ -641,8 +653,11 @@ fn dispatch_action(
         }
         Action::Scale => {
             if require_action(app, action) {
+                // Resolve the replica toggle from the menu's subject — reading the live selection
+                // here let a selection change between opening the menu and running the action
+                // produce "scale A → 1" when the user meant to stop A (BUG-02 / FORM-02).
                 let target = app
-                    .selected_model()
+                    .model_by_name(subject)
                     .map(|m| if m.desired == 0 { 1 } else { 0 })
                     .unwrap_or(1);
                 app.confirm = Some(Pending::Scale {
@@ -724,7 +739,8 @@ fn dispatch_action(
         }
         Action::RouteDelete => {
             if require_action(app, action) {
-                if let Some(r) = app.selected_route() {
+                // Same rule as Scale: the target is the route the menu was opened on (BUG-02).
+                if let Some(r) = app.route_by_path(subject).or_else(|| app.selected_route()) {
                     app.confirm = Some(Pending::RouteDelete {
                         route: r.route,
                         path: r.path,
@@ -751,6 +767,78 @@ fn dispatch_action(
         }
     }
     let _ = (prom, rt); // currently unused (reserved for future on-demand queries)
+}
+
+/// Route a wheel notch to whatever the user is actually looking at.
+///
+/// The wheel used to always move the background list, even with a modal overlay open — so while
+/// choosing compile options the cursor moved in the panel *behind* the floating form (and, worse,
+/// retargeted the action an open menu was about to run: REG-01/BUG-02). The top overlay owns the
+/// wheel, exactly as it owns the keyboard; only with no overlay does it reach the list.
+fn scroll_wheel(app: &mut App, dir: i64) {
+    use ui::Overlay;
+    let d = dir as i32;
+    match Overlay::top(app) {
+        None => app.move_sel(dir),
+        // Option forms: move the field cursor, unless a free-text field is being edited
+        // (there the wheel has no meaning and must not silently change which field is active).
+        Some(Overlay::CompileForm) => {
+            if let Some(f) = app.compile_form.as_mut().filter(|f| !f.editing) {
+                f.move_cursor(d);
+            }
+        }
+        Some(Overlay::PrefetchForm) => {
+            if let Some(f) = app.prefetch_form.as_mut().filter(|f| !f.editing) {
+                f.move_cursor(d);
+            }
+        }
+        Some(Overlay::DeployForm) => {
+            if let Some(f) = app.deploy_form.as_mut().filter(|f| !f.editing) {
+                f.move_cursor(d);
+            }
+        }
+        Some(Overlay::ObjectiveForm) => {
+            if let Some(f) = app.objective_form.as_mut().filter(|f| !f.editing) {
+                f.move_cursor(d);
+            }
+        }
+        Some(Overlay::PlacePicker) => app.place_pick_move(dir),
+        Some(Overlay::ActionMenu) => {
+            if let Some(mn) = app.action_menu.as_mut() {
+                mn.move_cursor(d);
+            }
+        }
+        Some(Overlay::Palette) => {
+            if let Some(pl) = app.palette.as_mut() {
+                pl.move_cursor(d);
+            }
+        }
+        Some(Overlay::Preview) => {
+            let lines = app
+                .preview
+                .as_ref()
+                .map(|(_, y)| y.lines().count())
+                .unwrap_or(0) as u16;
+            app.preview_scroll = if dir > 0 {
+                app.preview_scroll
+                    .saturating_add(3)
+                    .min(lines.saturating_sub(1))
+            } else {
+                app.preview_scroll.saturating_sub(3)
+            };
+        }
+        Some(Overlay::Logs) => {
+            let last = (app.logs.len() as u16).saturating_sub(1);
+            app.logs_scroll = if dir > 0 {
+                app.logs_scroll.saturating_add(3).min(last)
+            } else {
+                app.logs_scroll.saturating_sub(3)
+            };
+        }
+        // Help / alerts / confirms / route form — nothing scrollable; swallow the notch rather
+        // than letting it fall through to the list underneath.
+        Some(_) => {}
+    }
 }
 
 fn open_actions_or_detail(app: &mut App, detail_fallback: bool) {
@@ -950,11 +1038,26 @@ fn ui_loop(
     let mut fx = ui::FxState::new();
     // Mutation result channel — worker thread sends the result after running kube; the main loop drains and applies it.
     let (mut_tx, mut_rx) = std::sync::mpsc::channel::<MutationOutcome>();
+    let mut collector_dead = false; // report a poisoned snapshot lock once, not every frame
     let result = (|| -> Result<()> {
         loop {
             if !app.paused {
-                let snap = shared.lock().map(|g| g.clone()).unwrap_or_default();
-                app.apply(snap);
+                // A poisoned lock means a collector thread panicked. Recovering the guard keeps the
+                // last good snapshot on screen; `unwrap_or_default()` used to paint an empty cluster
+                // (0 nodes, 0 models, 0 warnings) — an observability tool quietly lying (BUG-16).
+                match shared.lock() {
+                    Ok(g) => app.apply(g.clone()),
+                    Err(poisoned) => {
+                        app.apply(poisoned.into_inner().clone());
+                        if !collector_dead {
+                            collector_dead = true;
+                            app.notify(
+                                "collector thread panicked — data is frozen at the last good snapshot"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
             }
             // Apply completed mutations (audit + toast/failure window). Clear in-flight.
             while let Ok(outcome) = mut_rx.try_recv() {
@@ -969,10 +1072,13 @@ fn ui_loop(
             if event::poll(Duration::from_millis(poll_ms))? {
                 let ev = event::read()?;
                 if let Event::Mouse(m) = ev {
-                    match m.kind {
-                        MouseEventKind::ScrollDown => app.move_sel(1),
-                        MouseEventKind::ScrollUp => app.move_sel(-1),
-                        _ => {}
+                    let dir = match m.kind {
+                        MouseEventKind::ScrollDown => 1,
+                        MouseEventKind::ScrollUp => -1,
+                        _ => 0,
+                    };
+                    if dir != 0 {
+                        scroll_wheel(&mut app, dir);
                     }
                     continue;
                 }
@@ -1204,6 +1310,18 @@ fn ui_loop(
                         }
                         continue;
                     }
+                    // Placement/Destination picker (deploy/compile/prefetch 2단계) — 후보 노드/PVC 상태 목록.
+                    // Overlay::PRECEDENCE 순서와 일치: 자식 picker 가 열려있으면 부모 폼보다 먼저 키를 소비해야 함.
+                    if app.place_picker.is_some() {
+                        match k.code {
+                            KeyCode::Up | KeyCode::Char('k') => app.place_pick_move(-1),
+                            KeyCode::Down | KeyCode::Char('j') => app.place_pick_move(1),
+                            KeyCode::Enter => app.place_pick_apply(),
+                            KeyCode::Esc | KeyCode::Char('q') => app.place_picker = None,
+                            _ => {}
+                        }
+                        continue;
+                    }
                     // NPU compile options form overlay. Enter(옵션 확정) → 목적지 노드 picker(2단계).
                     if app.compile_form.is_some() {
                         let editing = app.compile_form.as_ref().unwrap().editing;
@@ -1224,17 +1342,6 @@ fn ui_loop(
                         handle_edit_form!(app, prefetch_form, prefetch_form_submit, k.code);
                         continue;
                     }
-                    // Placement picker (deploy 폼의 place 필드에서 드릴) — 후보 노드 상태 목록.
-                    if app.place_picker.is_some() {
-                        match k.code {
-                            KeyCode::Up | KeyCode::Char('k') => app.place_pick_move(-1),
-                            KeyCode::Down | KeyCode::Char('j') => app.place_pick_move(1),
-                            KeyCode::Enter => app.place_pick_apply(),
-                            KeyCode::Esc | KeyCode::Char('q') => app.place_picker = None,
-                            _ => {}
-                        }
-                        continue;
-                    }
                     // Deploy/serving options form overlay.
                     if app.deploy_form.is_some() {
                         // 옵션을 다 고른 뒤 Enter → placement 선택 화면(다음 단계) → 거기서 매니페스트.
@@ -1253,8 +1360,18 @@ fn ui_loop(
                             KeyCode::Up | KeyCode::Char('k') => {
                                 app.preview_scroll = app.preview_scroll.saturating_sub(1)
                             }
+                            // Clamp at the last line — unbounded `j` used to scroll the content
+                            // off into a blank window with no way to tell you had passed the end (BUG-15).
                             KeyCode::Down | KeyCode::Char('j') => {
-                                app.preview_scroll = app.preview_scroll.saturating_add(3)
+                                let lines = app
+                                    .preview
+                                    .as_ref()
+                                    .map(|(_, y)| y.lines().count())
+                                    .unwrap_or(0) as u16;
+                                app.preview_scroll = app
+                                    .preview_scroll
+                                    .saturating_add(3)
+                                    .min(lines.saturating_sub(1));
                             }
                             // 파일로 저장(어느 preview 든) — 편집 후 kubectl apply 하거나 보관.
                             KeyCode::Char('w') => {
@@ -1316,7 +1433,12 @@ fn ui_loop(
                                 app.logs_scroll = app.logs_scroll.saturating_sub(1)
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
-                                app.logs_scroll = app.logs_scroll.saturating_add(3)
+                                // Same clamp as preview — and it keeps the footer's line counter
+                                // (already clamped for display) honest about where you are (BUG-15).
+                                app.logs_scroll = app
+                                    .logs_scroll
+                                    .saturating_add(3)
+                                    .min((app.logs.len() as u16).saturating_sub(1));
                             }
                             KeyCode::Char('r') => {
                                 if let Ok(l) = kube::logs(&ns, &app.logs_target, 400) {
@@ -1621,6 +1743,26 @@ fn ui_loop(
     result
 }
 
+/// Missing metric → em dash, matching how the TUI and `--json` (null) report absence.
+/// The headless text used to print a raw `NaN`, which reads as a broken value rather than
+/// "this node has no node-exporter" (BUG-14).
+fn dash(v: f64) -> String {
+    if v.is_nan() {
+        "—".to_string()
+    } else {
+        format!("{:.2}", v)
+    }
+}
+
+/// Same, at a caller-chosen precision.
+fn dashp(v: f64, prec: usize) -> String {
+    if v.is_nan() {
+        "—".to_string()
+    } else {
+        format!("{:.*}", prec, v)
+    }
+}
+
 fn print_snapshot(s: &collect::Snapshot, cfg: &Config) {
     println!("== lmd-top snapshot (prom={}, ns={}) ==", cfg.prom, cfg.ns);
     println!(
@@ -1635,30 +1777,37 @@ fn print_snapshot(s: &collect::Snapshot, cfg: &Config) {
     println!("\n[nodes] {}", s.nodes.len());
     for n in &s.nodes {
         println!(
-            "  {:<24} load1 {:>5.2}  mem {:.0}/{:.0}G",
-            n.name, n.load1, n.mem_used_gb, n.mem_total_gb
+            "  {:<24} load1 {:>5}  mem {}/{}G",
+            n.name,
+            dash(n.load1),
+            dashp(n.mem_used_gb, 0),
+            dashp(n.mem_total_gb, 0)
         );
     }
     println!("\n[accelerators] {}", s.accel.len());
     for a in &s.accel {
         println!(
-            "  {:<5} {:<6} {:<16} util {:>5.1}%  mem {:.0}/{:.0}G  {:.0}°C {:.0}W  {}",
+            "  {:<5} {:<6} {:<16} util {:>5}%  mem {}/{}G  {}°C {}W  {}",
             a.disp(),
             a.id,
             a.node,
-            a.util,
-            a.mem_used_gb,
-            a.mem_total_gb,
-            a.temp,
-            a.power,
+            dashp(a.util, 1),
+            dashp(a.mem_used_gb, 0),
+            dashp(a.mem_total_gb, 0),
+            dashp(a.temp, 0),
+            dashp(a.power, 0),
             a.busy_model
         );
     }
     println!("\n[inference pools] {}", s.pools.len());
     for p in &s.pools {
         println!(
-            "  {:<16} ready {:.0}  queue {:.1}  kv {:.2}  sat {:.2}",
-            p.name, p.ready, p.queue, p.kv, p.sat
+            "  {:<16} ready {}  queue {}  kv {}  sat {}",
+            p.name,
+            dashp(p.ready, 0),
+            dashp(p.queue, 1),
+            dash(p.kv),
+            dash(p.sat)
         );
     }
     if let Some(e) = &s.epp {
@@ -1800,6 +1949,221 @@ mod tests {
             body
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn model(name: &str, desired: i64) -> crate::collect::ModelRow {
+        crate::collect::ModelRow {
+            name: name.into(),
+            ready: desired,
+            desired,
+            status: String::new(),
+            route: String::new(),
+            engine: String::new(),
+            accel: String::new(),
+            running: None,
+            waiting: None,
+            tps: None,
+            kv: None,
+            ttft: None,
+        }
+    }
+
+    /// BUG-02: the action menu freezes its subject, so Scale must derive the replica toggle from
+    /// that subject. Reading the live selection produced "scale A → 1" when the user, having
+    /// opened the menu on running model A, meant to stop it.
+    #[test]
+    fn scale_target_follows_menu_subject_not_selection() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut app = App::new();
+        app.mode = Mode::Admin;
+        app.view = crate::app::View::Overview;
+        // A is running (stop → 0); B is stopped (start → 1).
+        app.snap.models = vec![model("model-a", 1), model("model-b", 0)];
+        app.selected = 1; // selection sits on B, as a stray wheel event would leave it
+
+        super::dispatch_action(
+            &mut app,
+            crate::app::Action::Scale,
+            "model-a", // subject frozen when the menu opened
+            "llm-serving",
+            "127.0.0.1:9090",
+            rt.handle(),
+        );
+        match app.confirm.take() {
+            Some(crate::app::Pending::Scale { name, target }) => {
+                assert_eq!(name, "model-a");
+                assert_eq!(target, 0, "running subject must scale to 0, not follow B");
+            }
+            other => panic!("expected a Scale confirm, got {:?}", other.is_some()),
+        }
+    }
+
+    /// 사용자 리포트 회귀: compile 옵션 폼이 열려 있을 때 휠은 **폼의 필드 커서**를 움직여야 하고,
+    /// 배경 리스트 선택은 손대지 않아야 한다. (예전엔 반대였다 — 배경만 움직였다.)
+    #[test]
+    fn wheel_drives_the_top_overlay_not_the_background() {
+        let mut app = App::new();
+        app.mode = Mode::Admin;
+        app.view = crate::app::View::Library;
+        app.catalog = crate::catalog::load();
+        // 배경 리스트에 여러 행이 있어야 "안 움직였다"가 의미를 가진다.
+        assert!(app.list_len() > 1, "need a multi-row background list");
+        app.selected = 1;
+        app.compile_form_for("rbln");
+        assert!(app.compile_form.is_some(), "compile form should open");
+        let field0 = app.compile_form.as_ref().unwrap().cursor;
+
+        super::scroll_wheel(&mut app, 1);
+        let field1 = app.compile_form.as_ref().unwrap().cursor;
+        assert_ne!(field1, field0, "wheel should move the form's field cursor");
+        assert_eq!(app.selected, 1, "background selection must not move");
+
+        super::scroll_wheel(&mut app, -1);
+        assert_eq!(
+            app.compile_form.as_ref().unwrap().cursor,
+            field0,
+            "wheel up should move back"
+        );
+        assert_eq!(app.selected, 1, "background selection must still not move");
+
+        // 자유 입력(e) 중에는 휠이 필드를 바꾸지 않는다 — 타이핑 중 대상이 바뀌면 안 된다.
+        app.compile_form.as_mut().unwrap().editing = true;
+        let during_edit = app.compile_form.as_ref().unwrap().cursor;
+        super::scroll_wheel(&mut app, 1);
+        assert_eq!(
+            app.compile_form.as_ref().unwrap().cursor,
+            during_edit,
+            "wheel must be inert while a field is being edited"
+        );
+
+        // 오버레이를 닫으면 휠은 다시 리스트를 움직인다.
+        app.compile_form = None;
+        super::scroll_wheel(&mut app, 1);
+        assert_ne!(app.selected, 1, "with no overlay the wheel moves the list");
+    }
+
+    /// BUG-02 (REG-01): while any overlay is open the wheel must not reach the background list.
+    /// The mouse branch is gated on exactly this predicate.
+    #[test]
+    fn overlay_open_claims_input() {
+        let mut app = App::new();
+        assert!(crate::ui::Overlay::top(&app).is_none());
+        app.action_menu = Some(crate::app::ActionMenu {
+            title: "model-a".into(),
+            subject: "model-a".into(),
+            items: Vec::new(),
+            cursor: 0,
+        });
+        assert!(
+            crate::ui::Overlay::top(&app).is_some(),
+            "an open action menu must claim input so the wheel cannot retarget it"
+        );
+    }
+
+    #[test]
+    fn handle_edit_form_supports_vim_navigation() {
+        let mut app = App::new();
+        app.compile_form = Some(crate::ops::CompileForm {
+            model: "test".into(),
+            model_id: "test".into(),
+            vendor: "rbln",
+            engine: "rbln".into(),
+            fields: vec![
+                crate::ops::CompileField {
+                    key: "f1".into(),
+                    label: "f1".into(),
+                    value: "a".into(),
+                    choices: vec!["a".into(), "b".into(), "c".into()],
+                    numeric: false,
+                    help: "".into(),
+                },
+                crate::ops::CompileField {
+                    key: "f2".into(),
+                    label: "f2".into(),
+                    value: "1".into(),
+                    choices: vec!["1".into(), "2".into()],
+                    numeric: true,
+                    help: "".into(),
+                },
+            ],
+            cursor: 0,
+            editing: false,
+            dest: String::new(),
+        });
+
+        // Down via 'j'
+        handle_edit_form!(app, compile_form, compile_form_submit, KeyCode::Char('j'));
+        assert_eq!(app.compile_form.as_ref().unwrap().cursor, 1);
+
+        // Up via 'k'
+        handle_edit_form!(app, compile_form, compile_form_submit, KeyCode::Char('k'));
+        assert_eq!(app.compile_form.as_ref().unwrap().cursor, 0);
+
+        // Cycle right via 'l'
+        handle_edit_form!(app, compile_form, compile_form_submit, KeyCode::Char('l'));
+        assert_eq!(app.compile_form.as_ref().unwrap().fields[0].value, "b");
+
+        // Cycle left via 'h'
+        handle_edit_form!(app, compile_form, compile_form_submit, KeyCode::Char('h'));
+        assert_eq!(app.compile_form.as_ref().unwrap().fields[0].value, "a");
+    }
+
+    #[test]
+    fn compile_2step_picker_takes_precedence() {
+        let mut app = App::new();
+        app.compile_form = Some(crate::ops::CompileForm {
+            model: "test".into(),
+            model_id: "test".into(),
+            vendor: "rbln",
+            engine: "rbln".into(),
+            fields: vec![],
+            cursor: 0,
+            editing: false,
+            dest: String::new(),
+        });
+        app.place_picker = Some(crate::ops::PlacePick {
+            cursor: 0,
+            rows: vec![
+                crate::ops::PlaceRow {
+                    value: "node1".into(),
+                    label: "node1".into(),
+                    free: 1,
+                    total: 1,
+                    util: 0.0,
+                    mem_used: 0.0,
+                    mem_total: 0.0,
+                    schedulable: true,
+                    note: "".into(),
+                    info_only: false,
+                },
+                crate::ops::PlaceRow {
+                    value: "node2".into(),
+                    label: "node2".into(),
+                    free: 1,
+                    total: 1,
+                    util: 0.0,
+                    mem_used: 0.0,
+                    mem_total: 0.0,
+                    schedulable: true,
+                    note: "".into(),
+                    info_only: false,
+                },
+            ],
+        });
+
+        // Top overlay must be PlacePicker, not CompileForm
+        assert_eq!(
+            crate::ui::Overlay::top(&app),
+            Some(crate::ui::Overlay::PlacePicker)
+        );
+
+        // Moving cursor down on place picker
+        app.place_pick_move(1);
+        assert_eq!(app.place_picker.as_ref().unwrap().cursor, 1);
+        assert_eq!(app.compile_form.as_ref().unwrap().cursor, 0);
     }
 
     #[test]

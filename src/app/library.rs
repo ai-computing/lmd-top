@@ -66,14 +66,14 @@ impl App {
     }
 
     /// 아티팩트의 모델 식별자 — HF id(source) 우선, 없으면 family.
-    pub(super) fn artifact_model_id(a: &crate::collect::ModelArtifact) -> String {
+    pub(crate) fn artifact_model_id(a: &crate::collect::ModelArtifact) -> String {
         if a.source.contains('/') && !a.source.starts_with('/') {
             a.source.clone()
         } else {
             a.family.clone()
         }
     }
-    pub(super) fn opt_or<'a>(a: &'a crate::collect::ModelArtifact, k: &str, def: &'a str) -> String {
+    pub(crate) fn opt_or<'a>(a: &'a crate::collect::ModelArtifact, k: &str, def: &'a str) -> String {
         a.opts
             .iter()
             .find(|(kk, _)| kk == k)

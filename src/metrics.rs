@@ -78,6 +78,28 @@ pub const DEPS: &[(&str, &str, &str)] = &[
         DCGM_FB_TOTAL,
         "GPU mem total unavailable (unified-mem falls back to host)",
     ),
+    // collect_gpu 도 함께 읽는 항목들 — DEPS 에서 빠져 있어 커버리지 표에서 검사되지 않고,
+    // doctor 의 "미사용 후보" 목록(= DEPS 여집합)에 이미 배선된 신호로 실려 나갔다(BUG-10).
+    (
+        "NVIDIA GPU (DCGM)",
+        DCGM_MEM_COPY_UTIL,
+        "GPU memory-bandwidth column empty",
+    ),
+    (
+        "NVIDIA GPU (DCGM)",
+        DCGM_SM_CLOCK,
+        "GPU SM clock column empty",
+    ),
+    (
+        "NVIDIA GPU (DCGM)",
+        DCGM_MEM_TEMP,
+        "GPU memory temperature column empty",
+    ),
+    (
+        "NVIDIA GPU (DCGM)",
+        DCGM_ENERGY,
+        "session energy (Wh since start) unavailable",
+    ),
     ("Rebellions RBLN", RBLN_UTIL, "RBLN util unavailable"),
     ("Rebellions RBLN", RBLN_TEMP, "RBLN temp unavailable"),
     ("Rebellions RBLN", RBLN_POWER, "RBLN power unavailable"),
@@ -170,3 +192,59 @@ pub const DEPS: &[(&str, &str, &str)] = &[
 
 /// Family prefixes for detecting "unused accelerator metrics (= new signal candidates)".
 pub const ACCEL_PREFIXES: &[&str] = &["DCGM_FI_DEV_", "furiosa_npu_", "RBLN_DEVICE_STATUS:"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// BUG-10 회귀: doctor 는 DEPS 를 "사용 중" 집합으로 쓴다. collect 가 읽는 가속기 메트릭이
+    /// DEPS 에 없으면 (a) 커버리지 표가 그 항목을 검사하지 않고 (b) 이미 배선된 신호를
+    /// "미사용 후보 — 배선하라"고 권한다. 상수를 공유해도 목록은 어긋날 수 있으므로 여기서 고정.
+    #[test]
+    fn deps_covers_every_accelerator_metric_collect_reads() {
+        let deps: Vec<&str> = DEPS.iter().map(|(_, m, _)| *m).collect();
+        let read_by_collect = [
+            DCGM_GPU_UTIL,
+            DCGM_GPU_TEMP,
+            DCGM_POWER,
+            DCGM_FB_USED,
+            DCGM_FB_TOTAL,
+            DCGM_MEM_COPY_UTIL,
+            DCGM_SM_CLOCK,
+            DCGM_MEM_TEMP,
+            DCGM_ENERGY,
+            RBLN_UTIL,
+            RBLN_TEMP,
+            RBLN_POWER,
+            RBLN_DRAM_USED,
+            RBLN_DRAM_TOTAL,
+            RBLN_HEALTH,
+            FURIOSA_UTIL,
+            FURIOSA_TEMP,
+            FURIOSA_POWER,
+            FURIOSA_DRAM_USED,
+            FURIOSA_DRAM_TOTAL,
+            FURIOSA_ALIVE,
+            FURIOSA_THROTTLE,
+        ];
+        let missing: Vec<&str> = read_by_collect
+            .iter()
+            .copied()
+            .filter(|m| !deps.contains(m))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "collect reads these but DEPS omits them (doctor would call them unused): {:?}",
+            missing
+        );
+    }
+
+    /// 반대 방향: DEPS 에 같은 메트릭이 두 번 실리면 커버리지 합계가 부풀려진다.
+    #[test]
+    fn deps_has_no_duplicates() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (_, m, _) in DEPS {
+            assert!(seen.insert(*m), "duplicate DEPS entry: {}", m);
+        }
+    }
+}

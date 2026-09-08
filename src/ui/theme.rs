@@ -69,6 +69,43 @@ pub(crate) fn C_ACC() -> Color {
         _ => Color::Cyan,
     }
 }
+/// Render-state test lock. The theme index is process-global, so tests that assert on colours
+/// across themes must not render concurrently with each other.
+#[cfg(test)]
+pub(crate) static RENDER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// Is a modal overlay covering the panels this frame? Set once per frame by `ui::draw`.
+// Background lists dim their selection bar while it is true, so the screen shows one live
+// cursor instead of two competing ones (the floating form's marker and the panel's bar).
+//
+// Thread-local, not a global: rendering is single-threaded (one UI thread, or one test thread
+// per test), and a shared flag let concurrently-rendering tests clobber each other's frames.
+thread_local! {
+    static MODAL_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn set_modal(open: bool) {
+    MODAL_OPEN.with(|m| m.set(open));
+}
+
+pub(crate) fn modal_open() -> bool {
+    MODAL_OPEN.with(|m| m.get())
+}
+
+/// Selection bar for a **background** list/table. Dims to the track colour while a modal overlay
+/// owns the input, keeping the row visible as context without reading as the active cursor.
+#[allow(non_snake_case)]
+pub(crate) fn C_SEL_BG() -> Color {
+    if modal_open() {
+        C_TRACK()
+    } else {
+        C_HL()
+    }
+}
+
+/// Selection **background** only. Never use it as a foreground: it is a near-black charcoal, so
+/// `fg(C_HL())` on a row that also carries `bg(C_HL())` renders the text invisible (BUG-03).
+/// For "this row is selected" text, use `C_ACC()` + BOLD.
 #[allow(non_snake_case)]
 pub(crate) fn C_HL() -> Color {
     match th() {

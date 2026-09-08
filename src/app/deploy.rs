@@ -590,6 +590,22 @@ impl App {
         let Some(form) = self.deploy_form.take() else {
             return;
         };
+        // model_id/mount 는 Deployment 의 args·env·YAML 스칼라로 그대로 들어간다. 문법이 아닌 값을
+        // 통과시키면 매니페스트가 깨지거나 컨테이너 커맨드로 새어 나간다(BUG-06).
+        let bad_field = [
+            ("model", form.model_id.clone()),
+            ("mount", form.mount.clone()),
+        ]
+        .into_iter()
+        .find(|(_, v)| !v.is_empty() && !crate::quote::valid_model_id(v));
+        if let Some((label, bad)) = bad_field {
+            self.notify(format!(
+                "deploy blocked — {} '{}' is not a valid HF repo id or store path",
+                label, bad
+            ));
+            self.deploy_form = Some(form); // 폼 유지: 값만 고쳐 다시 Enter
+            return;
+        }
         let name = form.model_id.replace(['/', '.'], "-").to_lowercase();
         let name = format!("serve-{}", name);
         let replicas = form.get("replicas");

@@ -115,7 +115,10 @@ pub async fn fetch_zoo_live() -> Vec<ZooModel> {
     let mut zoo = Vec::new();
     for m in arr {
         let id = m["id"].as_str().unwrap_or("");
-        if id.is_empty() {
+        // Remote input: these ids end up in generated manifests (a YAML scalar, and the compile
+        // Job's `sh -c` line). Reject anything that is not a plain HF repo id right here, so a
+        // hostile or malformed upstream entry can never reach manifest generation (BUG-06).
+        if !crate::quote::valid_model_id(id) {
             continue;
         }
         let role = match m["pipeline_tag"].as_str().unwrap_or("") {
