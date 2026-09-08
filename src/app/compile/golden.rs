@@ -70,6 +70,10 @@ fn fixture() -> Snapshot {
 fn app() -> App {
     let mut a = App::new();
     a.ns = "llm-serving".into();
+    // LMD_COMPILE_ENV is a passthrough into the Job's env, so a value in the developer's
+    // shell — or set by a test running in parallel — would change the generated manifest.
+    // Pinned here for the same reason the images are.
+    std::env::remove_var("LMD_COMPILE_ENV");
     // Pin the image inputs — otherwise LMD_*_IMAGE in the environment would change the goldens.
     a.img_rbln = None;
     a.img_furiosa = Some("furiosaai/furiosa-llm:latest".into());
@@ -92,6 +96,9 @@ const CASES: &[(&str, &str, &'static str, &str)] = &[
 ];
 
 fn generate(op: &str, vendor: &'static str, model: &str) -> Result<(String, String), String> {
+    let _g = crate::audit::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut a = app();
     match op {
         "compile" => a.plan_compile_for_model(model, vendor, &[]),

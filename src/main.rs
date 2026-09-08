@@ -106,6 +106,7 @@ ENVIRONMENT:
     LMD_THEME        startup theme: soft | default | high-contrast | colorblind
     LMD_AUDIT        audit log path (default: ~/.config/lmd-top/audit.log)
     LMD_HISTORY      compile/serving history path (default: ~/.config/lmd-top/history.jsonl)
+    LMD_COMPILE_ENV  extra env for compile Jobs, K=V,K=V (e.g. vendor debug flags)
     LMD_W / LMD_H    size for --render
 
 With no options, lmd-top launches the interactive TUI. See `?` in the TUI for keybindings.";
