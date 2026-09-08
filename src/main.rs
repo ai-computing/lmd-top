@@ -107,8 +107,7 @@ ENVIRONMENT:
     LMD_AUDIT        audit log path (default: ~/.config/lmd-top/audit.log)
     LMD_HISTORY      compile/serving history path (default: ~/.config/lmd-top/history.jsonl)
     LMD_COMPILE_ENV  extra env for compile Jobs, K=V,K=V (e.g. vendor debug flags)
-                     RBLN: LMD_RBLN_UNFROZEN=1 compiles via rebel.core_ori for a real
-                     traceback when the frozen SDK hides the error
+                     RBLN builds on TVM, so TVM_LOG_DEBUG=1 / TVM_BACKTRACE=1 work
     LMD_W / LMD_H    size for --render
 
 With no options, lmd-top launches the interactive TUI. See `?` in the TUI for keybindings.";

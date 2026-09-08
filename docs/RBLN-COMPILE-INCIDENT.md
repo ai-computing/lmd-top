@@ -13,7 +13,9 @@ RuntimeError: Error occurred while compiling the model
   File "<frozen core.compilation._impl>", line 974, in compile
 ```
 
-첫 번째 compile unit(`Compile(#0)`)에서 즉시 발생. 그 앞 단계는 모두 성공한다:
+첫 번째 compile unit(`Compile(#0)`) 에서 발생하며, **그래프 생성·최적화 진행바는 100% 까지
+완주한 뒤** 실패한다(아래 "좁힌 범위" 참조 — 실제 실패 지점은 codegen 이 아니라 결과 조립으로
+보인다). 그 앞 단계는 모두 성공한다:
 
 ```
 INFO [rebel-compiler] Export done. Elapsed time: 0:00:01
@@ -88,6 +90,35 @@ error: no model registry entry for architecture=Qwen2ForCausalLM, hidden_size=89
 
 이 비대칭이 "한쪽만 깨진" 이유를 설명한다. 다만 **가설 3 이 제거됐으므로, 이번 장애의 원인이
 환경 드리프트라는 뜻은 아니다.** 컨테이너화는 *재발 방지*로는 옳지만 현재 장애의 해결책이 아니다.
+
+## 벤더 소스를 읽어 좁힌 범위
+
+`rebel` 패키지는 frozen 모듈(`core`)과 **동일 구현의 평문 소스(`core_ori`)를 함께 배포**한다.
+이를 읽어 두 가지가 좁혀졌다.
+
+**1. 실패 지점은 codegen 이 아니라 결과 조립이다.** frozen 트레이스백의 `_impl.py:974` 는
+`core_ori` 에서 `_build(...)`(959행)가 아니라 **`model_builder.add_module(...)`(974행)** 에
+대응한다. 그리고 로그의 "Computation graph generation/optimization" 진행바가 **100% 까지
+도달**한다. 즉 컴파일 자체는 끝나고 `PyRblnModelBuilder`(네이티브 `rebel._C`)에 결과를 넣는
+단계에서 죽는다. (line 이 정확히 대응한다는 보장은 없으나, 진행바가 완주하는 사실이 이를 뒷받침한다.)
+
+**2. `<frozen core.utility>:66 in wrapper` 는 범인이 아니다.** `core_ori/utility.py` 의 해당
+데코레이터는 `warn_deprecated_kwargs` — 통과용이며 예외를 삼키지 않는다. 삼키는 코드는 frozen
+`_impl` 내부이고, 따라서 `core_ori` 는 frozen 과 바이트 동일하지 않다.
+
+**3. `librbln.so` 는 TVM 빌드다.** `core_ori` 를 억지로 import 해보다 얻은 부산물:
+
+```
+InternalError: Check failed: (p.second != plevel) is false:
+Attribute target.rebel_descriptor of abs is already registered with same plevel=10
+  /home/gspark/.local/lib/python3.10/site-packages/tvm/librbln.so
+  tvm::OpRegEntry::UpdateAttr(...), tvm::runtime::detail::RebelException(...)
+```
+
+이 오류 자체는 **이중 import 가 만든 것**(frozen core 와 core_ori 가 같은 TVM 연산자 속성을
+등록)이라 원래 버그와 무관하다. 하지만 두 가지를 알려준다 — `core_ori` 는 낡은 스냅샷이 아니라
+살아있는 구현이고, 컴파일러가 **TVM 기반**이므로 TVM 자신의 `TVM_LOG_DEBUG` / `TVM_BACKTRACE`
+가 적용된다. (그래서 `core_ori` 우회는 불가능하다 — 재시도하지 말 것.)
 
 ## 다음 단계
 

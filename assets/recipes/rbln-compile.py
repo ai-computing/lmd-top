@@ -57,29 +57,15 @@ def _report_toolchain():
 _report_toolchain()
 
 
-def _use_unfrozen_compiler():
-    """Route compilation through `rebel.core_ori`, the shipped plain-Python twin of the
-    frozen `rebel.core`, so a failure produces a real traceback.
-
-    Opt-in via LMD_RBLN_UNFROZEN=1. The deploy build freezes `core.compilation._impl` into
-    the extension and raises a bare `RuntimeError("Error occurred while compiling the
-    model")` with no cause chain, no verbose mode outside a dev build, and no way to see what
-    actually failed. `core_ori` ships as source next to it; if it is current, this exposes the
-    real error, and if it is a stale snapshot the run fails differently and says so.
-    """
-    if os.environ.get("LMD_RBLN_UNFROZEN") != "1":
-        return
-    try:
-        import rebel.compile_from_any as cfa
-        from rebel.core_ori.compilation._impl import compile as ori_compile
-
-        cfa.compile = ori_compile
-        print("LMD_UNFROZEN active — compiling via rebel.core_ori", flush=True)
-    except Exception as exc:  # noqa: BLE001 - diagnostic path, never fatal
-        print(f"LMD_UNFROZEN unavailable: {type(exc).__name__}: {exc}", flush=True)
-
-
-_use_unfrozen_compiler()
+# Not viable, recorded so nobody retries it: rebel ships core_ori/ as plain source next to
+# the frozen core, and compile_from_any resolves `compile` through a module global, so it looks
+# rebindable. Importing it aborts — both register the same TVM operator attributes:
+#
+#   InternalError: Check failed: (p.second != plevel) is false: Attribute
+#   target.rebel_descriptor of abs is already registered with same plevel=10
+#
+# Useful finding all the same: core_ori is a live implementation, not a stale snapshot, and
+# librbln.so is a TVM build — which is why TVM's own TVM_LOG_DEBUG / TVM_BACKTRACE apply here.
 
 from optimum.rbln import RBLNAutoModelForCausalLM as M
 
