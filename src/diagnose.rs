@@ -328,3 +328,113 @@ RuntimeError: Error occurred while compiling the model
         assert!(f.summary.ends_with('…'));
     }
 }
+
+// ── Toolchain ───────────────────────────────────────────────────────────────────────────────
+
+/// Parse the `LMD_TOOLCHAIN pkg=ver …` line the recipes print.
+///
+/// Recorded for successes as well as failures: a version skew is only visible as the
+/// difference between the two.
+pub fn toolchain(log: &str) -> std::collections::BTreeMap<String, String> {
+    log.lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix("LMD_TOOLCHAIN "))
+        .map(|rest| {
+            rest.split_whitespace()
+                .filter_map(|kv| kv.split_once('='))
+                .filter(|(_, v)| *v != "absent")
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A dependency skew that is known to break a vendor toolchain here.
+///
+/// One entry so far, and it is observed rather than inferred: on this cluster optimum-rbln
+/// 0.11 with transformers 5.x failed to compile three different models across three parameter
+/// sets, always with the same opaque codegen error, while the graph itself converted fine.
+/// transformers 5 is a major release and 0.11 predates it. Keep this list to things actually
+/// seen to fail — a guessed compatibility matrix would send people down the wrong path.
+pub fn toolchain_skew(
+    versions: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    let major = |pkg: &str| -> Option<u32> {
+        versions
+            .get(pkg)?
+            .split(['.', '-', '+'])
+            .next()?
+            .parse()
+            .ok()
+    };
+    let minor = |pkg: &str| -> Option<u32> {
+        versions.get(pkg)?.split('.').nth(1)?.parse().ok()
+    };
+    if let (Some(0), Some(orb_minor), Some(tf_major)) =
+        (major("optimum-rbln"), minor("optimum-rbln"), major("transformers"))
+    {
+        if orb_minor <= 11 && tf_major >= 5 {
+            return Some(format!(
+                "optimum-rbln {} with transformers {} — this combination failed every compile \
+                 observed here; pin transformers <5 on the compile host",
+                versions.get("optimum-rbln").map(String::as_str).unwrap_or("?"),
+                versions.get("transformers").map(String::as_str).unwrap_or("?"),
+            ));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod toolchain_tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_reported_line() {
+        let log = "starting\nLMD_TOOLCHAIN optimum-rbln=0.11.0.post1 rebel-compiler=0.11.0                    transformers=5.8.1 torch=2.11.0+cpu\nRBLN_CONFIG {...}\n";
+        let t = toolchain(log);
+        assert_eq!(t.get("optimum-rbln").map(String::as_str), Some("0.11.0.post1"));
+        assert_eq!(t.get("transformers").map(String::as_str), Some("5.8.1"));
+        assert_eq!(t.get("torch").map(String::as_str), Some("2.11.0+cpu"));
+        // A package the recipe could not find is omitted rather than recorded as "absent".
+        assert_eq!(toolchain("LMD_TOOLCHAIN furiosa-llm=absent torch=2.4.0\n").len(), 1);
+        assert!(toolchain("no such line here").is_empty());
+    }
+
+    /// The skew this cluster demonstrated: optimum-rbln 0.11 against transformers 5.
+    #[test]
+    fn flags_the_observed_skew_and_nothing_else() {
+        let observed: std::collections::BTreeMap<String, String> = [
+            ("optimum-rbln", "0.11.0.post1"),
+            ("transformers", "5.8.1"),
+            ("torch", "2.11.0+cpu"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let why = toolchain_skew(&observed).expect("skew flagged");
+        assert!(why.contains("transformers"), "{}", why);
+        assert!(why.contains("pin transformers <5"), "{}", why);
+
+        // A supported pairing is not flagged.
+        let ok: std::collections::BTreeMap<String, String> = [
+            ("optimum-rbln", "0.11.0.post1"),
+            ("transformers", "4.48.0"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        assert_eq!(toolchain_skew(&ok), None);
+        // Neither is a future optimum-rbln that may well support transformers 5.
+        let future: std::collections::BTreeMap<String, String> = [
+            ("optimum-rbln", "0.14.0"),
+            ("transformers", "5.8.1"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        assert_eq!(toolchain_skew(&future), None, "do not claim what we have not seen");
+        // And an unknown toolchain says nothing.
+        assert_eq!(toolchain_skew(&Default::default()), None);
+    }
+}

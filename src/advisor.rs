@@ -98,6 +98,17 @@ fn relevance(rec: &Record, model: &str, vendor: &str) -> Option<Relevance> {
     }
 }
 
+/// Everything a failure could be blamed on: the build options plus the toolchain it ran
+/// against. Toolchain keys are prefixed so the reported correlation says which it is —
+/// "all of them had transformers=5.8.1" is a very different instruction from "tp=4".
+fn correlation_space(rec: &Record) -> BTreeMap<String, String> {
+    let mut all = build_options(rec);
+    for (k, v) in &rec.toolchain {
+        all.insert(format!("[{}]", k), v.clone());
+    }
+    all
+}
+
 /// Options that identify a build, ignoring bookkeeping keys that do not affect the artifact.
 fn build_options(rec: &Record) -> BTreeMap<String, String> {
     rec.options
@@ -342,6 +353,7 @@ mod tests {
             },
             tps: None,
             ttft_p95: None,
+            toolchain: Default::default(),
         }
     }
 
@@ -598,7 +610,7 @@ pub fn patterns(history: &[Record]) -> Vec<Pattern> {
                     // An option present in every failure…
                     let mut shared: Option<BTreeMap<String, String>> = None;
                     for f in &fails {
-                        let opts = build_options(f);
+                        let opts = correlation_space(f);
                         shared = Some(match shared {
                             None => opts,
                             Some(prev) => prev
@@ -613,7 +625,7 @@ pub fn patterns(history: &[Record]) -> Vec<Pattern> {
                         .find(|(k, v)| {
                             successes
                                 .iter()
-                                .all(|s| build_options(s).get(k) != Some(v))
+                                .all(|s| correlation_space(s).get(k) != Some(v))
                         })
                         .map(|(k, v)| format!("{}={}", k, v))
                 })
@@ -629,6 +641,31 @@ pub fn patterns(history: &[Record]) -> Vec<Pattern> {
         .collect();
     out.sort_by(|a, b| b.failures.cmp(&a.failures).then(a.vendor.cmp(&b.vendor)));
     out
+}
+
+/// Toolchain skews seen in the history, most recent reading per accelerator.
+///
+/// Separate from [`patterns`] because this does not need a correlation to be actionable: a
+/// dependency combination known to break a vendor's compiler is worth reporting the first time
+/// it is observed, not after two failures and a contrasting success.
+pub fn toolchain_warnings(history: &[Record]) -> Vec<(String, String)> {
+    let mut latest: BTreeMap<String, &Record> = BTreeMap::new();
+    for rec in history.iter().filter(|r| !r.toolchain.is_empty()) {
+        latest
+            .entry(rec.vendor.clone())
+            .and_modify(|cur| {
+                if rec.ts >= cur.ts {
+                    *cur = rec;
+                }
+            })
+            .or_insert(rec);
+    }
+    latest
+        .into_iter()
+        .filter_map(|(vendor, rec)| {
+            crate::diagnose::toolchain_skew(&rec.toolchain).map(|why| (vendor, why))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -650,6 +687,7 @@ mod pattern_tests {
             detail: String::new(),
             tps: None,
             ttft_p95: None,
+            toolchain: Default::default(),
         }
     }
 
@@ -712,6 +750,57 @@ mod pattern_tests {
             r("c", "rbln", Outcome::Ok, "", &[("attn", "eager")]),
         ];
         assert_eq!(patterns(&single)[0].correlates, None, "one failure is not a pattern");
+    }
+
+    /// The case that actually happened: three models, three parameter sets, all failing the
+    /// same way. No *option* separates them because the option was never the problem — the
+    /// toolchain was. Including it in the correlation space is what finds that.
+    #[test]
+    fn correlates_on_the_toolchain_when_no_option_explains_it() {
+        let tools = |tf: &str| -> std::collections::BTreeMap<String, String> {
+            [("optimum-rbln", "0.11.0"), ("transformers", tf)]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let mut h = vec![
+            r("qwen3-4b", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "4"), ("max-len", "8192")]),
+            r("qwen2.5-0.5b", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "1"), ("max-len", "4096")]),
+            r("llama-3.1-8b", "rbln", Outcome::Ok, "", &[("tp", "4"), ("max-len", "4096")]),
+        ];
+        h[0].toolchain = tools("5.8.1");
+        h[1].toolchain = tools("5.8.1");
+        h[2].toolchain = tools("4.48.0"); // the build that worked, on the older dependency
+        let p = patterns(&h);
+        assert_eq!(
+            p[0].correlates.as_deref(),
+            Some("[transformers]=5.8.1"),
+            "the toolchain is what the failures share: {:?}",
+            p[0]
+        );
+        assert!(p[0].line().contains("transformers"), "{}", p[0].line());
+    }
+
+    /// A dependency combination known to break the compiler is reported on first sight —
+    /// it does not need two failures and a contrasting success to be actionable.
+    #[test]
+    fn reports_a_known_skew_immediately() {
+        let mut h = vec![r("m", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "4")])];
+        h[0].toolchain = [("optimum-rbln", "0.11.0.post1"), ("transformers", "5.8.1")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let w = toolchain_warnings(&h);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].0, "rbln");
+        assert!(w[0].1.contains("pin transformers <5"), "{}", w[0].1);
+
+        // A healthy toolchain warns about nothing.
+        h[0].toolchain.insert("transformers".into(), "4.48.0".into());
+        assert!(toolchain_warnings(&h).is_empty());
+        // And a history with no toolchain recorded says nothing rather than guessing.
+        h[0].toolchain.clear();
+        assert!(toolchain_warnings(&h).is_empty());
     }
 
     #[test]

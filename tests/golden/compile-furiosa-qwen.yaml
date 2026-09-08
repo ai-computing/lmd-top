@@ -20,6 +20,19 @@ data:
     #   MAX_LEN         max model length
     set -eu
 
+    # Report the toolchain first — lmd-top parses this out of the log into its history, so a
+    # version skew between the vendor SDK and its dependencies shows up as a pattern.
+    python3 - <<'TOOLCHAIN' || true
+    import importlib.metadata as md
+    parts = []
+    for pkg in ("furiosa-llm", "furiosa-smi", "transformers", "torch"):
+        try:
+            parts.append(f"{pkg}={md.version(pkg)}")
+        except Exception:
+            parts.append(f"{pkg}=absent")
+    print("LMD_TOOLCHAIN " + " ".join(parts), flush=True)
+    TOOLCHAIN
+
     # RNGD's control processor is ARM64: the final EDF codegen needs an aarch64 cross-compiler,
     # which the furiosa-llm serve image does not ship.
     apt-get update -qq >/dev/null 2>&1

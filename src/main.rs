@@ -1517,10 +1517,17 @@ fn ui_loop(
                             let n0 = app.zoo.len();
                             app.zoo = crate::catalog::merge_zoo(std::mem::take(&mut app.zoo), live);
                             let added = app.zoo.len().saturating_sub(n0);
+                            let orgs: Vec<&str> = accel::packs()
+                                .iter()
+                                .flat_map(|p| p.hf_orgs.iter().copied())
+                                .collect();
                             app.notify(if added > 0 {
-                                format!("zoo refreshed — +{} new from furiosa-ai", added)
+                                format!("zoo refreshed — +{} new from {}", added, orgs.join(", "))
                             } else {
-                                "zoo refreshed — up to date (or offline)".to_string()
+                                format!(
+                                    "zoo refreshed — up to date (queried {})",
+                                    orgs.join(", ")
+                                )
                             });
                         }
                         // 크로스레이어 드릴 pivot — 선택 엔티티에서 관련 레이어로 점프

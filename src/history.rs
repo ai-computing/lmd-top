@@ -53,6 +53,11 @@ pub struct Record {
     /// Observed serving TTFT p95 (seconds), for `serve` records.
     #[serde(default)]
     pub ttft_p95: Option<f64>,
+    /// Vendor toolchain the build ran against (`optimum-rbln`, `transformers`, …), reported by
+    /// the recipe. Recorded for successes too — a version skew is only visible as the
+    /// difference between what worked and what did not.
+    #[serde(default)]
+    pub toolchain: BTreeMap<String, String>,
 }
 
 impl Record {
@@ -134,6 +139,9 @@ pub fn print_log() {
 
 /// Recurring-failure summary — the answer to "it fails often but I cannot see the pattern".
 fn print_patterns(recs: &[Record]) {
+    for (vendor, why) in crate::advisor::toolchain_warnings(recs) {
+        println!("\n⚠ {} toolchain: {}", vendor, why);
+    }
     let pats = crate::advisor::patterns(recs);
     if pats.is_empty() {
         return;
@@ -166,6 +174,18 @@ fn print_table(recs: &[Record]) {
             .map(|(k, v)| format!("{}={}", k, v))
             .collect::<Vec<_>>()
             .join(" ");
+        let tools = if r.toolchain.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "  [{}]",
+                r.toolchain
+                    .iter()
+                    .map(|(k, v)| format!("{} {}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         let tail = if r.outcome == Outcome::Ok {
             match r.duration_secs {
                 Some(d) => format!("{}  ({}m{}s)", opts, d / 60, d % 60),
@@ -174,6 +194,7 @@ fn print_table(recs: &[Record]) {
         } else {
             format!("{}  ✗ {}", opts, r.detail)
         };
+        let tail = format!("{}{}", tail, tools);
         println!(
             "{:<20} {:<8} {:<26} {:<9} {:<9} {}",
             crate::audit::iso_utc(r.ts),
@@ -207,6 +228,7 @@ mod tests {
             detail: String::new(),
             tps: None,
             ttft_p95: None,
+            toolchain: BTreeMap::new(),
         }
     }
 

@@ -23,6 +23,24 @@ data:
     import os
     import shutil
 
+    # Report the toolchain before anything else. Compiles here failed for three different models
+    # across three parameter sets with the same opaque codegen error, and nothing surfaced that the
+    # host's transformers/torch had moved far ahead of optimum-rbln. lmd-top parses this line out of
+    # the log into its history, so a version skew shows up as a pattern instead of a mystery.
+    def _report_toolchain():
+        import importlib.metadata as md
+
+        parts = []
+        for pkg in ("optimum-rbln", "rebel-compiler", "transformers", "torch"):
+            try:
+                parts.append(f"{pkg}={md.version(pkg)}")
+            except Exception:
+                parts.append(f"{pkg}=absent")
+        print("LMD_TOOLCHAIN " + " ".join(parts), flush=True)
+
+
+    _report_toolchain()
+
     from optimum.rbln import RBLNAutoModelForCausalLM as M
 
     get = os.environ.get

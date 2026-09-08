@@ -196,6 +196,8 @@ pub struct CompileJob {
     pub options: std::collections::BTreeMap<String, String>,
     /// HuggingFace source id from the Job's MODEL_ID env, for history keying.
     pub source: String,
+    /// Toolchain versions the build ran against, reported by the recipe.
+    pub toolchain: std::collections::BTreeMap<String, String>,
 }
 
 /// Store 뷰용 — 모델이 "어디에(경로/볼륨)" 저장되고 "어떤 옵션으로" 컴파일/서빙되는지.
@@ -2053,6 +2055,7 @@ async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
         return;
     };
     let now = now_secs();
+    let recorded = crate::history::recorded_ids();
     for j in items {
         let name = j["metadata"]["name"].as_str().unwrap_or("");
         let is_prefetch = name.starts_with("prefetch-");
@@ -2134,20 +2137,29 @@ async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
             .find(|p| p.name.starts_with(name))
             .map(|p| p.name.clone());
 
-        // Failure cause: classify the log while the Job still exists. `ttlSecondsAfterFinished`
-        // deletes it an hour later, and "failed — see logs" was unactionable even before that.
-        let failure = if status == "Failed" {
+        // Read the log once for any terminal job we have not recorded yet: a failure needs its
+        // cause classified before `ttlSecondsAfterFinished` removes the Job, and a *success*
+        // needs its toolchain captured — a version skew is only visible against a build that
+        // worked. Already-recorded jobs are skipped, so this is not a per-tick cost.
+        let terminal = status == "Complete" || status == "Failed";
+        let (failure, toolchain) = if terminal && !recorded.contains(name) {
             let log = match &pod {
-                Some(p) => kube::log_tail(&cfg.ns, p, 80).await.unwrap_or_default(),
+                Some(p) => kube::log_tail(&cfg.ns, p, 120).await.unwrap_or_default(),
                 None => String::new(),
             };
-            let exit = match &pod {
-                Some(p) => kube::pod_exit_code(&cfg.ns, p).await,
-                None => None,
+            let tools = crate::diagnose::toolchain(&log);
+            let fail = if status == "Failed" {
+                let exit = match &pod {
+                    Some(p) => kube::pod_exit_code(&cfg.ns, p).await,
+                    None => None,
+                };
+                Some(crate::diagnose::classify(&log, exit))
+            } else {
+                None
             };
-            Some(crate::diagnose::classify(&log, exit))
+            (fail, tools)
         } else {
-            None
+            (None, BTreeMap::new())
         };
 
         // 진행 힌트: 활성 Job 은 파드 로그 마지막 비어있지 않은 줄. 완료/실패는 상태로 대체.
@@ -2186,6 +2198,7 @@ async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
             failure,
             options,
             source,
+            toolchain,
         });
     }
     record_finished_jobs(&snap.compiles);
@@ -2293,6 +2306,7 @@ fn record_serving(snap: &Snapshot) {
             detail: String::new(),
             tps: Some(row.tps),
             ttft_p95: Some(row.ttft_p95).filter(|v| v.is_finite()),
+            toolchain: BTreeMap::new(),
         });
     }
 }
@@ -2344,6 +2358,7 @@ fn record_finished_jobs(jobs: &[CompileJob]) {
             detail: j.failure.as_ref().map(|f| f.line()).unwrap_or_default(),
             tps: None,
             ttft_p95: None,
+            toolchain: j.toolchain.clone(),
         });
     }
 }

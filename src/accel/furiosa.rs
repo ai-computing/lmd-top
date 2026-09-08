@@ -14,6 +14,8 @@ pub static PACK: Pack = Pack {
     display: "Furiosa",
     kind: AccelKind::Rngd,
     engine: "Furiosa-LLM",
+    // Furiosa publishes pre-quantised checkpoints under furiosa-ai.
+    hf_orgs: &["furiosa-ai"],
     accent: 2,
     exporter: "furiosa",
     family: "Furiosa RNGD",

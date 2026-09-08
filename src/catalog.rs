@@ -88,36 +88,55 @@ pub fn load_zoo() -> Vec<ZooModel> {
         .unwrap_or_default()
 }
 
-/// Live-refresh the Furiosa zoo via `curl` (lmd-top ships no in-binary TLS; curl has it, same
-/// shell-out ethos as kubectl). Queries the HF Hub API for the furiosa-ai org. Best-effort:
-/// returns `[]` if curl/network/jq-less-parse fails — caller keeps the bundled list.
+/// Live-refresh the vendor model zoos from HuggingFace.
+///
+/// Each accelerator pack declares the HF organisations its vendor publishes under, so a newly
+/// registered accelerator's models appear here without touching this function. Rebellions has
+/// no HF org — its supported-model list is a GitHub repo folded into `catalog/zoo.yaml` by
+/// `scripts/fetch-zoo.sh` — so it contributes nothing to a live refresh, by design.
+///
+/// Uses `curl` because lmd-top ships no in-binary TLS (same shell-out ethos as kubectl).
+/// Best-effort per org: a failure returns nothing for that org and leaves the rest, so one
+/// unreachable vendor does not lose the others.
 pub async fn fetch_zoo_live() -> Vec<ZooModel> {
+    let mut set = tokio::task::JoinSet::new();
+    for pack in crate::accel::packs().iter().copied() {
+        for org in pack.hf_orgs {
+            set.spawn(fetch_hf_org(pack, org));
+        }
+    }
+    let mut zoo = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(models) = joined {
+            zoo.extend(models);
+        }
+    }
+    zoo.sort_by(|a, b| a.source.to_lowercase().cmp(&b.source.to_lowercase()));
+    zoo
+}
+
+async fn fetch_hf_org(pack: &'static crate::accel::Pack, org: &str) -> Vec<ZooModel> {
+    let url = format!(
+        "https://huggingface.co/api/models?author={}&limit=500",
+        org
+    );
     let out = match tokio::process::Command::new("curl")
-        .args([
-            "-fsSL",
-            "--max-time",
-            "6",
-            "https://huggingface.co/api/models?author=furiosa-ai&limit=500",
-        ])
+        .args(["-fsSL", "--max-time", "8", &url])
         .output()
         .await
     {
         Ok(o) if o.status.success() => o,
         _ => return Vec::new(),
     };
-    let v: serde_json::Value = match serde_json::from_slice(&out.stdout) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    let Some(arr) = v.as_array() else {
+    let Ok(serde_json::Value::Array(arr)) = serde_json::from_slice(&out.stdout) else {
         return Vec::new();
     };
     let mut zoo = Vec::new();
-    for m in arr {
+    for m in &arr {
         let id = m["id"].as_str().unwrap_or("");
-        // Remote input: these ids end up in generated manifests (a YAML scalar, and the compile
-        // Job's `sh -c` line). Reject anything that is not a plain HF repo id right here, so a
-        // hostile or malformed upstream entry can never reach manifest generation (BUG-06).
+        // Remote input: these ids end up in generated manifests. Reject anything that is not a
+        // plain HF repo id right here, so a hostile or malformed upstream entry can never reach
+        // manifest generation (BUG-06).
         if !crate::quote::valid_model_id(id) {
             continue;
         }
@@ -125,15 +144,16 @@ pub async fn fetch_zoo_live() -> Vec<ZooModel> {
             "text-generation" => "chat",
             "sentence-similarity" => "embedding",
             "text-classification" => "reranker",
+            // Anything else is not something this tool knows how to serve.
             _ => continue,
         };
         let disp = id.rsplit('/').next().unwrap_or(id);
         zoo.push(ZooModel {
-            display: format!("{} (Furiosa)", disp),
+            display: format!("{} ({})", disp, pack.display),
             source: id.to_string(),
             role: role.to_string(),
-            vendor: "furiosa".to_string(),
-            note: "Furiosa 사전 양자화".to_string(),
+            vendor: pack.id.to_string(),
+            note: format!("{} HF org: {}", pack.display, org),
         });
     }
     zoo
@@ -218,5 +238,58 @@ mod tests {
 
         // replicas < 1 is clamped to 1 when computing need
         assert_eq!(solve(&placement(3, 0, false), &inv).2, 3);
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    /// The refresh is driven by the packs, so a newly registered accelerator's HF org is
+    /// queried without editing catalog.rs. Rebellions declares none on purpose — its list is
+    /// a GitHub repo, and silently querying a nonexistent org would look like a broken fetch.
+    #[test]
+    fn live_refresh_covers_declared_orgs() {
+        let orgs: Vec<&str> = crate::accel::packs()
+            .iter()
+            .flat_map(|p| p.hf_orgs.iter().copied())
+            .collect();
+        assert!(orgs.contains(&"furiosa-ai"), "furiosa org: {:?}", orgs);
+        assert!(orgs.contains(&"nvidia"), "nvidia org: {:?}", orgs);
+        assert!(
+            crate::accel::by_id("rbln").unwrap().hf_orgs.is_empty(),
+            "Rebellions has no HF org publishing models — declaring one would query nothing"
+        );
+    }
+
+    /// Live entries are tagged with the pack that produced them, so the zoo can filter and
+    /// colour them and the compile action targets the right accelerator.
+    #[test]
+    fn merge_keeps_bundled_entries_and_appends_new_ones() {
+        let base = vec![super::ZooModel {
+            display: "Kept".into(),
+            source: "furiosa-ai/Existing".into(),
+            role: "chat".into(),
+            vendor: "furiosa".into(),
+            note: "bundled".into(),
+        }];
+        let live = vec![
+            super::ZooModel {
+                display: "Dup".into(),
+                source: "FURIOSA-AI/EXISTING".into(), // same id, different case
+                role: "chat".into(),
+                vendor: "furiosa".into(),
+                note: "live".into(),
+            },
+            super::ZooModel {
+                display: "New".into(),
+                source: "nvidia/Nemotron-X".into(),
+                role: "chat".into(),
+                vendor: "gpu".into(),
+                note: "live".into(),
+            },
+        ];
+        let merged = super::merge_zoo(base, live);
+        assert_eq!(merged.len(), 2, "case-insensitive dedup by source");
+        assert_eq!(merged[0].note, "bundled", "bundled entry wins");
+        assert_eq!(merged[1].vendor, "gpu");
     }
 }
