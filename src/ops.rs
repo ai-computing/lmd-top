@@ -122,25 +122,33 @@ impl CompileForm {
         ff_backspace(&mut self.fields, self.cursor, self.editing);
     }
     /// 컴파일 타깃 문자열 — npu 칩·TP·seq 로부터 산출(디스커버리 레이아웃과 일치).
+    /// Name of the compiled build in the shared store — the artifact's identity, so two
+    /// option sets of the same model coexist. Shape comes from the accelerator's compile
+    /// profile rather than a vendor branch.
     pub fn target(&self) -> String {
         let tp = self.get("tp");
         let seq = self.get("max-len");
-        if self.vendor == "rbln" {
-            let chip = self.get("npu").to_lowercase().replace("rbln-", "");
-            format!(
-                "rbln-{}-tp{}-s{}",
-                if chip.is_empty() { "ca22".into() } else { chip },
-                tp,
-                seq
-            )
-        } else {
+        let profile = crate::app::compile::fields::compile_profile(self.vendor);
+        let prefix = profile.map(|p| p.target_prefix).unwrap_or("build");
+        let chip = profile
+            .and_then(|p| p.chip_field)
+            .map(|f| self.get(f).to_lowercase().replace(&format!("{}-", prefix), ""))
+            .filter(|c| !c.is_empty());
+        let head = match chip {
+            Some(c) => format!("{}-{}", prefix, c),
+            None => prefix.to_string(),
+        };
+        if profile.is_some_and(|p| p.target_has_pp) {
             let pp = self.get("pp");
             format!(
-                "rngd-tp{}-pp{}-s{}",
+                "{}-tp{}-pp{}-s{}",
+                head,
                 tp,
                 if pp.is_empty() { "1".into() } else { pp },
                 seq
             )
+        } else {
+            format!("{}-tp{}-s{}", head, tp, seq)
         }
     }
 }

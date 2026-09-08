@@ -61,7 +61,11 @@ pub fn build_compile_manifest(
     let model_id = &form.model_id;
     let vendor = form.vendor;
 
-    if !matches!(vendor, "rbln" | "furiosa") {
+    // Whether this accelerator has an ahead-of-time build is a declared capability. GPUs do
+    // not, so a GPU compile never reaches the two-way vendor branches below (BUG-07).
+    if !crate::accel::by_id(vendor).is_some_and(|p| p.caps.compiles_ahead_of_time)
+        || super::fields::compile_profile(vendor).is_none()
+    {
         return CompileManifestOutcome::InvalidVendor {
             vendor: vendor.to_string(),
         };

@@ -114,11 +114,9 @@ impl App {
     }
 
     pub(super) fn placement_engine(p: &crate::catalog::CatPlacement) -> &'static str {
-        match Self::placement_vendor(p) {
-            "rbln" => "vLLM-RBLN",
-            "furiosa" => "Furiosa-LLM",
-            _ => "vLLM",
-        }
+        crate::accel::by_id(Self::placement_vendor(p))
+            .map(|pack| pack.engine)
+            .unwrap_or("vLLM")
     }
 
     /// Canonical HF weights id for **compiling** this model (org/name):

@@ -96,17 +96,16 @@ impl App {
                 if let Some(p) = self.preferred_catalog_placement(m) {
                     let vendor = Self::placement_vendor(p);
                     let model_id = Self::placement_model_id(m, p);
-                    if matches!(vendor, "rbln" | "furiosa")
-                        || !crate::compat::compilable_vendors(&model_id).is_empty()
-                    {
-                        let cv = if matches!(vendor, "rbln" | "furiosa") {
-                            vendor
-                        } else {
-                            crate::compat::compilable_vendors(&model_id)
-                                .first()
-                                .copied()
-                                .unwrap_or("rbln")
-                        };
+                    // Offer a compile when the chosen placement's accelerator builds ahead of
+                    // time, or when some other accelerator could build this model family.
+                    let placement_compiles = crate::accel::by_id(vendor)
+                        .is_some_and(|p| p.caps.compiles_ahead_of_time);
+                    let alternatives = crate::compat::compilable_vendors(&model_id);
+                    if let Some(cv) = if placement_compiles {
+                        Some(vendor)
+                    } else {
+                        alternatives.first().copied()
+                    } {
                         items.push(ActionItem::compile(cv));
                     }
                     items.push(ActionItem::deploy(if p.requires_artifact {

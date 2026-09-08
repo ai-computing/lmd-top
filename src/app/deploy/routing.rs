@@ -23,13 +23,11 @@ const SCORERS: &[(&str, u32)] = &[
     ("no-hit-lru-scorer", 2),
 ];
 
-/// URL path segment naming the accelerator family a route serves.
+/// URL path segment naming the accelerator family a route serves — declared in its pack.
 fn accel_segment(vendor: &str) -> &'static str {
-    match vendor {
-        "furiosa" => "rngd",
-        "rbln" => "atom",
-        _ => "gpu",
-    }
+    crate::accel::by_id(vendor)
+        .map(|p| p.scheduling.route_segment)
+        .unwrap_or("gpu")
 }
 
 /// The EndpointPickerConfig document embedded in the EPP ConfigMap.

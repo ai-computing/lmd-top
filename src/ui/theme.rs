@@ -169,20 +169,38 @@ pub(crate) fn temp_color(t: f64) -> Color {
         C_DIM()
     }
 }
+/// Vendor identity ramp per theme. An accelerator declares which slot it occupies
+/// (`Pack::accent`); the theme decides what the slot looks like. Indexing wraps, so adding an
+/// accelerator cannot leave a theme without a colour for it.
+const VENDOR_ACCENTS: [&[Color]; 4] = [
+    // 0 default (ANSI-16)
+    &[Color::Green, Color::Magenta, Color::Cyan, Color::Yellow],
+    // 1 high-contrast
+    &[
+        Color::LightGreen,
+        Color::LightMagenta,
+        Color::LightCyan,
+        Color::LightYellow,
+    ],
+    // 2 colorblind-friendly (Okabe-Ito)
+    &[
+        Color::Rgb(0, 158, 115),
+        Color::Rgb(204, 121, 167),
+        Color::Rgb(86, 180, 233),
+        Color::Rgb(230, 159, 0),
+    ],
+    // 3 soft (Catppuccin: green / mauve / sky / peach)
+    &[
+        Color::Rgb(166, 227, 161),
+        Color::Rgb(203, 166, 247),
+        Color::Rgb(137, 220, 235),
+        Color::Rgb(250, 179, 135),
+    ],
+];
+
 pub(crate) fn kind_color(k: AccelKind) -> Color {
-    if th() == 3 {
-        // Catppuccin: green / mauve / sky — harmonize vendor identity colors with the palette.
-        return match k {
-            AccelKind::Gpu => Color::Rgb(166, 227, 161),
-            AccelKind::Rbln => Color::Rgb(203, 166, 247),
-            AccelKind::Rngd => Color::Rgb(137, 220, 235),
-        };
-    }
-    match k {
-        AccelKind::Gpu => Color::Green,
-        AccelKind::Rbln => Color::Magenta,
-        AccelKind::Rngd => Color::Cyan,
-    }
+    let ramp = VENDOR_ACCENTS[th().min(VENDOR_ACCENTS.len() - 1)];
+    ramp[crate::accel::by_kind(k).accent % ramp.len()]
 }
 /// prefill/decode phase colors — theme/colorblind aware (Okabe-Ito range). For distinguishing phases in the Perf table.
 #[allow(non_snake_case)]

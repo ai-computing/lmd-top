@@ -2,33 +2,12 @@
 //! collect (gathering) and doctor (full survey) reference the same constants → names can never drift.
 //! To add/change a metric, edit only this one place.
 
-// ── NVIDIA DCGM ──────────────────────────────────────
-pub const DCGM_GPU_UTIL: &str = "DCGM_FI_DEV_GPU_UTIL";
-pub const DCGM_GPU_TEMP: &str = "DCGM_FI_DEV_GPU_TEMP";
-pub const DCGM_POWER: &str = "DCGM_FI_DEV_POWER_USAGE";
-pub const DCGM_FB_USED: &str = "DCGM_FI_DEV_FB_USED";
-pub const DCGM_FB_TOTAL: &str = "DCGM_FI_DEV_FB_TOTAL";
-pub const DCGM_MEM_COPY_UTIL: &str = "DCGM_FI_DEV_MEM_COPY_UTIL";
-pub const DCGM_SM_CLOCK: &str = "DCGM_FI_DEV_SM_CLOCK";
-pub const DCGM_MEM_TEMP: &str = "DCGM_FI_DEV_MEMORY_TEMP";
-pub const DCGM_ENERGY: &str = "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION";
-
-// ── Rebellions RBLN (recording rules) ────────────────
-pub const RBLN_UTIL: &str = "RBLN_DEVICE_STATUS:UTILIZATION";
-pub const RBLN_TEMP: &str = "RBLN_DEVICE_STATUS:TEMPERATURE";
-pub const RBLN_POWER: &str = "RBLN_DEVICE_STATUS:CARD_POWER";
-pub const RBLN_DRAM_USED: &str = "RBLN_DEVICE_STATUS:DRAM_USED";
-pub const RBLN_DRAM_TOTAL: &str = "RBLN_DEVICE_STATUS:DRAM_TOTAL";
-pub const RBLN_HEALTH: &str = "RBLN_DEVICE_STATUS:HEALTH";
-
-// ── Furiosa RNGD ─────────────────────────────────────
-pub const FURIOSA_UTIL: &str = "furiosa_npu_core_utilization";
-pub const FURIOSA_TEMP: &str = "furiosa_npu_hw_temperature";
-pub const FURIOSA_POWER: &str = "furiosa_npu_hw_power";
-pub const FURIOSA_DRAM_USED: &str = "furiosa_npu_dram_usage";
-pub const FURIOSA_DRAM_TOTAL: &str = "furiosa_npu_dram_total";
-pub const FURIOSA_ALIVE: &str = "furiosa_npu_alive";
-pub const FURIOSA_THROTTLE: &str = "furiosa_npu_throttling_events_count";
+// Accelerator metric names live in the accelerator packs (src/accel/), one record per
+// family, together with their unit, aggregation and label spelling. They were listed here as
+// well, and the two lists drifted: four metrics collect reads were missing from DEPS, so
+// --doctor skipped them in its coverage table and then advertised them as "unused candidates
+// to wire" (BUG-10). Deriving the accelerator half of DEPS from the packs makes that
+// impossible — there is only one list now.
 
 // ── host (node-exporter) ─────────────────────────────
 pub const NODE_LOAD1: &str = "node_load1";
@@ -64,75 +43,9 @@ pub const PREFIX_IDX: &str = "inference_extension_prefix_indexer_size";
 pub const EPP_ENDPOINT_SCORE: &str = "epp_endpoint_score";
 
 /// doctor coverage targets: (family, metric, impact when absent). Same constants as the metrics collect reads.
+/// Metric coverage targets that are *not* accelerator-specific: host, model server, EPP.
+/// The accelerator half comes from the packs — see [`coverage`].
 pub const DEPS: &[(&str, &str, &str)] = &[
-    ("NVIDIA GPU (DCGM)", DCGM_GPU_UTIL, "GPU util unavailable"),
-    ("NVIDIA GPU (DCGM)", DCGM_GPU_TEMP, "GPU temp unavailable"),
-    ("NVIDIA GPU (DCGM)", DCGM_POWER, "GPU power unavailable"),
-    (
-        "NVIDIA GPU (DCGM)",
-        DCGM_FB_USED,
-        "GPU mem used unavailable (unified-mem falls back to host)",
-    ),
-    (
-        "NVIDIA GPU (DCGM)",
-        DCGM_FB_TOTAL,
-        "GPU mem total unavailable (unified-mem falls back to host)",
-    ),
-    // collect_gpu 도 함께 읽는 항목들 — DEPS 에서 빠져 있어 커버리지 표에서 검사되지 않고,
-    // doctor 의 "미사용 후보" 목록(= DEPS 여집합)에 이미 배선된 신호로 실려 나갔다(BUG-10).
-    (
-        "NVIDIA GPU (DCGM)",
-        DCGM_MEM_COPY_UTIL,
-        "GPU memory-bandwidth column empty",
-    ),
-    (
-        "NVIDIA GPU (DCGM)",
-        DCGM_SM_CLOCK,
-        "GPU SM clock column empty",
-    ),
-    (
-        "NVIDIA GPU (DCGM)",
-        DCGM_MEM_TEMP,
-        "GPU memory temperature column empty",
-    ),
-    (
-        "NVIDIA GPU (DCGM)",
-        DCGM_ENERGY,
-        "session energy (Wh since start) unavailable",
-    ),
-    ("Rebellions RBLN", RBLN_UTIL, "RBLN util unavailable"),
-    ("Rebellions RBLN", RBLN_TEMP, "RBLN temp unavailable"),
-    ("Rebellions RBLN", RBLN_POWER, "RBLN power unavailable"),
-    (
-        "Rebellions RBLN",
-        RBLN_DRAM_USED,
-        "RBLN mem used unavailable",
-    ),
-    (
-        "Rebellions RBLN",
-        RBLN_DRAM_TOTAL,
-        "RBLN mem total unavailable",
-    ),
-    ("Rebellions RBLN", RBLN_HEALTH, "RBLN health unavailable"),
-    ("Furiosa RNGD", FURIOSA_UTIL, "RNGD util unavailable"),
-    ("Furiosa RNGD", FURIOSA_TEMP, "RNGD temp unavailable"),
-    ("Furiosa RNGD", FURIOSA_POWER, "RNGD power unavailable"),
-    (
-        "Furiosa RNGD",
-        FURIOSA_DRAM_USED,
-        "RNGD mem used unavailable",
-    ),
-    (
-        "Furiosa RNGD",
-        FURIOSA_DRAM_TOTAL,
-        "RNGD mem total unavailable",
-    ),
-    ("Furiosa RNGD", FURIOSA_ALIVE, "RNGD liveness unavailable"),
-    (
-        "Furiosa RNGD",
-        FURIOSA_THROTTLE,
-        "RNGD throttle detection unavailable",
-    ),
     ("Host (node)", NODE_LOAD1, "node load unavailable"),
     (
         "Host (node)",
@@ -190,6 +103,26 @@ pub const DEPS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Everything `--doctor` checks: the accelerator packs' declared series, then the shared
+/// host/model-server/EPP metrics. Single source of truth — a metric a collector reads is by
+/// construction a metric doctor checks, and vice versa.
+pub fn coverage() -> Vec<(&'static str, &'static str, &'static str)> {
+    let mut out: Vec<(&str, &str, &str)> = Vec::new();
+    for pack in crate::accel::PACKS {
+        for series in pack.series {
+            out.push((pack.family, series.metric, series.missing));
+        }
+    }
+    out.extend_from_slice(DEPS);
+    out
+}
+
+/// Metric names any collector reads — used to tell a genuinely unwired signal from one that
+/// is merely absent from a hand-maintained list.
+pub fn known_metrics() -> std::collections::BTreeSet<&'static str> {
+    coverage().into_iter().map(|(_, m, _)| m).collect()
+}
+
 /// Family prefixes for detecting "unused accelerator metrics (= new signal candidates)".
 pub const ACCEL_PREFIXES: &[&str] = &["DCGM_FI_DEV_", "furiosa_npu_", "RBLN_DEVICE_STATUS:"];
 
@@ -197,54 +130,30 @@ pub const ACCEL_PREFIXES: &[&str] = &["DCGM_FI_DEV_", "furiosa_npu_", "RBLN_DEVI
 mod tests {
     use super::*;
 
-    /// BUG-10 회귀: doctor 는 DEPS 를 "사용 중" 집합으로 쓴다. collect 가 읽는 가속기 메트릭이
-    /// DEPS 에 없으면 (a) 커버리지 표가 그 항목을 검사하지 않고 (b) 이미 배선된 신호를
-    /// "미사용 후보 — 배선하라"고 권한다. 상수를 공유해도 목록은 어긋날 수 있으므로 여기서 고정.
+    /// BUG-10 cannot recur by construction — but pin the property, so a future change that
+    /// reintroduces a second hand-written list fails here rather than in the doctor output.
     #[test]
-    fn deps_covers_every_accelerator_metric_collect_reads() {
-        let deps: Vec<&str> = DEPS.iter().map(|(_, m, _)| *m).collect();
-        let read_by_collect = [
-            DCGM_GPU_UTIL,
-            DCGM_GPU_TEMP,
-            DCGM_POWER,
-            DCGM_FB_USED,
-            DCGM_FB_TOTAL,
-            DCGM_MEM_COPY_UTIL,
-            DCGM_SM_CLOCK,
-            DCGM_MEM_TEMP,
-            DCGM_ENERGY,
-            RBLN_UTIL,
-            RBLN_TEMP,
-            RBLN_POWER,
-            RBLN_DRAM_USED,
-            RBLN_DRAM_TOTAL,
-            RBLN_HEALTH,
-            FURIOSA_UTIL,
-            FURIOSA_TEMP,
-            FURIOSA_POWER,
-            FURIOSA_DRAM_USED,
-            FURIOSA_DRAM_TOTAL,
-            FURIOSA_ALIVE,
-            FURIOSA_THROTTLE,
-        ];
-        let missing: Vec<&str> = read_by_collect
-            .iter()
-            .copied()
-            .filter(|m| !deps.contains(m))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "collect reads these but DEPS omits them (doctor would call them unused): {:?}",
-            missing
-        );
+    fn coverage_includes_every_series_the_packs_declare() {
+        let covered = known_metrics();
+        for pack in crate::accel::PACKS {
+            for series in pack.series {
+                assert!(
+                    covered.contains(series.metric),
+                    "{} declares {} but doctor would not check it",
+                    pack.id,
+                    series.metric
+                );
+            }
+        }
+        // And the shared metrics still make it through.
+        assert!(covered.contains(VLLM_RUNNING) && covered.contains(POOL_READY));
     }
 
-    /// 반대 방향: DEPS 에 같은 메트릭이 두 번 실리면 커버리지 합계가 부풀려진다.
     #[test]
-    fn deps_has_no_duplicates() {
+    fn coverage_has_no_duplicates() {
         let mut seen = std::collections::BTreeSet::new();
-        for (_, m, _) in DEPS {
-            assert!(seen.insert(*m), "duplicate DEPS entry: {}", m);
+        for (_, metric, _) in coverage() {
+            assert!(seen.insert(metric), "duplicate coverage entry: {}", metric);
         }
     }
 }

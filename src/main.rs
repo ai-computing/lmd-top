@@ -2,6 +2,7 @@
 //! Run: `lmd-top`            → TUI
 //!      `lmd-top --snapshot` → collect once and print text (for headless verification)
 
+mod accel;
 mod agent;
 mod app;
 mod audit;
@@ -191,13 +192,17 @@ fn arg_sets(args: &[String]) -> Vec<(String, String)> {
     out
 }
 
+/// Resolve `--vendor` through the accelerator registry, so a new accelerator's spellings
+/// come from its pack rather than from a match arm here.
 fn plan_vendor(v: &str) -> Result<&'static str> {
-    match v.to_lowercase().as_str() {
-        "rbln" | "atom" | "rebellions" => Ok("rbln"),
-        "furiosa" | "rngd" => Ok("furiosa"),
-        "gpu" | "nvidia" => Ok("gpu"),
-        _ => anyhow::bail!("unsupported --vendor '{}': expected rbln|furiosa|gpu", v),
-    }
+    accel::by_id(v).map(|p| p.id).ok_or_else(|| {
+        let known: Vec<&str> = accel::PACKS.iter().map(|p| p.id).collect();
+        anyhow::anyhow!(
+            "unsupported --vendor '{}': expected {}",
+            v,
+            known.join("|")
+        )
+    })
 }
 
 fn manifest_has_placeholder(yaml: &str) -> bool {
@@ -216,14 +221,16 @@ async fn run_plan(cfg: &Config, args: &[String]) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--plan requires --vendor <rbln|furiosa|gpu>"))?,
     )?;
     let overrides = arg_sets(args);
-    // Compile is an NPU-only concept: `compat::compilable_vendors` only ever returns rbln/furiosa,
-    // and every downstream branch is a two-way rbln/furiosa choice. Letting `gpu` through produced
-    // a manifest that mixed the RBLN script with the Furiosa image and an `rngd` store path —
-    // guaranteed to fail on apply (BUG-07). Reject it where the intent is still legible.
-    if op == "compile" && vendor == "gpu" {
+    // Whether an accelerator compiles ahead of time is a declared capability, not a special
+    // case here: `gpu` used to slip through and produce a manifest mixing the RBLN script with
+    // the Furiosa image (BUG-07).
+    if op == "compile" && !accel::by_id(vendor).is_some_and(|p| p.caps.compiles_ahead_of_time) {
+        let targets: Vec<&str> = accel::compilable().map(|p| p.id).collect();
         anyhow::bail!(
-            "compile targets NPUs only (--vendor rbln|furiosa). GPU models are served from their \
-             Hugging Face weights directly — use `--plan deploy --vendor gpu`."
+            "compile targets accelerators that need an ahead-of-time build ({}). '{}' models \
+             are served from their Hugging Face weights directly — use `--plan deploy`.",
+            targets.join("|"),
+            vendor
         );
     }
     let snap = collect(cfg).await;
