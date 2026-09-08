@@ -200,10 +200,24 @@ impl App {
                 self.preview_apply = false;
             }
             CompileManifestOutcome::InvalidVendor { vendor } => {
-                self.notify(format!(
-                    "compile is NPU-only (rbln/furiosa) — '{}' models are served directly",
-                    vendor
-                ));
+                // Two distinct situations, and the operator needs to know which: this
+                // accelerator serves weights directly, or it compiles but nobody has written
+                // its recipe yet.
+                let compiles = crate::accel::by_id(&vendor)
+                    .is_some_and(|p| p.caps.compiles_ahead_of_time);
+                self.notify(if compiles {
+                    format!(
+                        "no compile recipe registered for '{}' — add one in app/compile/fields.rs",
+                        vendor
+                    )
+                } else {
+                    let targets: Vec<&str> = crate::accel::compilable().map(|p| p.id).collect();
+                    format!(
+                        "'{}' serves weights directly — compile targets {}",
+                        vendor,
+                        targets.join("/")
+                    )
+                });
             }
         }
     }

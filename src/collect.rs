@@ -7,7 +7,7 @@ use crate::metrics;
 use crate::prom::{self, Series};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AccelKind {
     Gpu,
     Rbln,
@@ -901,142 +901,113 @@ fn map_by(series: Vec<Series>, key: &str) -> BTreeMap<String, Series> {
     m
 }
 
-/// 소스별 가속기 수집기 — 각자 자기 메트릭만 join! → 메트릭 추가 시 해당 함수만 수정(위치 튜플 결합 제거).
-async fn collect_furiosa(p: &str) -> Vec<Accel> {
-    let (util, temp, pow, du, dt, alive, thr) = tokio::join!(
-        prom::query(
-            p,
-            "avg by (uuid,device,hostname) (furiosa_npu_core_utilization)"
-        ),
-        prom::query(p, "max by (uuid) (furiosa_npu_hw_temperature)"),
-        prom::query(p, "max by (uuid) (furiosa_npu_hw_power)"),
-        prom::query(p, "max by (uuid) (furiosa_npu_dram_usage)"),
-        prom::query(p, "max by (uuid) (furiosa_npu_dram_total)"),
-        prom::query(p, "max by (uuid) (furiosa_npu_alive)"),
-        prom::query(p, "max by (uuid) (furiosa_npu_throttling_events_count)"),
-    );
-    let util = util.unwrap_or_default();
-    let temp = map_by(temp.unwrap_or_default(), "uuid");
-    let pow = map_by(pow.unwrap_or_default(), "uuid");
-    let du = map_by(du.unwrap_or_default(), "uuid");
-    let dt = map_by(dt.unwrap_or_default(), "uuid");
-    let alive = map_by(alive.unwrap_or_default(), "uuid");
-    let thr = map_by(thr.unwrap_or_default(), "uuid");
-    util.iter()
-        .map(|s| {
-            let uuid = s.l("uuid");
-            Accel {
-                kind: AccelKind::Rngd,
-                model: String::new(),
-                id: s.l("device").to_string(),
-                node: s.l("hostname").to_string(),
-                util: clamp_pct(s.value),
-                mem_used_gb: du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
-                mem_total_gb: dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
-                temp: temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
-                power: pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
-                busy_model: String::new(),
-                alive: alive.get(uuid).map(|x| x.value > 0.0).unwrap_or(true),
-                throttle: thr.get(uuid).map(|x| x.value).unwrap_or(0.0),
-                unified_mem: false,
-                mem_bw: f64::NAN,
-                clock_mhz: f64::NAN,
-                mem_temp: f64::NAN,
-                energy_mj: f64::NAN,
-            }
-        })
-        .collect()
-}
+/// Collect every device of one accelerator family, driven by its [`Pack`].
+///
+/// Replaces three near-identical per-vendor collectors. Each one queried its own metric names,
+/// read its own label spelling, and normalised its own units — which is where the unit-guessing
+/// bug lived (BUG-04) and where a fourth accelerator would have meant a fourth copy. The pack
+/// declares metric, unit, aggregation, label spelling and capabilities; this walks them.
+async fn collect_pack(prom: &str, pack: &'static crate::accel::Pack) -> Vec<Accel> {
+    use crate::accel::{Agg, Field, Health};
 
-async fn collect_rbln(p: &str) -> Vec<Accel> {
-    let (util, temp, pow, du, dt, health) = tokio::join!(
-        prom::query(p, metrics::RBLN_UTIL),
-        prom::query(p, metrics::RBLN_TEMP),
-        prom::query(p, metrics::RBLN_POWER),
-        prom::query(p, metrics::RBLN_DRAM_USED),
-        prom::query(p, metrics::RBLN_DRAM_TOTAL),
-        prom::query(p, metrics::RBLN_HEALTH),
-    );
-    let util = util.unwrap_or_default();
-    let temp = map_by(temp.unwrap_or_default(), "uuid");
-    let pow = map_by(pow.unwrap_or_default(), "uuid");
-    let du = map_by(du.unwrap_or_default(), "uuid");
-    let dt = map_by(dt.unwrap_or_default(), "uuid");
-    let health = map_by(health.unwrap_or_default(), "uuid");
-    util.iter()
-        .map(|s| {
-            let uuid = s.l("uuid");
-            Accel {
-                kind: AccelKind::Rbln,
-                model: String::new(),
-                id: s.l("name").to_string(),
-                node: s.l("node").to_string(),
-                util: clamp_pct(s.value),
-                mem_used_gb: du.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
-                mem_total_gb: dt.get(uuid).map(|x| to_gb(x.value)).unwrap_or(0.0),
-                temp: temp.get(uuid).map(|x| x.value).unwrap_or(0.0),
-                power: pow.get(uuid).map(|x| x.value).unwrap_or(0.0),
-                busy_model: s.l("exported_pod").to_string(),
-                alive: health.get(uuid).map(|x| x.value == 0.0).unwrap_or(true),
-                throttle: 0.0,
-                unified_mem: false,
-                mem_bw: f64::NAN,
-                clock_mhz: f64::NAN,
-                mem_temp: f64::NAN,
-                energy_mj: f64::NAN,
-            }
+    // One query per declared series, all in parallel. Aggregation is pushed into PromQL so a
+    // per-core series (Furiosa) collapses the way the pack asks.
+    let queries: Vec<String> = pack
+        .series
+        .iter()
+        .map(|sp| {
+            let by = std::iter::once(pack.labels.key)
+                .chain([pack.labels.id, pack.labels.node])
+                .chain(pack.labels.model)
+                .chain(pack.labels.busy)
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(",");
+            let f = match sp.agg {
+                Agg::Max => "max",
+                Agg::Avg => "avg",
+                Agg::Sum => "sum",
+            };
+            format!("{} by ({}) ({})", f, by, sp.metric)
         })
-        .collect()
-}
+        .collect();
+    let refs: Vec<&str> = queries.iter().map(String::as_str).collect();
+    let results = prom::query_all(prom, &refs).await;
 
-/// NVIDIA DCGM — 모델명/총메모리/대역폭/클럭/에너지 자동 감지.
-async fn collect_gpu(p: &str) -> Vec<Accel> {
-    let (util, mu, mt, temp, pow, bw, clk, mtemp, energy) = tokio::join!(
-        prom::query(p, metrics::DCGM_GPU_UTIL),
-        prom::query(p, metrics::DCGM_FB_USED),
-        prom::query(p, metrics::DCGM_FB_TOTAL),
-        prom::query(p, metrics::DCGM_GPU_TEMP),
-        prom::query(p, metrics::DCGM_POWER),
-        prom::query(p, metrics::DCGM_MEM_COPY_UTIL),
-        prom::query(p, metrics::DCGM_SM_CLOCK),
-        prom::query(p, metrics::DCGM_MEM_TEMP),
-        prom::query(p, metrics::DCGM_ENERGY),
-    );
-    let util = util.unwrap_or_default();
-    let mu = map_by(mu.unwrap_or_default(), "gpu");
-    let mt = map_by(mt.unwrap_or_default(), "gpu");
-    let temp = map_by(temp.unwrap_or_default(), "gpu");
-    let pow = map_by(pow.unwrap_or_default(), "gpu");
-    let bw = map_by(bw.unwrap_or_default(), "gpu");
-    let clk = map_by(clk.unwrap_or_default(), "gpu");
-    let mtemp = map_by(mtemp.unwrap_or_default(), "gpu");
-    let energy = map_by(energy.unwrap_or_default(), "gpu");
-    util.iter()
-        .map(|s| {
-            let gpu = s.l("gpu");
-            let model = gpu_model(s.l("modelName"));
-            let unified = is_unified(&model);
-            Accel {
-                kind: AccelKind::Gpu,
-                model,
-                id: format!("gpu{}", gpu),
-                node: s.l("Hostname").to_string(),
-                util: clamp_pct(s.value),
-                mem_used_gb: mu.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
-                mem_total_gb: mt.get(gpu).map(|x| x.value / 1024.0).unwrap_or(0.0),
-                temp: temp.get(gpu).map(|x| x.value).unwrap_or(0.0),
-                power: pow.get(gpu).map(|x| x.value).unwrap_or(0.0),
-                busy_model: s.l("exported_pod").to_string(),
-                alive: true,
-                throttle: 0.0,
-                unified_mem: unified,
-                mem_bw: bw.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
-                clock_mhz: clk.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
-                mem_temp: mtemp.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
-                energy_mj: energy.get(gpu).map(|x| x.value).unwrap_or(f64::NAN),
+    // The utilisation series enumerates the devices; the rest are joined onto it by key label.
+    let util_idx = pack
+        .series
+        .iter()
+        .position(|sp| sp.field == Field::Util)
+        .expect("every pack declares a Util series");
+    let mut by_field: BTreeMap<Field, BTreeMap<String, Series>> = BTreeMap::new();
+    for (sp, r) in pack.series.iter().zip(results.into_iter()) {
+        let rows = r.unwrap_or_default();
+        by_field.insert(sp.field, map_by(rows, pack.labels.key));
+    }
+    let Some(util) = by_field.get(&Field::Util) else {
+        return Vec::new();
+    };
+
+    // Read a field for one device, already normalised to the UI's unit.
+    let read = |field: Field, key: &str| -> Option<f64> {
+        let sp = pack.series_for(field)?;
+        let v = by_field.get(&field)?.get(key)?.value;
+        Some(sp.unit.normalise(v))
+    };
+    // Fields this accelerator does not report stay NaN — distinguishable from a zero reading.
+    let read_or_nan = |field: Field, key: &str| read(field, key).unwrap_or(f64::NAN);
+
+    let mut out: Vec<Accel> = Vec::new();
+    for (key, sample) in util {
+        let model = pack
+            .labels
+            .model
+            .map(|l| gpu_model(sample.l(l)))
+            .unwrap_or_default();
+        let unified = pack.caps.unified_memory || is_unified(&model);
+        let id = {
+            let raw = sample.l(pack.labels.id);
+            // DCGM's device label is a bare index; the others already carry a device name.
+            if pack.kind == AccelKind::Gpu {
+                format!("gpu{}", raw)
+            } else {
+                raw.to_string()
             }
-        })
-        .collect()
+        };
+        let alive = match pack.caps.health {
+            Some(Health::NonZeroIsAlive) => read(Field::Health, key).map(|v| v > 0.0),
+            Some(Health::ZeroIsHealthy) => read(Field::Health, key).map(|v| v == 0.0),
+            // No health series: a device that is being scraped is present.
+            None => None,
+        }
+        .unwrap_or(true);
+        out.push(Accel {
+            kind: pack.kind,
+            model,
+            id,
+            node: sample.l(pack.labels.node).to_string(),
+            util: pack.series[util_idx].unit.normalise(sample.value),
+            mem_used_gb: read(Field::MemUsed, key).unwrap_or(0.0),
+            mem_total_gb: read(Field::MemTotal, key).unwrap_or(0.0),
+            temp: read(Field::Temp, key).unwrap_or(0.0),
+            power: read(Field::Power, key).unwrap_or(0.0),
+            busy_model: pack
+                .labels
+                .busy
+                .map(|l| sample.l(l).to_string())
+                .unwrap_or_default(),
+            alive,
+            throttle: read(Field::Throttle, key).unwrap_or(0.0),
+            unified_mem: unified,
+            mem_bw: read_or_nan(Field::MemBandwidth, key),
+            clock_mhz: read_or_nan(Field::ClockMhz, key),
+            mem_temp: read_or_nan(Field::MemTemp, key),
+            energy_mj: read_or_nan(Field::Energy, key),
+        });
+    }
+    out
 }
 
 async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
@@ -1109,15 +1080,23 @@ async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
 /// fast tier: 소스별 수집기 4개를 병렬 실행 후 합침. util/mem 반응성을 위해 collect()에서 분리.
 pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
     let p = &cfg.prom;
-    let (fu, rb, gpu, nodes) = tokio::join!(
-        collect_furiosa(p),
-        collect_rbln(p),
-        collect_gpu(p),
-        collect_nodes(p)
-    );
-    let mut accel = fu;
-    accel.extend(rb);
-    accel.extend(gpu);
+    // Every registered accelerator plus the host metrics, all concurrently. Adding an
+    // accelerator changes nothing here — it appears in `accel::PACKS`.
+    let devices = async {
+        let mut set = tokio::task::JoinSet::new();
+        for pack in crate::accel::PACKS.iter().copied() {
+            let prom = p.clone();
+            set.spawn(async move { collect_pack(&prom, pack).await });
+        }
+        let mut all = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            if let Ok(devs) = joined {
+                all.extend(devs);
+            }
+        }
+        all
+    };
+    let (mut accel, nodes) = tokio::join!(devices, collect_nodes(p));
     accel.sort_by(|a, b| (a.kind as u8, &a.node, &a.id).cmp(&(b.kind as u8, &b.node, &b.id)));
     // 통합 메모리(GB10 등): 별도 VRAM 없음 → 노드(호스트) 메모리 풀로 backfill.
     for a in accel
@@ -1518,19 +1497,6 @@ async fn collect_inventory(
     }
     for r in ACCEL_RESOURCES {
         inv.push((r.to_string(), total[r], used[r]));
-    }
-}
-
-/// Accelerator utilisation → percent. All three util sources are already 0–100 %:
-/// DCGM_FI_DEV_GPU_UTIL (observed max 96), furiosa_npu_core_utilization
-/// (furiosa-smi pe_usage_percentage) and RBLN_DEVICE_STATUS:UTILIZATION (rbln-stat util%).
-/// So there is nothing to rescale — the old "v<=1.0 → ratio" guess turned a real 1 % into 100 %.
-/// Only NaN and out-of-range readings are normalised.
-fn clamp_pct(v: f64) -> f64 {
-    if v.is_nan() {
-        0.0
-    } else {
-        v.clamp(0.0, 100.0)
     }
 }
 
@@ -2344,19 +2310,9 @@ mod tests {
     }
 
     #[test]
-    fn to_gb_and_clamp_pct() {
+    fn to_gb_handles_missing() {
         assert_eq!(to_gb(2.0e9), 2.0);
         assert_eq!(to_gb(f64::NAN), 0.0); // NaN → 0
-        // BUG-04 회귀: 저사용률은 그대로 저사용률이어야 한다(0..1 을 비율로 오해해 ×100 하던 버그).
-        assert_eq!(clamp_pct(1.0), 1.0);
-        assert_eq!(clamp_pct(0.5), 0.5);
-        assert_eq!(clamp_pct(0.82), 0.82);
-        assert_eq!(clamp_pct(82.0), 82.0);
-        assert_eq!(clamp_pct(f64::NAN), 0.0);
-        assert_eq!(clamp_pct(0.0), 0.0);
-        // 범위 밖 판독값만 정규화.
-        assert_eq!(clamp_pct(140.0), 100.0);
-        assert_eq!(clamp_pct(-3.0), 0.0);
     }
 
     #[test]

@@ -18,13 +18,18 @@ impl App {    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
         if let Some(a) = self.selected_artifact() {
             let model_id = Self::artifact_model_id(a);
             let repo_dir = model_id.replace('/', "--");
-            let vendor = if a.engine.contains("RBLN") {
-                "rbln"
-            } else if a.engine.contains("Furiosa") {
-                "furiosa"
-            } else {
-                "gpu"
-            };
+            // The artifact records its serving engine; the pack whose engine name it carries
+            // identifies the accelerator, so a new one is recognised without a branch here.
+            let vendor = crate::accel::PACKS
+                .iter()
+                .find(|p| p.caps.compiles_ahead_of_time && a.engine.contains(p.label))
+                .or_else(|| {
+                    crate::accel::PACKS
+                        .iter()
+                        .find(|p| a.engine.contains(p.display))
+                })
+                .map(|p| p.id)
+                .unwrap_or("gpu");
             let mount = if a.mount.is_empty() {
                 format!("/mnt/store/compiled/{}", repo_dir)
             } else {
@@ -34,7 +39,14 @@ impl App {    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
                     .unwrap_or("/mnt/store")
                     .to_string()
             };
-            let tp = Self::opt_or(a, "tp", if vendor == "furiosa" { "8" } else { "1" });
+            let pack = crate::accel::by_id(vendor);
+            let sub_tp = pack.and_then(|p| p.caps.serving_tp_unit).is_some();
+            let tp_default = if sub_tp {
+                pack.and_then(|p| p.caps.max_tensor_parallel).unwrap_or(8).to_string()
+            } else {
+                "1".to_string()
+            };
+            let tp = Self::opt_or(a, "tp", &tp_default);
             let dev_default = if vendor == "furiosa" {
                 let pe = tp.parse::<i64>().unwrap_or(8).max(1);
                 ((pe as f64 / 8.0).ceil() as i64).max(1).to_string()
@@ -48,21 +60,15 @@ impl App {    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
                 vendor,
                 mount,
                 dev_default,
-                if vendor == "furiosa" { Some(tp) } else { None },
+                if sub_tp { Some(tp) } else { None },
             ));
         }
         // Library 패널0: 스토어 컴파일본을 바로 배포 — repo/포맷/타깃(compiled_for)에서 spec 유도.
         if let Some(s) = self.selected_stored() {
-            let vendor = match s.format.as_str() {
-                "rbln" => "rbln",
-                "furiosa" => "furiosa",
-                _ => "gpu",
-            };
-            let engine = match vendor {
-                "rbln" => "vLLM-RBLN",
-                "furiosa" => "Furiosa-LLM",
-                _ => "vLLM",
-            };
+            // The store records its artifact format as the accelerator id, so the pack
+            // resolves both the vendor and its serving engine name.
+            let pack = crate::accel::by_id(&s.format).unwrap_or_else(|| crate::accel::by_id("gpu").expect("gpu pack"));
+            let (vendor, engine) = (pack.id, pack.engine);
             // compiled_for(예: RBLN-CA22-tp4-s8192) 에서 tp 추출.
             let tp = s
                 .compiled_for
@@ -197,11 +203,19 @@ impl App {    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
         let Some(form) = self.deploy_form.as_ref() else {
             return;
         };
-        let (kind, drv, res) = match form.vendor {
-            "rbln" => (crate::collect::AccelKind::Rbln, "RBLN", "rebellions.ai/ATOM"),
-            "furiosa" => (crate::collect::AccelKind::Rngd, "RNGD", "furiosa.ai/rngd"),
-            _ => (crate::collect::AccelKind::Gpu, "", "nvidia.com/gpu"),
-        };
+        // Kind, driver-label fragment and resource key all come from one pack lookup.
+        let pack = crate::accel::by_id(form.vendor);
+        let kind = pack
+            .map(|p| p.kind)
+            .unwrap_or(crate::collect::AccelKind::Gpu);
+        // GPUs need no driver label — any Ready node can host one.
+        let drv = pack
+            .filter(|p| p.caps.compiles_ahead_of_time)
+            .map(|p| p.label)
+            .unwrap_or("");
+        let res = pack
+            .map(|p| p.scheduling.resource_key)
+            .unwrap_or("nvidia.com/gpu");
         // 노드별 집계: (total, util_sum, mem_used, mem_total). free 는 아래에서 총−할당으로.
         let mut agg: std::collections::BTreeMap<String, (i64, f64, f64, f64)> =
             std::collections::BTreeMap::new();
@@ -319,16 +333,14 @@ impl App {    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
             return;
         };
         let vendor = form.vendor;
-        let want = match vendor {
-            "rbln" => Some("RBLN"),
-            "furiosa" => Some("RNGD"),
-            _ => None,
-        };
-        let kind = match vendor {
-            "rbln" => crate::collect::AccelKind::Rbln,
-            "furiosa" => crate::collect::AccelKind::Rngd,
-            _ => crate::collect::AccelKind::Gpu,
-        };
+        let pack = crate::accel::by_id(vendor);
+        // Only an accelerator with its own compile path constrains the destination node.
+        let want = pack
+            .filter(|p| p.caps.compiles_ahead_of_time)
+            .map(|p| p.label);
+        let kind = pack
+            .map(|p| p.kind)
+            .unwrap_or(crate::collect::AccelKind::Gpu);
         let mut per_node: std::collections::BTreeMap<String, i64> = Default::default();
         for a in self.snap.accel.iter().filter(|a| a.kind == kind && !a.node.is_empty()) {
             *per_node.entry(a.node.clone()).or_insert(0) += 1;
@@ -388,11 +400,9 @@ impl App {    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
 
     /// 배포 용량 판정 — 총 디바이스 수요 대 클러스터 동종 가속기(총/유휴).
     pub fn deploy_fit(&self, form: &DeployForm) -> DeployFit {
-        let want_kind = match form.vendor {
-            "rbln" => crate::collect::AccelKind::Rbln,
-            "furiosa" => crate::collect::AccelKind::Rngd,
-            _ => crate::collect::AccelKind::Gpu,
-        };
+        let want_kind = crate::accel::by_id(form.vendor)
+            .map(|p| p.kind)
+            .unwrap_or(crate::collect::AccelKind::Gpu);
         let devs: Vec<&crate::collect::Accel> = self
             .snap
             .accel
@@ -400,11 +410,9 @@ impl App {    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
             .filter(|x| x.kind == want_kind)
             .collect();
         let total = devs.len() as i64;
-        let res_key = match form.vendor {
-            "rbln" => "rebellions.ai/ATOM",
-            "furiosa" => "furiosa.ai/rngd",
-            _ => "nvidia.com/gpu",
-        };
+        let res_key = crate::accel::by_id(form.vendor)
+            .map(|p| p.scheduling.resource_key)
+            .unwrap_or("nvidia.com/gpu");
         // 노드별 총 디바이스(살아있는) 수.
         let mut total_by_node: std::collections::BTreeMap<&str, i64> =
             std::collections::BTreeMap::new();
@@ -629,17 +637,10 @@ impl App {    pub(super) fn selected_deploy_spec(&self) -> Option<DeploySpec> {
         } else {
             devices.clone()
         };
-        let (res_key, product_label) = match form.vendor {
-            "rbln" => (
-                "rebellions.ai/ATOM",
-                Some(("rebellions.ai/npu.product", "RBLN-CA22")),
-            ),
-            "furiosa" => (
-                "furiosa.ai/rngd",
-                Some(("furiosa.ai/npu.product", "rngd")),
-            ),
-            _ => ("nvidia.com/gpu", None),
-        };
+        // Scheduling identity comes from the accelerator's pack, not a match arm.
+        let sched = crate::accel::by_id(form.vendor).map(|p| &p.scheduling);
+        let res_key = sched.map(|s| s.resource_key).unwrap_or("nvidia.com/gpu");
+        let product_label = sched.and_then(|s| s.product_label);
         // A store-backed Furiosa artifact is served by path; everything else by HF id.
         let served = if form.vendor == "furiosa" && form.mount.starts_with("/mnt/store/") {
             form.mount.clone()

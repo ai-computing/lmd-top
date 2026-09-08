@@ -3,7 +3,7 @@
 //! (3) unused accelerator metrics (= new signal candidates). Diagnoses "why is this view empty" in one shot.
 
 use crate::config::Config;
-use crate::metrics::{ACCEL_PREFIXES, DEPS};
+use crate::metrics::{coverage, known_metrics, ACCEL_PREFIXES};
 use crate::prom;
 use std::collections::BTreeSet;
 
@@ -26,12 +26,12 @@ pub async fn run(cfg: &Config) {
             let accel_jobs: Vec<&String> = jobs
                 .iter()
                 .filter(|j| {
+                    // Accelerator exporter names come from the packs; "node" covers the host.
                     let l = j.to_lowercase();
-                    l.contains("dcgm")
-                        || l.contains("furiosa")
-                        || l.contains("rbln")
+                    crate::accel::PACKS
+                        .iter()
+                        .any(|p| l.contains(p.exporter))
                         || l.contains("node")
-                        || l.contains("gpu")
                 })
                 .collect();
             println!(
@@ -56,7 +56,7 @@ pub async fn run(cfg: &Config) {
     let mut fam = "";
     let (mut have, mut miss) = (0usize, 0usize);
     let mut affected: Vec<&str> = Vec::new();
-    for (family, metric, impact) in DEPS {
+    for (family, metric, impact) in &coverage() {
         if *family != fam {
             println!("  {}", family);
             fam = family;
@@ -78,7 +78,7 @@ pub async fn run(cfg: &Config) {
     );
 
     // unused accelerator metrics (= new signal candidates) — those not in DEPS but with an accelerator family prefix
-    let known: BTreeSet<&str> = DEPS.iter().map(|(_, m, _)| *m).collect();
+    let known: BTreeSet<&str> = known_metrics();
     let mut candidates: Vec<&str> = names
         .iter()
         .map(|s| s.as_str())

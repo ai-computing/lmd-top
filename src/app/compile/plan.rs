@@ -13,19 +13,17 @@ pub fn synthetic_artifact_for(
     overrides: &[(String, String)],
 ) -> ModelArtifact {
     let model_name = model_id.rsplit('/').next().unwrap_or(model_id).to_string();
-    let engine = match vendor {
-        "rbln" => "vLLM-RBLN",
-        "furiosa" => "Furiosa-LLM",
-        _ => "vLLM",
-    };
-    let tp_default = match vendor {
-        "rbln" => "4",
-        "furiosa" => "8",
-        _ => "1",
-    };
+    let pack = crate::accel::by_id(vendor);
+    let engine = pack.map(|p| p.engine).unwrap_or("vLLM");
+    // Default tensor-parallel width is the accelerator's declared maximum group size: a CA22
+    // exposes 4 chips, one RNGD 8 PEs, a single GPU 1.
+    let tp_default = pack
+        .and_then(|p| p.caps.max_tensor_parallel)
+        .unwrap_or(1)
+        .to_string();
     let mut opts = vec![(
         "tp".into(),
-        override_value(overrides, "tp").unwrap_or_else(|| tp_default.to_string()),
+        override_value(overrides, "tp").unwrap_or(tp_default),
     )];
     if let Some(v) = override_value(overrides, "max-len") {
         opts.push(("max-len".into(), v));

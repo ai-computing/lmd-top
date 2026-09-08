@@ -43,18 +43,23 @@ pub fn family_of(model_id: &str) -> Option<&'static Family> {
         .find(|f| f.matches.iter().any(|m| lc.contains(m.as_str())))
 }
 
-/// Vendors that can compile this model ("rbln" / "furiosa"). Empty vector if none.
+/// Accelerators that can compile this model. Intersects the family's vendor support flags
+/// with the packs that actually do ahead-of-time compiles, so a family flag can never offer a
+/// compile for an accelerator that has no compile path.
 pub fn compilable_vendors(model_id: &str) -> Vec<&'static str> {
-    let mut v = Vec::new();
-    if let Some(f) = family_of(model_id) {
-        if f.rbln {
-            v.push("rbln");
-        }
-        if f.furiosa {
-            v.push("furiosa");
-        }
-    }
-    v
+    let Some(f) = family_of(model_id) else {
+        return Vec::new();
+    };
+    crate::accel::compilable()
+        .filter(|p| match p.id {
+            "rbln" => f.rbln,
+            "furiosa" => f.furiosa,
+            // A new compiling accelerator needs a support flag in npu-compat.json before it
+            // can be offered; until then it is simply not advertised.
+            _ => false,
+        })
+        .map(|p| p.id)
+        .collect()
 }
 
 #[cfg(test)]

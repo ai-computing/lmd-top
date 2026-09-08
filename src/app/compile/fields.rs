@@ -162,11 +162,9 @@ pub fn vendor_compile_fields(
     vendor: &str,
     a: &crate::collect::ModelArtifact,
 ) -> Vec<CompileField> {
-    let defs = if vendor == "rbln" {
-        RBLN_COMPILE_FIELDS
-    } else {
-        FURIOSA_COMPILE_FIELDS
-    };
+    let defs = compile_profile(vendor)
+        .map(|p| p.fields)
+        .unwrap_or(FURIOSA_COMPILE_FIELDS);
     defs.iter()
         .map(|d| CompileField {
             key: d.key.into(),
@@ -198,3 +196,41 @@ pub fn override_value(overrides: &[(String, String)], key: &str) -> Option<Strin
         .find(|(k, _)| k == key)
         .map(|(_, v)| v.clone())
 }
+
+/// Per-accelerator compile profile: the option schema, and how a build is named in the store.
+///
+/// Looked up by accelerator id and *total* — an accelerator that declares
+/// `compiles_ahead_of_time` but has no profile here is reported as unsupported rather than
+/// silently handed another vendor's schema and target prefix. That silent fallback is what
+/// made `--vendor gpu` emit a Furiosa-named RBLN job (BUG-07).
+pub struct CompileProfile {
+    pub fields: &'static [CompileFieldDef],
+    /// Store path prefix, e.g. `rbln-ca22` or `rngd`.
+    pub target_prefix: &'static str,
+    /// Whether the target name carries a pipeline-parallel component.
+    pub target_has_pp: bool,
+    /// Form field naming the chip variant, folded into the target prefix when present.
+    pub chip_field: Option<&'static str>,
+}
+
+pub fn compile_profile(vendor: &str) -> Option<&'static CompileProfile> {
+    match vendor {
+        "rbln" => Some(&RBLN_PROFILE),
+        "furiosa" => Some(&FURIOSA_PROFILE),
+        _ => None,
+    }
+}
+
+static RBLN_PROFILE: CompileProfile = CompileProfile {
+    fields: RBLN_COMPILE_FIELDS,
+    target_prefix: "rbln",
+    target_has_pp: false,
+    chip_field: Some("npu"),
+};
+
+static FURIOSA_PROFILE: CompileProfile = CompileProfile {
+    fields: FURIOSA_COMPILE_FIELDS,
+    target_prefix: "rngd",
+    target_has_pp: true,
+    chip_field: None,
+};

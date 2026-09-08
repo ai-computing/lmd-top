@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 // impl App is split across submodules (see each file's header for scope).
 mod action;
 mod activity;
-mod compile;
+pub mod compile;
 mod deploy;
 mod filter;
 mod library;

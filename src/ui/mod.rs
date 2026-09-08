@@ -3955,10 +3955,13 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
             }
             LibItem::Stored(k) => {
                 let s = &app.snap.stored[k];
-                let (tbadge, is_src) = match s.format.as_str() {
-                    "rbln" => (tag("RBLN", Color::Magenta), false),
-                    "furiosa" => (tag("RNGD", C_WARN()), false),
-                    _ => (tag("HF", C_ACC()), true),
+                // A store artifact's format is an accelerator id when it is a compiled build,
+                // and something else (hf) when it is source weights.
+                let (tbadge, is_src) = match crate::accel::by_id(&s.format)
+                    .filter(|p| p.caps.compiles_ahead_of_time)
+                {
+                    Some(p) => (tag(p.label, kind_color(p.kind)), false),
+                    None => (tag("HF", C_ACC()), true),
                 };
                 let label = if is_src {
                     if s.revision.is_empty() || s.revision == "-" {
@@ -4472,11 +4475,7 @@ fn view_zoo(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 vendors
                     .iter()
-                    .map(|v| match *v {
-                        "furiosa" => "Furiosa",
-                        "rbln" => "RBLN",
-                        _ => *v,
-                    })
+                    .map(|v| crate::accel::by_id(v).map(|p| p.display).unwrap_or(*v))
                     .collect::<Vec<_>>()
                     .join("+")
             };
