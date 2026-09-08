@@ -145,6 +145,51 @@ $ RBLN_COMPILER_LOG_LEVEL=4
        in a deploy build (raw: "4"). Unset it or use a development build.
 ```
 
+## 결정적 사실 — 동작하는 산출물이 스스로 버전을 기록하고 있다
+
+이 클러스터에서 **실제로 동작하는** RBLN 산출물(수동 컴파일, 노드 `/home/gspark/` 아래)의
+`rbln_config.json` 은 자신을 만든 버전을 담고 있다:
+
+```json
+{ "cls_name": "RBLNLlamaForCausalLMConfig", "dtype": "float32",
+  "optimum_rbln_version": "0.10.2", ... }
+```
+
+**0.10.2 다.** 내가 시험한 두 버전 중 어느 것도 아니다:
+
+| 버전 | 출처 | 결과 |
+|---|---|---|
+| **0.10.2** | 동작하는 산출물이 기록 (2026-06-01 수동 빌드) | **성공한 유일한 버전** |
+| 0.10.3 | 스토어 번들 `rbln-toolchain/0.10.3/` | 실패 (`_impl:946`) |
+| 0.11.0.post1 | 노드 호스트 설치본 | 실패 (`_impl:974`) |
+
+즉 **버전 자체가 원인은 아니지만**(0.10.3 과 0.11.0 이 똑같이 실패), **알려진 성공 버전은
+0.10.2 하나뿐이다.** 다음에 시험할 것이 명확해졌다.
+
+### 다음 행동 (가장 유력)
+
+Rebellions 에서 **0.10.2 번들**을 받아 스토어에 스테이징하고 그것으로 컴파일한다:
+
+```bash
+# 0.10.3 번들과 같은 형태로 받아 두고
+/mnt/store/rbln-toolchain/0.10.2/{rebel_compiler,optimum_rbln,torch,transformers,...}.whl
+
+LMD_RBLN_TOOLCHAIN=/mnt/store/rbln-toolchain/0.10.2   lmd-top --plan compile --model <id> --vendor rbln --apply
+```
+
+0.10.3 번들이 이미 있으므로 벤더 인덱스 접근권은 확보돼 있다 — 0.10.2 를 같은 방식으로 받으면 된다.
+
+## 컨테이너화는 이제 동작한다 (원인과 별개로)
+
+`LMD_RBLN_TOOLCHAIN` 은 스토어의 wheel 번들로 `python:3.10-slim` 안에 툴체인을 설치한다.
+**hostPath 없음, nodeSelector 없음, 레지스트리 접근권 없음** — 라이선스된 `rebel_compiler`
+wheel(332MB)이 이미 스토어에 있기 때문이다(앞서 "공개 PyPI 에 없어 불가능"이라고 적었던 것을
+정정한다). 검증됨: 50개 wheel 설치 → `optimum-rbln=0.10.3 rebel-compiler=0.10.3
+transformers=4.57.6 torch=2.10.0+cpu` 로 실행 → 컴파일 단계까지 정상 진입.
+
+이것으로 **노드 환경 드리프트는 변수에서 제거된다.** 버전을 바꿔 시험하는 일이 환경 오염 없이
+반복 가능해졌다 — 0.10.2 시험이 바로 이 경로로 가능하다.
+
 ## 결론: deploy 빌드로는 더 알아낼 수 없다
 
 진단 경로를 **전부** 시도했고, 모두 무효이거나 dev 빌드 전용으로 명시적으로 차단된다.
@@ -159,8 +204,11 @@ $ RBLN_COMPILER_LOG_LEVEL=4
 | `rebel.core_ori` 로 우회 | TVM 연산자 이중 등록으로 import 불가 |
 | 오류 문자열 위치 | `librbln.so` 내부(2회) — Rebellions 네이티브 코드가 직접 던짐 |
 
-**따라서 해결에는 Rebellions 의 development 빌드 또는 지원이 필요하다.** 이는 포기가 아니라
-확정된 결론이다 — SDK 가 설계상 deploy 빌드에서 진단을 닫아두었다.
+**따라서 오류의 *내용*을 보려면 Rebellions 의 development 빌드가 필요하다.** SDK 가 설계상
+deploy 빌드에서 진단을 닫아두었다.
+
+다만 **해결에 그것이 필요하다는 뜻은 아니다** — 위의 0.10.2 시험이 먼저다. 그것으로 되면
+원인은 "0.10.3 이후 회귀"로 확정되고, 안 되면 그때 dev 빌드를 요청하면서 이 문서를 보내면 된다.
 
 같은 바이너리에서 나온, 눈여겨볼 제약 문자열:
 
@@ -180,9 +228,11 @@ is not supported since its second dimension is not divisible by 32
    (b) deploy 빌드에서 진단을 보려면 무엇이 필요한가 — development 빌드 배포를 받을 수 있는가.
 2. **드라이버↔컴파일러 버전 조합 확인** — 드라이버 3.0.0 과 컴파일러 0.11.0 이 벤더가
    의도한 짝인지. (미확인 영역. 추측하지 않았다.)
-3. **`LMD_COMPILE_IMAGE_RBLN` 에 핀된 이미지 설정** — 원인 규명 **후**. 재발 방지책이며,
-   Rebellions 레지스트리 접근권이 필요하다. `rebel-compiler` 는 공개 PyPI 에 없다
-   (`pip download rebel-compiler==0.11.0` → `No matching distribution found`).
+3. ~~`LMD_COMPILE_IMAGE_RBLN` 에 핀된 이미지 설정 — 레지스트리 접근권 필요~~ →
+   **`LMD_RBLN_TOOLCHAIN` 으로 이미 해결됨.** 라이선스된 wheel 이 스토어에 있으므로 레지스트리
+   접근권 없이 컨테이너에서 툴체인을 고정할 수 있다. `rebel-compiler` 가 공개 PyPI 에 없다는
+   사실은 여전히 맞지만(`pip download` → `No matching distribution found`), 이 클러스터에서는
+   무관하다.
 
 ## 재현
 

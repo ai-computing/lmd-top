@@ -108,6 +108,9 @@ ENVIRONMENT:
     LMD_HISTORY      compile/serving history path (default: ~/.config/lmd-top/history.jsonl)
     LMD_COMPILE_ENV  extra env for compile Jobs, K=V,K=V (e.g. vendor debug flags)
                      RBLN builds on TVM, so TVM_LOG_DEBUG=1 / TVM_BACKTRACE=1 work
+    LMD_RBLN_TOOLCHAIN  wheel dir in the store to install RBLN from, e.g.
+                     /mnt/store/rbln-toolchain/0.10.3 — pins every version together and
+                     avoids inheriting the node's python environment
     LMD_W / LMD_H    size for --render
 
 With no options, lmd-top launches the interactive TUI. See `?` in the TUI for keybindings.";

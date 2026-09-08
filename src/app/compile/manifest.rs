@@ -20,6 +20,9 @@ const RECIPE_FURIOSA: &str = include_str!("../../../assets/recipes/furiosa-compi
 /// Bootstrap for the RBLN host-stack fallback: prepares a bare image, then execs the recipe.
 const RECIPE_RBLN_BOOTSTRAP: &str =
     include_str!("../../../assets/recipes/rbln-host-bootstrap.sh");
+/// Bootstrap that installs a matched toolchain from the store instead of borrowing the host's.
+const RECIPE_RBLN_STORE_BOOTSTRAP: &str =
+    include_str!("../../../assets/recipes/rbln-store-bootstrap.sh");
 
 /// Shared model store — compile output and the HF cache both live here.
 const STORE_MOUNT: &str = "/mnt/store";
@@ -101,6 +104,12 @@ pub fn build_compile_manifest(
     };
     let node_host = node_pick.split('(').next().unwrap_or("any").trim();
 
+    // A vendor toolchain bundle staged in the store beats both the registry image and the
+    // host stack: every version is pinned together, and it needs no registry credentials.
+    let store_toolchain = std::env::var("LMD_RBLN_TOOLCHAIN")
+        .ok()
+        .filter(|p| !p.is_empty());
+
     // RBLN host-stack fallback: with no registry image configured, the compile runs against the
     // target node's own rebel-compiler install via hostPath, so it must land on an RBLN node.
     let rbln_host_stack = vendor == "rbln" && img_rbln.is_none();
@@ -110,7 +119,10 @@ pub fn build_compile_manifest(
         .map(|n| n.name.clone());
 
     let image = if vendor == "rbln" {
-        if rbln_host_stack {
+        if store_toolchain.is_some() {
+            // The bundle's wheels are cp310, so the interpreter has to match.
+            "python:3.10-slim".to_string()
+        } else if rbln_host_stack {
             "ubuntu:22.04".to_string()
         } else {
             img_rbln.unwrap_or_default().to_string()
@@ -125,7 +137,7 @@ pub fn build_compile_manifest(
     // schedules an unpinned compile.
     let node_selector = if node_host != "any" && !node_host.is_empty() {
         Some(ymap! { "kubernetes.io/hostname" => s(node_host) })
-    } else if rbln_host_stack {
+    } else if rbln_host_stack && store_toolchain.is_none() {
         Some(match &auto_rbln_node {
             Some(n) => ymap! { "kubernetes.io/hostname" => s(n.clone()) },
             None => ymap! { "rebellions.ai/npu.product" => s("RBLN-CA22") },
@@ -136,6 +148,8 @@ pub fn build_compile_manifest(
 
     let plan = if vendor == "furiosa" {
         furiosa_plan(form, &repo_dir)
+    } else if let Some(dir) = store_toolchain.clone() {
+        rbln_store_plan(&dir, form)
     } else {
         rbln_plan(rbln_host_stack, form)
     };
@@ -284,6 +298,33 @@ fn furiosa_plan(form: &CompileForm, repo_dir: &str) -> ContainerPlan {
         extra_mounts: Vec::new(),
         note: "Furiosa: fxb build for furiosa-ai quantized checkpoints. Installs the aarch64 \
                cross-compiler, builds in local scratch, then copies to the model store.",
+    }
+}
+
+/// RBLN compiling against a toolchain bundle staged in the shared store.
+///
+/// Nothing is borrowed from the node, so the build is reproducible and runs anywhere: the
+/// bundle pins rebel_compiler, optimum-rbln, torch and transformers together. This exists
+/// because the host stack silently inherits the node's Python environment, and on this
+/// cluster that environment had moved to versions whose compiles fail
+/// (docs/RBLN-COMPILE-INCIDENT.md).
+fn rbln_store_plan(dir: &str, form: &CompileForm) -> ContainerPlan {
+    ContainerPlan {
+        recipe: (RECIPE_RBLN, "compile.py"),
+        extra_file: Some((RECIPE_RBLN_STORE_BOOTSTRAP, "bootstrap.sh")),
+        command: vec!["sh".into(), "/scripts/bootstrap.sh".into()],
+        extra_env: [
+            vec![
+                env_val("TOOLCHAIN_DIR", dir),
+                env_val("HF_HOME", format!("{}/hub", STORE_MOUNT)),
+            ],
+            rbln_param_env(form),
+        ]
+        .concat(),
+        extra_volumes: Vec::new(),
+        extra_mounts: Vec::new(),
+        note: "RBLN: toolchain installed from the store bundle (no hostPath, no registry) — \
+               every version pinned together, runs on any node.",
     }
 }
 
