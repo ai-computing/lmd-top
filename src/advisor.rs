@@ -145,6 +145,11 @@ pub fn advise(history: &[Record], model: &str, vendor: &str) -> Advice {
         let Some(rel) = relevance(rec, model, vendor) else {
             continue;
         };
+        // A run the SDK aborted over one of its own flags never tried the options, so it is
+        // evidence about the flag and not about the build.
+        if rec.failure_kind == "vendor-flag" {
+            continue;
+        }
         advice.compiles_seen += 1;
         match rec.outcome {
             Outcome::Ok => ok.push((rel, rec)),
@@ -620,7 +625,7 @@ pub fn patterns(history: &[Record]) -> Vec<Pattern> {
     let compiles: Vec<&Record> = history.iter().filter(|r| r.kind == "compile").collect();
     let mut groups: BTreeMap<(String, String), Vec<&Record>> = BTreeMap::new();
     let mut attempts: BTreeMap<String, usize> = BTreeMap::new();
-    for rec in &compiles {
+    for rec in compiles.iter().filter(|r| r.failure_kind != "vendor-flag") {
         *attempts.entry(rec.vendor.clone()).or_insert(0) += 1;
         if rec.outcome == Outcome::Fail {
             let kind = if rec.failure_kind.is_empty() {
@@ -843,6 +848,26 @@ mod pattern_tests {
         // A history with no toolchain recorded says nothing rather than guessing.
         h[0].toolchain.clear();
         assert!(toolchain_warnings(&h).is_empty());
+    }
+
+    /// A run aborted by a rejected vendor flag says nothing about the build, so it must not
+    /// appear as evidence — otherwise a typo in a debug flag looks like five more failures.
+    #[test]
+    fn a_rejected_flag_is_not_evidence() {
+        let mut h = vec![
+            r("m", "rbln", Outcome::Fail, "vendor-flag", &[("tp", "4")]),
+            r("m", "rbln", Outcome::Ok, "", &[("tp", "4")]),
+        ];
+        h[0].id = "flagrun".into();
+        let a = advise(&h, "m", "rbln");
+        assert_eq!(a.compiles_seen, 1, "only the real build counts");
+        assert!(a.avoid.is_empty(), "the flag failure is not an option to avoid");
+        assert_eq!(
+            a.best.map(|b| b.options_line()),
+            Some("tp=4".to_string()),
+            "and tp=4 is still recommendable"
+        );
+        assert!(patterns(&h).is_empty(), "nor a recurring compile failure");
     }
 
     /// The situation on this cluster: five failures, four different models, and no RBLN build
