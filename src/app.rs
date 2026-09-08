@@ -589,7 +589,7 @@ impl App {
     }
     /// Session energy (Wh) = (current cumulative − baseline) mJ / 3.6e6. NaN if no data.
     pub fn energy_session_wh(&self, a: &crate::collect::Accel) -> f64 {
-        if a.energy_mj.is_nan() {
+        if !a.reports_energy() || a.energy_mj.is_nan() {
             return f64::NAN;
         }
         let base = self
