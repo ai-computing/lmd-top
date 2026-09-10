@@ -37,6 +37,28 @@ pub(crate) fn truncw(s: &str, max: usize) -> String {
 /// `format!("{:<n}", truncw(s, n))` looks equivalent but is not: `{:<n}` counts **chars** while
 /// `truncw` counts **columns**, so a CJK name (5 chars / 9 columns) got 15 spaces appended and
 /// occupied 24 columns instead of 20 — shifting every column to its right (BUG-12).
+/// Format a byte count the way `df -h` does, so it can be compared against a shell by eye.
+///
+/// Binary units with single-letter suffixes (`45.9T`), one decimal below 10 and none above,
+/// which is `df -h`'s own rounding. Named for the base it uses rather than "si", because these
+/// are powers of 1024 and calling them SI would be a lie the caller cannot see.
+pub(crate) fn iec_bytes(n: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i + 1 < UNITS.len() {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{}{}", n, UNITS[0])
+    } else if v < 10.0 {
+        format!("{:.1}{}", v, UNITS[i])
+    } else {
+        format!("{:.0}{}", v, UNITS[i])
+    }
+}
+
 pub(crate) fn padw(s: &str, n: usize) -> String {
     let t = truncw(s, n);
     let w = dwidth(&t);
@@ -394,6 +416,26 @@ pub(crate) fn cellw(text: String, w: usize) -> Cell<'static> {
 #[cfg(test)]
 mod width_tests {
     use super::*;
+
+    /// The values the cluster's own `df -h /mnt/store` prints, so the view and a shell agree.
+    #[test]
+    fn iec_bytes_matches_df_h_for_the_real_store() {
+        assert_eq!(iec_bytes(57_504_801_730_560), "52T"); // df -h: 52.3T
+        assert_eq!(iec_bytes(50_466_213_605_376), "46T"); // df -h: 45.9T
+        assert_eq!(iec_bytes(7_038_588_125_184), "6.4T"); // df -h: 6.4T
+    }
+
+    #[test]
+    fn iec_bytes_scales_and_never_loses_the_unit() {
+        assert_eq!(iec_bytes(0), "0B");
+        assert_eq!(iec_bytes(512), "512B");
+        assert_eq!(iec_bytes(1024), "1.0K");
+        assert_eq!(iec_bytes(109 * 1024 * 1024), "109M");
+        assert_eq!(iec_bytes(5_374_743), "5.1M");
+        // Beyond the table's largest unit it must still say something finite.
+        let huge = iec_bytes(u64::MAX);
+        assert!(huge.ends_with('P'), "{}", huge);
+    }
 
     /// BUG-12 회귀: 표 셀은 문자 수가 아니라 **표시 폭**으로 맞춰져야 한다.
     /// (한글 이름 한 개가 열 정렬 전체를 밀어내던 원인.)
