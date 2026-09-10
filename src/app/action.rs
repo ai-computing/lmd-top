@@ -84,6 +84,9 @@ impl App {
                 // now the only way to reclaim it was a shell on a pod with the PVC mounted.
                 items.push(ActionItem::store_move());
                 items.push(ActionItem::store_delete());
+                // Right after a removal the row is still listed until discovery re-runs, so
+                // the way to fix that belongs in the same menu.
+                items.push(ActionItem::store_refresh());
                 let label = if s.1 == "hf" {
                     format!("store · {} (source)", s.0)
                 } else {

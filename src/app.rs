@@ -93,6 +93,8 @@ pub enum Pending {
     Stop {
         name: String,
     }, // stop serving = replicas to 0 (frees devices, reversible)
+    /// Run the store discovery scan now rather than waiting for its CronJob schedule.
+    StoreRefresh,
     Apply {
         title: String,
         yaml: String,
@@ -162,6 +164,9 @@ impl Pending {
                 pod
             ),
             Pending::Stop { name } => format!("stop serving {} (scale → 0, frees devices)?", name),
+            Pending::StoreRefresh => {
+                "re-scan the shared store now (read-only scan Job)?".to_string()
+            }
             Pending::Apply { title, .. } => format!("apply manifest to cluster — {}?", title),
             Pending::ApplyUrl { title, url } => {
                 format!("apply upstream manifest — {} (from {})?", title, url)
@@ -1903,7 +1908,7 @@ mod tests {
         for want in [
             "0-6 / Tab",     // first entry
             "scale / restart / stop",
-            "V / M",         // the store actions, added last to the operations block
+            "V M r",         // the store actions, added last to the operations block
             "util/mem/temp", // the final block, which a too-short box would clip
         ] {
             assert!(text.contains(want), "help overlay is missing {:?}", want);

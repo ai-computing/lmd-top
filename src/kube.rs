@@ -409,6 +409,41 @@ pub fn delete_pod(ns: &str, name: &str) -> Result<()> {
 }
 
 /// Delete compile Job (`kubectl delete job <name>`) — cancel/clean up in-progress work. Pods are cleaned up too.
+/// Kick the store discovery scan now, instead of waiting for its CronJob schedule.
+///
+/// After a store build is removed or moved, the `model-inventory` ConfigMap still describes the
+/// old contents until the CronJob next runs — up to ten minutes of a row that is no longer
+/// there. This creates a one-off Job *from that CronJob*, so the scan logic stays defined in
+/// one place (the cluster's own manifest) rather than being reimplemented here.
+///
+/// Returns the Job name. A missing CronJob is reported as such: the discovery manifest is
+/// optional, and the store view works without it.
+pub fn refresh_inventory(ns: &str) -> Result<String> {
+    let name = format!("store-refresh-{}", crate::collect::now_secs());
+    let out = std::process::Command::new("kubectl")
+        .args([
+            "create",
+            "job",
+            &name,
+            "--from=cronjob/model-discovery",
+            "-n",
+            ns,
+            "--request-timeout=8s",
+        ])
+        .output()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if err.contains("not found") {
+            return Err(anyhow!(
+                "cronjob/model-discovery is not installed in {} — apply manifests/model-store-discovery.yaml",
+                ns
+            ));
+        }
+        return Err(anyhow!("{}", err));
+    }
+    Ok(name)
+}
+
 pub fn delete_job(ns: &str, name: &str) -> Result<()> {
     let out = std::process::Command::new("kubectl")
         .args([

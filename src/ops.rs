@@ -233,6 +233,7 @@ pub enum Action {
     RouteDelete,           // 라우트 규칙 삭제
     StoreDelete,           // 공유 스토어의 빌드 산출물 삭제(되돌릴 수 없음)
     StoreMove,             // 공유 스토어 안에서 산출물 경로 이동/개명
+    StoreRefresh,          // 스토어 인벤토리 재스캔(디스커버리 CronJob 을 즉시 1회 실행)
     Pivot(char), // 관련 레이어로 점프(크로스레이어 pivot) — char 는 pivot 대상 키(p/i/r/e/m)
 }
 
@@ -256,7 +257,10 @@ impl Action {
             | Action::RouteRename
             | Action::RouteRetarget
             // A move is reversible — the bytes are still there under a different name.
-            | Action::StoreMove => Mode::Admin,
+            | Action::StoreMove
+            // Creates a Job, like every other object-creating action, though the scan it runs
+            // only reads the store.
+            | Action::StoreRefresh => Mode::Admin,
             // Deleting a store artifact destroys tens of GB that took hours to build, and
             // nothing in the cluster keeps a copy. Same tier as deleting a pod.
             Action::Delete
@@ -287,6 +291,7 @@ impl Action {
             Action::Delete | Action::DeleteJob => "delete",
             Action::StoreDelete => "store delete",
             Action::StoreMove => "store move",
+            Action::StoreRefresh => "store refresh",
             Action::Objective => "objective",
             Action::RouteRename | Action::RouteRetarget | Action::RouteDelete => "route edit",
             Action::Pivot(_) => "go",
@@ -400,6 +405,16 @@ impl ActionItem {
             "Remove",
             "delete this build from the shared store (irreversible)",
             Action::StoreDelete,
+        )
+    }
+    /// Re-scan the store now. Offered next to the destructive actions because that is when
+    /// the inventory is most obviously stale.
+    pub fn store_refresh() -> Self {
+        Self::new(
+            'r',
+            "Rescan",
+            "re-run store discovery now (inventory is otherwise up to 10 min stale)",
+            Action::StoreRefresh,
         )
     }
     pub fn store_move() -> Self {

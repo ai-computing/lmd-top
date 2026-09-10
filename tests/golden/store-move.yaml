@@ -1,7 +1,7 @@
 # title: move compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192
 # Store maintenance — move compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192 → compiled/archive/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192
 # Deployments that reference the old path will stop resolving it.
-# The inventory ConfigMap refreshes on the discovery CronJob's next run.
+# Inventory is stale until discovery re-runs — use Rescan (r) to do it now.
 # mv /mnt/store/compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192 /mnt/store/compiled/archive/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192
 apiVersion: batch/v1
 kind: Job

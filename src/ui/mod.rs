@@ -417,7 +417,7 @@ fn help_overlay(f: &mut Frame) {
         sec("operations"),
         g("y / l", "YAML / logs (accelerators, also in the ⏎ menu)"),
         g("s S x", "scale / restart / stop"),
-        g("V / M", "store build: move / remove (Deploy▸Library, review first)"),
+        g("V M r", "store build: move / remove / rescan (Deploy▸Library)"),
         g(
             "p i r e m",
             "pivot across pods, infra, routes, EPP, and models",

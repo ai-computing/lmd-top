@@ -171,6 +171,28 @@ mod tests {
     }
 
     #[test]
+    fn a_store_row_offers_rescan_alongside_the_destructive_actions() {
+        let mut a = app_with_store();
+        a.open_action_menu();
+        let menu = a.action_menu.as_ref().expect("an action menu on a store row");
+        let keys: Vec<char> = menu.items.iter().map(|i| i.key).collect();
+        for want in ['V', 'M', 'r'] {
+            assert!(keys.contains(&want), "store row menu is missing {:?}: {:?}", want, keys);
+        }
+        // Removal is irreversible; a rescan only reads. They must not share a tier.
+        let mode_of = |k: char| {
+            menu.items
+                .iter()
+                .find(|i| i.key == k)
+                .map(|i| i.action.required_mode())
+                .unwrap()
+        };
+        assert_eq!(mode_of('M'), crate::app::Mode::Danger);
+        assert_eq!(mode_of('r'), crate::app::Mode::Admin);
+        assert_eq!(mode_of('V'), crate::app::Mode::Admin);
+    }
+
+    #[test]
     fn move_rejects_a_destination_that_escapes_the_store() {
         let mut a = app_with_store();
         a.open_store_move();
