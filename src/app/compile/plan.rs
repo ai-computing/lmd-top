@@ -36,6 +36,8 @@ pub fn synthetic_artifact_for(
         image: String::new(),
         source: model_id.into(),
         mount,
+        // Planned, not observed — there is no node-local directory yet.
+        host_path: None,
         opts,
     }
 }

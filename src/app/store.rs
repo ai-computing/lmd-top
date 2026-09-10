@@ -263,6 +263,7 @@ mod tests {
             image: "i".into(),
             source: "/mnt/store/compiled/org--name/rbln/tp4".into(),
             mount: "/mnt/store ← pvc/model-store".into(),
+            host_path: None,
             opts: vec![],
         }];
         a.open_store_delete();

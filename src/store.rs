@@ -367,6 +367,7 @@ mod tests {
             image: "i".into(),
             source: source.into(),
             mount: mount.into(),
+            host_path: None,
             opts: Vec::new(),
         }
     }

@@ -183,6 +183,8 @@ impl App {
             image: String::new(),
             source: Self::catalog_hf_source(m),
             mount: Self::placement_mount(m, p),
+            // A catalog candidate, not something on disk anywhere yet.
+            host_path: None,
             opts: vec![("tp".into(), p.count.max(1).to_string())],
         }
     }
