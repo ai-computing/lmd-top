@@ -31,7 +31,7 @@ Kubernetes; it stores no data of its own.
 ## Views
 
 Navigation has two axes that mirror the request path (Gateway → EPP → Model → Infra):
-pick a **section** with the number keys `0`–`5` (or cycle with `Tab` / `Shift+Tab`), then cycle
+pick a **section** with the number keys `0`–`6` (or cycle with `Tab` / `Shift+Tab`), then cycle
 its **sub-tabs** with `←` / `→` (or `[` / `]`). In multi-panel views, `Ctrl+w` enters panel-focus
 mode (then `h`/`j`/`k`/`l` or arrows move focus, `Esc` exits) — the vi/tmux window model.
 
@@ -41,7 +41,7 @@ mode (then `h`/`j`/`k`/`l` or arrows move focus, `Esc` exits) — the vi/tmux wi
 | 1 | **Traffic** | Flow · EPP | **Flow**: Gateway → HTTPRoute → backend → pods, with InferencePool/EPP/SLO and the EPP-bypass diagnosis (`⏎` jumps to the backend model). **EPP**: scorers/weights, the picker, InferencePool endpoints, and request distribution |
 | 2 | **Serving** | Serving · Perf · Pods | **Serving**: running deployments in a sortable table — phase (`● serving` / `◑ starting` / `⚠ degraded` / `✗ failed` / `○ stopped`, cross-referenced from pods), engine, target, replicas, `@node`, tok/s; `o`/`O` sort, `⏎` → Scale/Restart/Stop/Objective/YAML/Logs. **Perf**: p95 latency QUEUE→PREFILL→DECODE→TPOT→E2E, tok/s, + SLO advisor. **Pods**: `llm-serving` pods (ready/phase/node/restarts) |
 | 3 | **Infra** | Nodes · Devices · Topology | **Nodes**: health (CPU/mem/disk/load + devices). **Devices**: per-device util/VRAM/temp/power. **Topology**: Canvas Gateway→EPP→Pool flow + device pressure heatmap |
-| 4 | **Deploy** | Library / Zoo | **Library** — provision, not runtime — two panels stacked (`Ctrl+w` switches focus). **Model List** (top): everything you can deploy — org-catalog feasibility (`✓ ready` / `⚙ needs-compile` / `✗ no-capacity`) + placement targets and store builds, grouped by family; `⏎` → Deploy/Compile. The deploy form fills options first, then `⏎` opens a **placement** picker — candidate nodes listed with free/total devices, util, mem, and schedulability — and picking one generates the manifest. **Activity** (bottom): a unified feed of compile Jobs (with % progress bar) and running/starting/failed deploy rollouts, each with a STARTED age (5m/3h/2d), serving node, and outcome; finished compile jobs auto-clean after 30 min; `⏎` → Logs/Delete. **Zoo**: the vendor (Furiosa/Rebellions) model zoo — public HF models auto-fetched from the [furiosa-ai HF org](https://huggingface.co/furiosa-ai) and [rbln-model-zoo](https://github.com/RBLN-SW/rbln-model-zoo) (bundled baseline via `scripts/fetch-zoo.sh`; `r` live-refreshes the Furiosa list via `curl`; override with `LMD_ZOO`). Each row shows compilable vendors (from the NPU compat list) and a situational STATUS (`● built` / `◐ compiling` / `⇊ prefetch` / `⇩ gated` / `○ available`); `o` sorts. Stacked below is the same **Activity** feed (compile + **prefetch** + deploy). `⏎` → **Prefetch** (download weights into the shared store cache) / **Compile→vendor**, then deploy the resulting build from Library |
+| 4 | **Deploy** | Library / Zoo | **Library** — provision, not runtime — two panels stacked (`Ctrl+w` switches focus). **Model List** (top): everything you can deploy — org-catalog feasibility (`✓ ready` / `⚙ needs-compile` / `✗ no-capacity`) + placement targets and store builds, grouped by family; `⏎` → Deploy/Compile, and on a store build also **Move** (`V`, relocate/rename inside the store) and **Remove** (`M`, delete the build). Both run as a Job you review as a manifest first, and both refuse while a Deployment is serving from that path. The deploy form fills options first, then `⏎` opens a **placement** picker — candidate nodes listed with free/total devices, util, mem, and schedulability — and picking one generates the manifest. **Activity** (bottom): a unified feed of compile Jobs (with % progress bar) and running/starting/failed deploy rollouts, each with a STARTED age (5m/3h/2d), serving node, and outcome; finished compile jobs auto-clean after 30 min; `⏎` → Logs/Delete. **Zoo**: the vendor (Furiosa/Rebellions) model zoo — public HF models auto-fetched from the [furiosa-ai HF org](https://huggingface.co/furiosa-ai) and [rbln-model-zoo](https://github.com/RBLN-SW/rbln-model-zoo) (bundled baseline via `scripts/fetch-zoo.sh`; `r` live-refreshes the Furiosa list via `curl`; override with `LMD_ZOO`). Each row shows compilable vendors (from the NPU compat list) and a situational STATUS (`● built` / `◐ compiling` / `⇊ prefetch` / `⇩ gated` / `○ available`); `o` sorts. Stacked below is the same **Activity** feed (compile + **prefetch** + deploy). `⏎` → **Prefetch** (download weights into the shared store cache) / **Compile→vendor**, then deploy the resulting build from Library |
 | 5 | **Events** | — | Kubernetes + llm-d events, newest first; `⏎` shows the full message |
 | 6 | **Setup** | — | Bootstrap **Doctor** for a fresh cluster — checks the llm-d platform prerequisites (Gateway API + Inference-Extension CRDs, `llm-d-gateway`, shared EPP Roles, `model-store` PVC, `hf-token` secret, accelerator device plugins, Prometheus) as `✓`/`!`/`✗`. `⏎` on a row acts by risk: objects lmd-top authors exactly (namespace, Gateway with the detected `gatewayClassName`) → review→apply; CRDs → `kubectl apply -f <upstream release URL>` (admin, confirm); site-specific / Helm-managed items (PVC, EPP Roles, secret, device plugins) → shows the exact command to run yourself. Read-only until you confirm |
 
@@ -105,7 +105,8 @@ LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # point at another cluster
 
 **Permission modes** (`--mode`, shown as a header badge) gate actions:
 `observe` (default, view only) → `debug` (adds logs, `l`) → `admin` (scale, restart, stop,
-compile/deploy apply, cordon, route rename/retarget) → `danger` (delete pod/job/route rule).
+compile/deploy apply, cordon, route rename/retarget, store move) → `danger` (delete
+pod/job/route rule, remove a build from the store).
 Mutating actions open a confirmation popup that defaults to **No**.
 Every applied mutation (scale, stop, restart, cordon, delete, route edit, apply) is appended
 to an **audit log** (`~/.config/lmd-top/audit.log`, or `$LMD_AUDIT`) with timestamp, mode,
@@ -115,8 +116,8 @@ action, target, and result — view it with `lmd-top --audit`.
 
 | | |
 |---|---|
-| Navigate | `0-5`/`Tab` section · `←`/`→` (`[ ]`) sub-tab · `Ctrl+w` then `hjkl`/arrows panel focus · `↑↓`/`kj` select · `g`/`G` top/bottom · `Ctrl+u`/`Ctrl+d` half-page · `Esc` back |
-| Act | `⏎`/`a` action menu (drill when none) · `p i r e m` cross-layer pivot (also in the menu as **Go: …**) · `/` filter · `:` command palette (jump to any view / run any display action) · `o`/`O` sort column / direction · `y` live YAML · `l` logs · menu → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (mode-gated `⊘`, default-No confirm) |
+| Navigate | `0-6`/`Tab` section · `←`/`→` (`[ ]`) sub-tab · `Ctrl+w` then `hjkl`/arrows panel focus · `↑↓`/`kj` select · `g`/`G` top/bottom · `Ctrl+u`/`Ctrl+d` half-page · `Esc` back |
+| Act | `⏎`/`a` action menu (drill when none) · `p i r e m` cross-layer pivot (also in the menu as **Go: …**) · `/` filter · `:` command palette (jump to any view / run any display action) · `o`/`O` sort column / direction · `y` live YAML · `l` logs · menu → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (mode-gated `⊘`, default-No confirm) · on a store row: `V` move · `M` remove |
 | Display | `t` theme · `f` animations · `z` zoom · `Space` pause · `A` alerts · `?` help · `q` quit · `:graf` Grafana · `R` reset session energy |
 
 **Environment.**
@@ -127,6 +128,17 @@ action, target, and result — view it with `lmd-top --audit`.
 - `LMD_W` / `LMD_H` — the `--render` size.
 - `LMD_COMPILE_IMAGE_RBLN`, `LMD_COMPILE_IMAGE_FURIOSA`, `LMD_SERVING_IMAGE` — container images for the generated compile/deploy manifests. Until set, those fields are `TODO-…` placeholders and the in-app apply (`a`) is blocked; `w` still saves the manifest to edit by hand.
 - `LMD_SAVE_DIR` — where `w` writes saved manifests (default: current dir).
+- `LMD_HISTORY` — compile/serving outcome log (default: `~/.config/lmd-top/history.jsonl`),
+  read back by `lmd-top --history`.
+- `LMD_COMPILE_ENV` — extra env injected into generated compile Jobs, as `K=V,K=V`. Intended
+  for vendor debug switches; RBLN builds on TVM, so `TVM_LOG_DEBUG=1` / `TVM_BACKTRACE=1`
+  reach the compiler. A flag the SDK rejects is classified as `vendor-flag` and kept out of
+  the option evidence, so a bad switch cannot teach the advisor that your options fail.
+- `LMD_RBLN_TOOLCHAIN` — a wheel directory in the shared store to install the RBLN toolchain
+  from, e.g. `/mnt/store/rbln-toolchain/0.10.3`. The compile Job then runs on
+  `python:3.10-slim` and `pip install --no-index --find-links=<dir>`, which pins every version
+  together and stops the build inheriting whatever the node's Python happens to have. Needs no
+  hostPath, no nodeSelector and no vendor registry credentials — just the wheels.
 - Optional `~/.config/lmd-top/lmd-top.yaml` customizes column order.
 
 **Colors and glyphs.** Color encodes severity or identity, while state is carried by a

@@ -372,8 +372,6 @@ pub(super) fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 fn help_overlay(f: &mut Frame) {
-    let area = centered(f.area(), 68, 26);
-    f.render_widget(Clear, area);
     let g = |k: &str, d: &str| {
         Line::from(vec![
             Span::styled(
@@ -419,6 +417,7 @@ fn help_overlay(f: &mut Frame) {
         sec("operations"),
         g("y / l", "YAML / logs (accelerators, also in the ⏎ menu)"),
         g("s S x", "scale / restart / stop"),
+        g("V / M", "store build: move / remove (Deploy▸Library, review first)"),
         g(
             "p i r e m",
             "pivot across pods, infra, routes, EPP, and models",
@@ -462,6 +461,24 @@ fn help_overlay(f: &mut Frame) {
             Span::styled("RNGD", Style::default().fg(Color::Cyan)),
         ]),
     ];
+    // Size the box from its content rather than a hardcoded height. The paragraph wraps, so a
+    // long line costs more than one row — a fixed height silently pushed the last block out of
+    // frame when a line was added, which is exactly what a keybinding list must not do.
+    const W: u16 = 68;
+    let inner = W.saturating_sub(2).max(1);
+    let rows: u16 = lines
+        .iter()
+        .map(|l| {
+            let w = l
+                .spans
+                .iter()
+                .map(|sp| unicode_width::UnicodeWidthStr::width(sp.content.as_ref()))
+                .sum::<usize>() as u16;
+            w / inner + 1
+        })
+        .sum();
+    let area = centered(f.area(), W, (rows + 2).min(f.area().height));
+    f.render_widget(Clear, area);
     f.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
