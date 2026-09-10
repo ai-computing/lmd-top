@@ -85,11 +85,16 @@ cfg = dict(
 # unknown kwarg by name, so try the candidates and keep the one it accepts.
 TP_KWARGS = ("rbln_tensor_parallel_size", "rbln_num_devices")
 tp = int(get("RBLN_TENSOR_PARALLEL_SIZE", "1"))
-attn = get("RBLN_ATTN_IMPL", "flash_attn")
+# No default here. An absent RBLN_ATTN_IMPL means "do not set rbln_attn_impl at all" and let
+# optimum-rbln choose — which is what the artifacts that work on this hardware were built
+# with. Defaulting to flash_attn here silently re-added the flag after the manifest had
+# deliberately omitted it: the default existed in two places and the recipe's copy won.
+attn = get("RBLN_ATTN_IMPL", "")
 if attn:
     cfg["rbln_attn_impl"] = attn
-if attn == "flash_attn":
-    cfg["rbln_kvcache_partition_len"] = int(get("RBLN_KVCACHE_PARTITION_LEN", "16384"))
+    # Partitioning is a flash_attn concept, so it only travels with an explicit choice.
+    if attn == "flash_attn":
+        cfg["rbln_kvcache_partition_len"] = int(get("RBLN_KVCACHE_PARTITION_LEN", "16384"))
 
 # create_runtimes=False: compile without claiming a device, so serving may hold the chips.
 def _from_pretrained(config):

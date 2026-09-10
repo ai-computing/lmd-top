@@ -7,15 +7,19 @@ from the build that succeeded.
 
 ---
 
-**Subject:** rebel-compiler 0.10.3 — "Error occurred while compiling the model" on a model
-that 0.10.2 compiled successfully on the same host
+**Subject:** RBLN SDK 0.11.0 — decoder-only compile fails ("Error occurred while compiling the
+model") on a model 0.10.2 compiled successfully on the same host
 
 Hello,
 
-We compile models for RBLN-CA22 as part of an llm-d deployment. A model that compiled
-successfully on this host under RBLN SDK **0.10.2** now fails under **0.10.3**, with the
-generic wrapper message and no further detail. We would like either guidance on the cause or
-access to a 0.10.2 bundle so we can proceed.
+We compile models for RBLN-CA22 as part of an llm-d deployment. **We need this to work on the
+current SDK (0.11.0) — we are not looking to pin an old version.**
+
+Decoder-only models (`RBLNLlamaForCausalLM` and friends) fail to compile under 0.11.0 with only
+the generic wrapper message. The same model, on the same host, with the same parameters,
+compiled successfully under 0.10.2, and that artifact is still serving. Meanwhile 0.11.0
+compiles a conditional-generation model on this same machine without trouble — so this is not a
+broken installation and not this environment.
 
 ## What worked (2026-06-01, SDK 0.10.2)
 
@@ -98,14 +102,15 @@ decoder-only models rather than to the SDK version or this machine:
 
 ## What we are asking for
 
-1. **A 0.10.2 wheel bundle**, so we can restore the configuration that demonstrably works
-   here. We already hold a matched 0.10.3 bundle, so the same delivery route is fine.
-2. Failing that, **a development build** (or a documented way to raise compiler log level in a
-   deploy build) so the underlying error becomes visible.
+1. **A fix (or a working configuration) for the decoder-only path on 0.11.0.** That is what we
+   actually need — we would rather not run an old SDK. If there is a parameter combination on
+   0.11.0 that compiles `RBLNLlamaForCausalLM` for RBLN-CA22 at 4 devices, we will take that.
+2. **A development build**, or a documented way to raise the compiler log level in a deploy
+   build, so the underlying error is visible. Every diagnostic flag we found
+   (`RBLN_COMPILER_LOG_LEVEL`, `RBLN_DEBUG_LEVEL`) is refused as dev-only, so we cannot see
+   past the wrapper message ourselves.
 3. Any known regression after 0.10.2 in the **decoder-only** compile path
-   (`RBLNLlamaForCausalLM` and friends) at `rbln_tensor_parallel_size=4`. Note the same SDK
-   version compiles a conditional-generation model on this host without trouble, so a
-   whole-SDK or host-level explanation is already ruled out.
+   (`RBLNLlamaForCausalLM` and friends) at `rbln_tensor_parallel_size=4`.
 
 Environment: Ubuntu, Python 3.10, RBLN-CA22 × 4 on the compile host; compilation performed
 without claiming devices (`rbln_create_runtimes=False`).
@@ -113,6 +118,23 @@ without claiming devices (`rbln_create_runtimes=False`).
 Thank you.
 
 ---
+
+## The exact 0.10.2 configuration, run on 0.11.0
+
+Same host, same model, same parameters as the 2026-06-01 success — only the SDK differs:
+
+```
+LMD_TOOLCHAIN optimum-rbln=0.11.0.post1 rebel-compiler=0.11.0 transformers=5.8.1 torch=2.11.0+cpu
+RBLN_CONFIG {'rbln_npu': 'RBLN-CA22', 'rbln_max_seq_len': 8192,
+             'rbln_batch_size': 1, 'rbln_tensor_parallel_size': 4}   (+ rbln_create_runtimes=False)
+INFO [rebel-compiler] RBLN SDK compiler version: 0.11.0
+  File "<frozen core.compilation._impl>", line 974, in compile
+RuntimeError: Error occurred while compiling the model
+```
+
+Note that no `rbln_attn_impl` and no `rbln_kvcache_partition_len` are passed here, matching the
+working build. We had been setting those on every earlier attempt, so this run closes the last
+gap in the parameter space.
 
 ## Control run — closed
 

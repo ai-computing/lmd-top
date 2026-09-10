@@ -419,7 +419,11 @@ fn passthrough_env() -> Vec<serde_yaml::Value> {
 fn rbln_param_env(form: &CompileForm) -> Vec<serde_yaml::Value> {
     form.fields
         .iter()
-        .filter(|f| !f.value.is_empty() && f.value != "none")
+        // Empty, "none" and "default" all mean "do not pass this parameter" — the recipe then
+        // omits it and the vendor library picks. That is not the same as passing a value the
+        // library would have chosen anyway: optimum-rbln branches on whether the kwarg is
+        // present, and the artifacts that work here were built without it.
+        .filter(|f| !f.value.is_empty() && f.value != "none" && f.value != "default")
         .filter_map(|f| {
             let key = match f.key.as_str() {
                 "tp" => "RBLN_TENSOR_PARALLEL_SIZE",
@@ -434,6 +438,80 @@ fn rbln_param_env(form: &CompileForm) -> Vec<serde_yaml::Value> {
             Some(env_val(key, f.value.clone()))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod attn_default_tests {
+    use super::*;
+
+    /// The recipe must not re-add a default the manifest deliberately omitted.
+    ///
+    /// This is a cross-language invariant and it broke once: the manifest stopped sending
+    /// RBLN_ATTN_IMPL, and `get("RBLN_ATTN_IMPL", "flash_attn")` in the recipe put the flag
+    /// straight back, so the compile ran with flash_attn while the operator had chosen
+    /// "default". A default that lives in two places has one too many.
+    #[test]
+    fn the_recipe_does_not_default_the_attention_impl() {
+        let recipe = include_str!("../../../assets/recipes/rbln-compile.py");
+        assert!(
+            recipe.contains(r#"get("RBLN_ATTN_IMPL", "")"#),
+            "the recipe must treat an absent RBLN_ATTN_IMPL as unset, not as flash_attn"
+        );
+        assert!(
+            !recipe.contains(r#"get("RBLN_ATTN_IMPL", "flash_attn")"#),
+            "the recipe re-adds a flag the manifest omitted"
+        );
+    }
+
+    /// "default" must produce *no* RBLN_ATTN_IMPL, so optimum-rbln applies its own choice —
+    /// which is what the two artifacts that work on this hardware were built with. A form
+    /// that can only say flash_attn or eager cannot reproduce them.
+    #[test]
+    fn attn_default_omits_the_flag_entirely() {
+        let names = |form: &CompileForm| -> Vec<String> {
+            rbln_param_env(form)
+                .iter()
+                .filter_map(|v| v["name"].as_str().map(|s| s.to_string()))
+                .collect()
+        };
+        let art = crate::collect::ModelArtifact {
+            model: "llama".into(),
+            family: "llama".into(),
+            engine: "vLLM".into(),
+            node: String::new(),
+            image: String::new(),
+            source: "meta-llama/Llama-3.1-8B-Instruct".into(),
+            mount: String::new(),
+            host_path: None,
+            opts: vec![],
+        };
+        let mut form = CompileForm {
+            model: "llama".into(),
+            model_id: "meta-llama/Llama-3.1-8B-Instruct".into(),
+            vendor: "rbln",
+            engine: "vLLM".into(),
+            fields: crate::app::compile::fields::vendor_compile_fields("rbln", &art),
+            cursor: 0,
+            editing: false,
+            dest: String::new(),
+        };
+        // Fresh form: attn defaults to "default".
+        assert_eq!(
+            form.fields.iter().find(|f| f.key == "attn").map(|f| f.value.as_str()),
+            Some("default"),
+            "the default must be the unset sentinel"
+        );
+        assert!(
+            !names(&form).contains(&"RBLN_ATTN_IMPL".to_string()),
+            "env was {:?}",
+            names(&form)
+        );
+        // An explicit choice still reaches the recipe.
+        if let Some(f) = form.fields.iter_mut().find(|f| f.key == "attn") {
+            f.value = "eager".into();
+        }
+        assert!(names(&form).contains(&"RBLN_ATTN_IMPL".to_string()));
+    }
 }
 
 #[cfg(test)]
