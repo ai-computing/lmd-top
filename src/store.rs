@@ -239,7 +239,8 @@ pub fn delete_manifest(ns: &str, pvc: &str, path: &str, size: &str) -> Manifest 
         .note(format!("Store maintenance — delete {} ({})", path, size))
         .note("Irreversible: the artifact is removed from the shared store.".to_string())
         .note(
-            "The inventory ConfigMap refreshes on the discovery CronJob's next run.".to_string(),
+            "Inventory is stale until discovery re-runs — use Rescan (r) to do it now."
+                .to_string(),
         )
         .push(Doc::new(job).note(format!("rm -rf {}/{}", STORE_MOUNT, path)))
 }
@@ -278,7 +279,8 @@ pub fn move_manifest(ns: &str, pvc: &str, src: &str, dest: &str) -> Manifest {
         .note(format!("Store maintenance — move {} → {}", src, dest))
         .note("Deployments that reference the old path will stop resolving it.".to_string())
         .note(
-            "The inventory ConfigMap refreshes on the discovery CronJob's next run.".to_string(),
+            "Inventory is stale until discovery re-runs — use Rescan (r) to do it now."
+                .to_string(),
         )
         .push(Doc::new(job).note(format!("mv {} {}", from, to)))
 }

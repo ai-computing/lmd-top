@@ -1,7 +1,7 @@
 # title: delete compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192
 # Store maintenance — delete compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192 (12G)
 # Irreversible: the artifact is removed from the shared store.
-# The inventory ConfigMap refreshes on the discovery CronJob's next run.
+# Inventory is stale until discovery re-runs — use Rescan (r) to do it now.
 # rm -rf /mnt/store/compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192
 apiVersion: batch/v1
 kind: Job

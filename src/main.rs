@@ -489,6 +489,16 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                 .map_err(|e| e.to_string());
             mk("delete-pod".into(), name, "delete", r)
         }
+        Pending::StoreRefresh => {
+            let r = kube::refresh_inventory(ns)
+                .map(|job| OkInfo {
+                    audit_detail: job.clone(),
+                    notify: format!("store re-scan started ({})", job),
+                    clear_preview: false,
+                })
+                .map_err(|e| e.to_string());
+            mk("store-refresh".into(), "model-inventory".into(), "store refresh", r)
+        }
         Pending::DeleteJob { name } => {
             let r = kube::delete_job(ns, &name)
                 .map(|_| OkInfo {
@@ -783,6 +793,7 @@ fn dispatch_action(
         // so `rm -rf` is reviewable (and dry-run validatable) before it ever runs.
         Action::StoreDelete => app.open_store_delete(),
         Action::StoreMove => app.open_store_move(),
+        Action::StoreRefresh => app.confirm = Some(Pending::StoreRefresh),
         Action::RouteDelete => {
             if require_action(app, action) {
                 // Same rule as Scale: the target is the route the menu was opened on (BUG-02).
