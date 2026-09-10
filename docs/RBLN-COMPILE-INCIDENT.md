@@ -203,6 +203,39 @@ lmd-top 레시피는 이미 `rbln_create_runtimes=False` 를 넣고 있다 — �
 남은 변수는 **둘뿐이다: 툴체인 버전(0.10.2 vs 0.10.3), 그리고 모델.** 성공 사례는 전부
 Llama-3.1 계열 8B 였고, 내 실패는 전부 Qwen 등 다른 계열이었다.
 
+## 옵션 공간 종료: 0.11 에서 검증된 설정 그대로도 실패
+
+마지막까지 남아 있던 변수는 **`rbln_attn_impl` 을 아예 넘기지 않는 것**이었다. 동작하는 두
+아티팩트는 그 플래그를 설정하지 않았는데, lmd-top 은 항상 설정하고 있었고 폼에 "미설정"이라는
+선택지가 아예 없었다. 기본값이 **두 곳**(폼과 레시피)에 있어서, 매니페스트에서 env 를 빼도
+레시피의 `get("RBLN_ATTN_IMPL", "flash_attn")` 이 다시 채워 넣었다.
+
+둘 다 고치고 KONI-Llama3.1-8B(0.10.2 로 성공한 그 모델)를 0.11 에서 돌린 결과:
+
+```
+RBLN_CONFIG {'rbln_npu': 'RBLN-CA22', 'rbln_max_seq_len': 8192,
+             'rbln_batch_size': 1, 'rbln_tensor_parallel_size': 4}   (+ create_runtimes=False)
+→ RuntimeError @ <frozen core.compilation._impl>:974
+```
+
+성공 스크립트와 **완전히 같은 설정**이고, 여전히 실패한다.
+
+### 이제 닫힌 축 전체
+
+| 축 | 시험한 범위 | 판정 |
+|---|---|---|
+| attn_impl | flash_attn · eager · **미설정** | 원인 아님 |
+| kvpart | 4096 · 미설정 | 원인 아님 |
+| tp | 1 · 4 | 원인 아님 |
+| max-seq-len | 2048 · 4096 · 8192 | 원인 아님 |
+| 모델 | Qwen2.5-0.5B · Qwen3-4B · Llama-3.2-1B · Llama-3.1-8B · KONI-8B | 원인 아님 |
+| SDK | 0.10.3 · 0.11.0 | 둘 다 실패 (0.10.2 만 성공) |
+| 실행 환경 | 노드 hostPath · 깨끗한 컨테이너 | 원인 아님 |
+| 설치 상태 | Gemma4 가 0.11 로 성공 (대조군) | 정상 |
+
+**내가 할 수 있는 실험은 끝났다.** 남은 것은 Rebellions 쪽 수정이며, 요청은 "0.10.2 번들"이
+아니라 **"0.11 의 decoder-only 경로를 고쳐달라"** 다 — 구버전으로 내려갈 이유가 없다.
+
 ## 정정: 0.11.0 은 이 호스트에서 **동작한다** — 회귀는 decoder-only 경로에 있다
 
 새로 만든 provenance 프로브(Serving▸`P`)로 이 노드의 아티팩트를 직접 읽었더니, 앞선 결론을

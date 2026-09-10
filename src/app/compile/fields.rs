@@ -77,9 +77,17 @@ pub const RBLN_COMPILE_FIELDS: &[CompileFieldDef] = &[
     CompileFieldDef::opt(
         "attn",
         "attn-impl",
-        "flash_attn",
-        &["flash_attn", "eager"],
-        "Attention implementation: flash_attn for SRAM optimized path, eager for PagedAttention.",
+        // "default" = do not pass rbln_attn_impl at all and let optimum-rbln choose.
+        //
+        // This is the default because it is what the builds that actually work on this
+        // hardware did: neither hand-compiled artifact set the flag, while every failing
+        // compile from this tool forced one. A form that cannot express "unset" cannot
+        // reproduce a known-good build.
+        "default",
+        &["default", "flash_attn", "eager"],
+        "Attention implementation. default lets optimum-rbln choose (what the working \
+         hand-built artifacts did); flash_attn is the SRAM-optimised path; eager is \
+         PagedAttention.",
     ),
     CompileFieldDef::num(
         "kvpart",
