@@ -84,6 +84,36 @@ pub fn compile_preflight(
         ));
     }
 
+    // Surface the toolchain that produced the builds of this family that already exist.
+    //
+    // This is the check that would have shortened the RBLN investigation by hours: the only
+    // artifact that worked on this hardware recorded optimum-rbln 0.10.2, while every rebuild
+    // used a newer one, and nothing in the tool ever said so. It is information, not a
+    // verdict — we cannot know what version the Job will resolve until it runs — so it always
+    // passes, and only appears when a build of the family actually carries provenance.
+    let known: Vec<&str> = {
+        let mut v: Vec<&str> = stored
+            .iter()
+            .filter(|s| s.family == crate::collect::model_family(&form.model_id, &form.model_id))
+            .filter(|s| s.format == form.vendor)
+            .map(|s| s.built_with.trim())
+            .filter(|b| !b.is_empty() && *b != "-")
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    if !known.is_empty() {
+        out.push((
+            true,
+            format!(
+                "toolchain: 이 계열의 기존 빌드는 {} 로 만들어졌음 — 재현하려면 같은 버전을 쓰라 \
+                 (LMD_RBLN_TOOLCHAIN)",
+                known.join(", ")
+            ),
+        ));
+    }
+
     if form.vendor == "furiosa" {
         // fxb build compiles checkpoints from the furiosa-ai org with quantization
         let quant = ["fp8", "nvfp4", "-w8", "-w4", "awq", "gptq", "int4", "int8"]
