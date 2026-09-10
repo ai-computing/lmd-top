@@ -1872,6 +1872,44 @@ mod tests {
         }
     }
 
+    /// The help overlay is a fixed-height box listing fixed content, so adding a line can
+    /// silently push the last one outside the frame. Render it and look for both ends.
+    #[test]
+    fn help_overlay_shows_every_line_it_lists() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let _g = crate::ui::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut a = App::new();
+        a.help = true;
+        let mut fx = crate::ui::FxState::disabled();
+        let mut t = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if let Some(c) = buf.cell((x, y)) {
+                    text.push_str(c.symbol());
+                }
+            }
+            text.push('\n');
+        }
+        // A frame shorter than the content must clamp, not panic or draw outside it.
+        let mut short = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        short.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+
+        for want in [
+            "0-6 / Tab",     // first entry
+            "scale / restart / stop",
+            "V / M",         // the store actions, added last to the operations block
+            "util/mem/temp", // the final block, which a too-short box would clip
+        ] {
+            assert!(text.contains(want), "help overlay is missing {:?}", want);
+        }
+    }
+
     #[test]
     fn compile_progress_bar_renders() {
         use crate::collect::CompileJob;
