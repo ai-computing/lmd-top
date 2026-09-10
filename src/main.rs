@@ -22,6 +22,7 @@ mod ops;
 mod palette;
 mod prom;
 mod quote;
+mod store;
 mod ui;
 
 use anyhow::Result;
@@ -778,6 +779,10 @@ fn dispatch_action(
                 app.open_route_retarget();
             }
         }
+        // Shared-store housekeeping. Both build a Job manifest and hand it to the preview,
+        // so `rm -rf` is reviewable (and dry-run validatable) before it ever runs.
+        Action::StoreDelete => app.open_store_delete(),
+        Action::StoreMove => app.open_store_move(),
         Action::RouteDelete => {
             if require_action(app, action) {
                 // Same rule as Scale: the target is the route the menu was opened on (BUG-02).
@@ -1337,6 +1342,23 @@ fn ui_loop(
                                 if let Some(f) = app.secret_form.as_mut() {
                                     f.push(c);
                                 }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    // Shared-store move form — a single editable destination path.
+                    // Enter only builds the manifest; applying it is a further keystroke in
+                    // the preview, so a typo cannot move a 17GB artifact on its own.
+                    if top == Some(ui::Overlay::StoreForm) {
+                        match k.code {
+                            KeyCode::Esc => app.store_form = None,
+                            KeyCode::Enter => app.submit_store_move(),
+                            KeyCode::Backspace => {
+                                app.store_form.as_mut().unwrap().value.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                app.store_form.as_mut().unwrap().value.push(c)
                             }
                             _ => {}
                         }

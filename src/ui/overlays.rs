@@ -485,6 +485,53 @@ pub(super) fn route_form_overlay(f: &mut Frame, app: &App) {
     );
 }
 
+/// Shared-store move form — one editable destination path, with the source shown above it.
+pub(super) fn store_form_overlay(f: &mut Frame, app: &App) {
+    let Some(form) = &app.store_form else { return };
+    let full = f.area();
+    let area = centered(full, 84, 10u16.min(full.height.saturating_sub(2)));
+    f.render_widget(Clear, area);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("  build  ", Style::default().fg(C_DIM())),
+        Span::styled(
+            form.repo.clone(),
+            Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("   {}", form.size), Style::default().fg(C_DIM())),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  from   ", Style::default().fg(C_DIM())),
+        Span::styled(form.src.clone(), Style::default().fg(Color::Gray)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Destination (relative to the store root):",
+        Style::default().fg(C_DIM()),
+    )));
+    lines.push(Line::from(vec![
+        Span::raw("    "),
+        Span::styled(
+            format!("{}_", form.value),
+            Style::default()
+                .fg(C_WARN())
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Must stay under hub/ or compiled/ — the move runs as a Job you review first.",
+        Style::default().fg(C_DIM()),
+    )));
+    f.render_widget(
+        Paragraph::new(lines).block(
+            block("store move · type · Enter preview · Backspace delete · Esc cancel")
+                .border_style(Style::default().fg(C_WARN())),
+        ),
+        area,
+    );
+}
+
 /// Enter 컨텍스트 액션 메뉴 오버레이 — 가능한 동작을 라벨+설명+단축키로. 발견 가능한 UX.
 pub(super) fn action_menu_overlay(f: &mut Frame, app: &App) {
     let Some(menu) = &app.action_menu else { return };

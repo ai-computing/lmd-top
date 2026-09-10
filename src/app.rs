@@ -18,6 +18,7 @@ mod select;
 mod setup;
 mod sort;
 mod state;
+mod store;
 mod zoo;
 
 pub use setup::{CheckState, SetupFix};
@@ -507,6 +508,7 @@ pub struct App {
     pub exit_confirm: bool, // quit confirmation popup
     pub inflight: Option<String>, // label of an in-flight mutating operation (worker thread) — shows spinner. None=none
     pub route_form: Option<RouteForm>, // route edit form (rename/retarget)
+    pub store_form: Option<crate::ops::StoreForm>, // shared-store move form (destination path)
     pub palette: Option<crate::palette::Palette>, // command palette (open with `:` for fuzzy search of views/display actions)
     // ── Cross-layer drill ──
     pub nav_stack: Vec<NavState>, // pivot breadcrumb (retraced with esc)
@@ -602,6 +604,7 @@ impl App {
             exit_confirm: false,
             inflight: None,
             route_form: None,
+            store_form: None,
             palette: None,
             nav_stack: Vec::new(),
             perf_detail: None,

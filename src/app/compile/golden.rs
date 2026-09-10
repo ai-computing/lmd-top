@@ -93,6 +93,19 @@ const CASES: &[(&str, &str, &'static str, &str)] = &[
     ("deploy-furiosa-qwen", "deploy", "furiosa", "furiosa-ai/Qwen3-4B-FP8"),
     ("deploy-gpu-qwen", "deploy", "gpu", "Qwen/Qwen2.5-0.5B-Instruct"),
     ("deploy-gpu-llama", "deploy", "gpu", "meta-llama/Llama-3.1-8B-Instruct"),
+    // Store maintenance: the `model` column carries the store path instead of an HF id.
+    (
+        "store-delete",
+        "store-delete",
+        "",
+        "compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192",
+    ),
+    (
+        "store-move",
+        "store-move",
+        "",
+        "compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192",
+    ),
 ];
 
 fn generate(op: &str, vendor: &'static str, model: &str) -> Result<(String, String), String> {
@@ -103,6 +116,22 @@ fn generate(op: &str, vendor: &'static str, model: &str) -> Result<(String, Stri
     match op {
         "compile" => a.plan_compile_for_model(model, vendor, &[]),
         "deploy" => a.plan_deploy_for_model(model, vendor, &[]),
+        // `rm -rf` and `mv` in a Job: worth pinning byte-for-byte, and worth having the API
+        // server confirm it would accept (scripts/validate-golden.sh).
+        "store-delete" => Ok((
+            format!("delete {}", model),
+            crate::store::delete_manifest("llm-serving", "model-store", model, "12G").to_yaml(),
+        )),
+        "store-move" => Ok((
+            format!("move {}", model),
+            crate::store::move_manifest(
+                "llm-serving",
+                "model-store",
+                model,
+                "compiled/archive/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192",
+            )
+            .to_yaml(),
+        )),
         _ => unreachable!(),
     }
 }
@@ -181,6 +210,51 @@ fn manifests_carry_the_right_semantics() {
         // The manifest is about the requested model (BUG-17 guard, as data not substring luck).
         let repo_dir = model.replace('/', "--");
         let slug = model.replace(['/', '.'], "-").to_lowercase();
+        if op.starts_with("store-") {
+            // Store maintenance: one Job, the path under the store mount, and — the point of
+            // the whole module — an argv command with no shell to reinterpret the path.
+            let kinds: Vec<&str> = docs.iter().filter_map(|d| d["kind"].as_str()).collect();
+            assert_eq!(kinds, vec!["Job"], "{}: store op is a single Job", name);
+            let pod = &docs[0]["spec"]["template"]["spec"];
+            assert_eq!(
+                pod["volumes"][0]["persistentVolumeClaim"]["claimName"].as_str(),
+                Some("model-store"),
+                "{}: must mount the store PVC",
+                name
+            );
+            let argv = |v: &serde_yaml::Value| -> Vec<String> {
+                v.as_sequence()
+                    .unwrap_or_else(|| panic!("{}: command must be an argv sequence", name))
+                    .iter()
+                    .map(|x| x.as_str().unwrap_or_default().to_string())
+                    .collect()
+            };
+            let cmd = argv(&pod["containers"][0]["command"]);
+            for shell in ["sh", "bash", "-c"] {
+                assert!(
+                    !cmd.iter().any(|a| a == shell),
+                    "{}: {:?} would put the path through a shell",
+                    name,
+                    cmd
+                );
+            }
+            assert!(
+                cmd.iter().any(|a| a == &format!("/mnt/store/{}", model)),
+                "{}: the store path must appear as its own argv element, got {:?}",
+                name,
+                cmd
+            );
+            match *op {
+                "store-delete" => assert_eq!(cmd[0], "rm", "{}: {:?}", name, cmd),
+                "store-move" => {
+                    assert_eq!(cmd[0], "mv", "{}: {:?}", name, cmd);
+                    let init = argv(&pod["initContainers"][0]["command"]);
+                    assert_eq!(init[0], "mkdir", "{}: parent must be created first", name);
+                }
+                _ => unreachable!(),
+            }
+            continue;
+        }
         if *op == "compile" {
             assert!(
                 yaml.contains(&repo_dir),
