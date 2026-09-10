@@ -76,7 +76,7 @@ impl Accel {
         crate::accel::by_kind(self.kind)
             .caps
             .throttle
-            .then(|| self.throttle > 0.0)
+            .then_some(self.throttle > 0.0)
     }
 
     /// Does this accelerator report cumulative energy (so session Wh is meaningful)?
@@ -976,7 +976,7 @@ async fn collect_pack(prom: &str, pack: &'static crate::accel::Pack) -> Vec<Acce
         .position(|sp| sp.field == Field::Util)
         .expect("every pack declares a Util series");
     let mut by_field: BTreeMap<Field, BTreeMap<String, Series>> = BTreeMap::new();
-    for (sp, r) in pack.series.iter().zip(results.into_iter()) {
+    for (sp, r) in pack.series.iter().zip(results) {
         let rows = r.unwrap_or_default();
         by_field.insert(sp.field, map_by(rows, pack.labels.key));
     }

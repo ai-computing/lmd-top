@@ -263,10 +263,13 @@ pub fn advise(history: &[Record], model: &str, vendor: &str) -> Advice {
 /// Each remedy changes exactly one parameter, so a failure is narrowed rather than replaced by
 /// a different unknown. Returns the new options plus (the key changed, how it changed) for the
 /// explanation. `None` when the cause is environmental — no option set fixes a missing token.
+/// An option set worth trying next, paired with (label, reason) for why it is worth trying.
+type Experiment = (BTreeMap<String, String>, (&'static str, String));
+
 fn next_experiment(
     failed: &BTreeMap<String, String>,
     failure_kind: &str,
-) -> Option<(BTreeMap<String, String>, (&'static str, String))> {
+) -> Option<Experiment> {
     let mut opts = failed.clone();
     let halve = |v: Option<&String>| -> Option<i64> {
         let n = v?.parse::<i64>().ok()?;

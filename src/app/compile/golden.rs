@@ -48,23 +48,24 @@ fn fixture() -> Snapshot {
         mem_temp: f64::NAN,
         energy_mj: f64::NAN,
     };
-    let mut s = Snapshot::default();
-    s.ts = 1_700_000_000;
-    s.nodes = vec![
-        node("npu-1", "RBLN drv3.0.0 · RNGD drv2026.3.0"),
-        node("gpu-1", ""),
-    ];
-    s.accel = vec![
-        dev(AccelKind::Rbln, "rbln0", "npu-1"),
-        dev(AccelKind::Rbln, "rbln1", "npu-1"),
-        dev(AccelKind::Rbln, "rbln2", "npu-1"),
-        dev(AccelKind::Rbln, "rbln3", "npu-1"),
-        dev(AccelKind::Rngd, "npu0", "npu-1"),
-        dev(AccelKind::Rngd, "npu1", "npu-1"),
-        dev(AccelKind::Gpu, "gpu0", "gpu-1"),
-    ];
-    s.pvcs = vec!["model-store".into()];
-    s
+    Snapshot {
+        ts: 1_700_000_000,
+        nodes: vec![
+            node("npu-1", "RBLN drv3.0.0 · RNGD drv2026.3.0"),
+            node("gpu-1", ""),
+        ],
+        accel: vec![
+            dev(AccelKind::Rbln, "rbln0", "npu-1"),
+            dev(AccelKind::Rbln, "rbln1", "npu-1"),
+            dev(AccelKind::Rbln, "rbln2", "npu-1"),
+            dev(AccelKind::Rbln, "rbln3", "npu-1"),
+            dev(AccelKind::Rngd, "npu0", "npu-1"),
+            dev(AccelKind::Rngd, "npu1", "npu-1"),
+            dev(AccelKind::Gpu, "gpu0", "gpu-1"),
+        ],
+        pvcs: vec!["model-store".into()],
+        ..Default::default()
+    }
 }
 
 fn app() -> App {
@@ -83,7 +84,7 @@ fn app() -> App {
 }
 
 /// (name, op, vendor, model) — the combinations worth pinning.
-const CASES: &[(&str, &str, &'static str, &str)] = &[
+const CASES: &[(&str, &str, &str, &str)] = &[
     ("compile-rbln-qwen", "compile", "rbln", "Qwen/Qwen2.5-0.5B-Instruct"),
     ("compile-rbln-llama", "compile", "rbln", "meta-llama/Llama-3.1-8B-Instruct"),
     ("compile-furiosa-qwen", "compile", "furiosa", "furiosa-ai/Qwen3-4B-FP8"),
