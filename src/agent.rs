@@ -35,7 +35,10 @@ struct AgentState {
     nodes: Vec<Node>,
     accelerators: Vec<Acc>,
     models: Vec<Mdl>,
+    pods: Vec<Pod>,
     artifacts: Vec<Artifact>,
+    /// Shared model store free space, or null when the discovery scan does not report it.
+    store: Option<StoreCap>,
     stored: Vec<Stored>,
     compiles: Vec<Compile>,
     pools: Vec<Pl>,
@@ -169,6 +172,31 @@ struct Stored {
     built_with: Option<String>,
 }
 
+/// Shared model store capacity as measured inside the discovery scan (`df`), not the PVC's
+/// requested size — on an SMB backend those are unrelated.
+#[derive(Serialize)]
+struct StoreCap {
+    total_bytes: u64,
+    used_bytes: u64,
+    avail_bytes: u64,
+    used_pct: f64,
+}
+
+/// Serving pods in the namespace — the layer an agent needs to reason about a restart, a
+/// pending scheduling failure, or a crash loop. The TUI has always had a Pods view; the agent
+/// state did not, so anything automated was blind below the Deployment.
+#[derive(Serialize)]
+struct Pod {
+    name: String,
+    phase: String,
+    /// Container readiness as the API reports it, e.g. "1/1".
+    ready: String,
+    node: String,
+    restarts: i64,
+    /// Seconds since creation, or null when the timestamp could not be parsed.
+    age_secs: Option<u64>,
+}
+
 /// In-progress/recent compile Jobs (compile-*) — status, elapsed time, progress hints.
 #[derive(Serialize)]
 struct Compile {
@@ -295,6 +323,27 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             size: m.size.clone(),
             path: m.path.clone(),
             built_with: noneify(&m.built_with),
+        })
+        .collect();
+
+    let store = s.store_capacity.map(|c| StoreCap {
+        total_bytes: c.total_bytes,
+        used_bytes: c.used_bytes,
+        avail_bytes: c.avail_bytes,
+        used_pct: (c.used_pct() * 10.0).round() / 10.0,
+    });
+
+    let pods = s
+        .pods
+        .iter()
+        .map(|p| Pod {
+            name: p.name.clone(),
+            phase: p.phase.clone(),
+            ready: p.ready.clone(),
+            node: p.node.clone(),
+            restarts: p.restarts,
+            // 0 is the collector's "unknown", and an agent must not read that as "just created".
+            age_secs: (p.age_secs > 0).then_some(p.age_secs),
         })
         .collect();
 
@@ -533,6 +582,8 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
         accelerators,
         models,
         artifacts,
+        pods,
+        store,
         stored,
         compiles,
         pools,
@@ -583,10 +634,47 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&s).expect("valid json");
         // Contract: schema version v2, top-level keys, node.npu field exposed.
         assert_eq!(v["schema"], "lmd-top/agent-state/v2");
-        for k in ["cluster", "nodes", "artifacts", "stored", "models"] {
+        for k in ["cluster", "nodes", "artifacts", "stored", "models", "pods"] {
             assert!(v.get(k).is_some(), "top-level key '{}' present", k);
         }
         assert_eq!(v["nodes"][0]["name"], "node-a");
         assert_eq!(v["nodes"][0]["npu"], "Furiosa RNGD drv2026.3.0");
+    }
+
+    /// Pods reach the agent with the fields an automation needs to act on them, and an
+    /// unknown age is null rather than a zero that reads as "just started".
+    #[test]
+    fn pods_are_exported_with_unknown_age_as_null() {
+        use crate::collect::PodRow;
+        let mut snap = Snapshot::default();
+        snap.pods.push(PodRow {
+            name: "vllm-rbln-koni-abc123".into(),
+            phase: "Running".into(),
+            ready: "1/1".into(),
+            node: "etri-001".into(),
+            restarts: 2,
+            age_secs: 3600,
+        });
+        snap.pods.push(PodRow {
+            name: "no-timestamp".into(),
+            phase: "Pending".into(),
+            ready: "0/1".into(),
+            node: "-".into(),
+            restarts: 0,
+            age_secs: 0, // the collector's "unknown"
+        });
+        let s = to_json(&snap, &Config::default()).expect("serialize");
+        let v: serde_json::Value = serde_json::from_str(&s).expect("valid json");
+        assert_eq!(v["pods"].as_array().map(|a| a.len()), Some(2));
+        assert_eq!(v["pods"][0]["name"], "vllm-rbln-koni-abc123");
+        assert_eq!(v["pods"][0]["phase"], "Running");
+        assert_eq!(v["pods"][0]["ready"], "1/1");
+        assert_eq!(v["pods"][0]["node"], "etri-001");
+        assert_eq!(v["pods"][0]["restarts"], 2);
+        assert_eq!(v["pods"][0]["age_secs"], 3600);
+        assert!(
+            v["pods"][1]["age_secs"].is_null(),
+            "an unparsed timestamp must be null, not 0"
+        );
     }
 }
