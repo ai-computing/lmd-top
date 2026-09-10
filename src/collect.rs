@@ -184,6 +184,30 @@ pub struct StoredModel {
     pub built_with: String,
 }
 
+/// Shared store capacity, as measured inside the discovery scan.
+///
+/// A PVC's `status.capacity` reports the *requested* size, which on this cluster's SMB backend
+/// is unrelated to what is actually free. Only a pod with the claim mounted can measure it, and
+/// the discovery scan already is one — so it publishes `df` alongside the inventory.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StoreCapacity {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub avail_bytes: u64,
+}
+
+impl StoreCapacity {
+    /// Used share of the filesystem, 0-100. Uses used/(used+avail) rather than used/total:
+    /// reserved blocks make those differ, and the second is what the operator can act on.
+    pub fn used_pct(&self) -> f64 {
+        let usable = self.used_bytes.saturating_add(self.avail_bytes);
+        if usable == 0 {
+            return 0.0;
+        }
+        self.used_bytes as f64 * 100.0 / usable as f64
+    }
+}
+
 /// 컴파일 Job 진행 상태(Deploy 뷰 '진행 중 컴파일' 패널). `compile-*` Job 을 요약.
 #[derive(Clone, Default)]
 pub struct CompileJob {
@@ -273,6 +297,8 @@ pub struct Snapshot {
     pub models: Vec<ModelRow>,
     pub artifacts: Vec<ModelArtifact>, // Store 뷰: 모델 저장 위치 + 컴파일/서빙 옵션
     pub stored: Vec<StoredModel>, // 공유 스토어 인벤토리(model-inventory ConfigMap) — 배포 무관
+    /// 공유 스토어 여유 용량(디스커버리 스캔이 df 로 실측). None=미관측(구버전 스캔 등).
+    pub store_capacity: Option<StoreCapacity>,
     pub compiles: Vec<CompileJob>, // 진행/최근 컴파일 Job(compile-*) — Deploy 뷰 모니터 패널
     pub pods: Vec<PodRow>,
     pub events: Vec<EventRow>,
@@ -2000,7 +2026,28 @@ async fn collect_stored(cfg: &Config, snap: &mut Snapshot) {
         if let Some(txt) = v["data"]["inventory"].as_str() {
             snap.stored = parse_inventory(txt);
         }
+        snap.store_capacity = v["data"]["capacity"]
+            .as_str()
+            .and_then(parse_store_capacity);
     }
+}
+
+/// Parse the scan's `"<total> <used> <avail>"` byte triple. None when absent or malformed —
+/// a scan predating the capacity measurement writes nothing, and the view simply omits it.
+fn parse_store_capacity(txt: &str) -> Option<StoreCapacity> {
+    let mut it = txt.split_whitespace();
+    let (t, u, a) = (it.next()?, it.next()?, it.next()?);
+    let (total_bytes, used_bytes, avail_bytes) =
+        (t.parse().ok()?, u.parse().ok()?, a.parse().ok()?);
+    // A filesystem reporting zero total is not a filesystem we can say anything useful about.
+    if total_bytes == 0 {
+        return None;
+    }
+    Some(StoreCapacity {
+        total_bytes,
+        used_bytes,
+        avail_bytes,
+    })
 }
 
 /// Parse the discovery scan's pipe-separated inventory.
@@ -2557,6 +2604,48 @@ mod tests {
     fn strip_variant_tags_drops_hw_and_precision() {
         assert_eq!(strip_variant_tags("vllm-koni-rbln"), "koni");
         assert_eq!(strip_variant_tags("Model-BF16-Instruct"), "model");
+    }
+
+    /// The exact string the cluster's scan publishes, and the ways it can be absent.
+    #[test]
+    fn store_capacity_parses_and_degrades() {
+        // Measured on the real store: 52.3T total, 6.4T used, 45.9T available.
+        let c = parse_store_capacity("57504801730560 7038588125184 50466213605376")
+            .expect("the live format must parse");
+        assert_eq!(c.total_bytes, 57_504_801_730_560);
+        assert_eq!(c.used_bytes, 7_038_588_125_184);
+        assert_eq!(c.avail_bytes, 50_466_213_605_376);
+        // df -h reports 12% used; used/(used+avail) must land there.
+        assert!(
+            (c.used_pct() - 12.24).abs() < 0.1,
+            "used_pct was {}",
+            c.used_pct()
+        );
+
+        // A scan predating the measurement writes an empty file, and older scans write no key.
+        assert!(parse_store_capacity("").is_none());
+        assert!(parse_store_capacity("   \n").is_none());
+        // Malformed input must not become a misleading zero-capacity bar.
+        assert!(parse_store_capacity("1 2").is_none(), "too few fields");
+        assert!(parse_store_capacity("a b c").is_none(), "non-numeric");
+        assert!(parse_store_capacity("0 0 0").is_none(), "zero total says nothing");
+    }
+
+    /// A full store must not divide by zero, and a store with no reserved blocks must read 100%.
+    #[test]
+    fn store_capacity_pct_edges() {
+        let full = StoreCapacity {
+            total_bytes: 100,
+            used_bytes: 100,
+            avail_bytes: 0,
+        };
+        assert!((full.used_pct() - 100.0).abs() < f64::EPSILON);
+        let empty = StoreCapacity {
+            total_bytes: 100,
+            used_bytes: 0,
+            avail_bytes: 0,
+        };
+        assert_eq!(empty.used_pct(), 0.0, "must not divide by zero");
     }
 
     /// The exact bytes the cluster's discovery CronJob publishes today, plus the seventh

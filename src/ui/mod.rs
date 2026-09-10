@@ -3902,7 +3902,7 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
         LibItem::Stored(k) => app.snap.stored[k].family.to_lowercase(),
     };
     let mut ll: Vec<Line> = Vec::new();
-    ll.push(Line::from(vec![
+    let mut legend = vec![
         Span::styled("catalog: ", Style::default().fg(C_DIM())),
         Span::styled("✓ ready ", Style::default().fg(C_OK())),
         Span::styled("⚙ needs-compile ", Style::default().fg(C_WARN())),
@@ -3912,7 +3912,32 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
         tag("HF", C_ACC()),
         tag("RBLN", Color::Magenta),
         tag("RNGD", C_WARN()),
-    ]));
+    ];
+    // Free space on the shared store. It belongs on this view because this is where builds are
+    // created and removed — reclaiming space is pointless if you cannot see how much there is.
+    if let Some(cap) = app.snap.store_capacity {
+        let pct = cap.used_pct();
+        legend.push(Span::styled("  disk ", Style::default().fg(C_DIM())));
+        legend.push(Span::styled(
+            format!("{} free", iec_bytes(cap.avail_bytes)),
+            Style::default().fg(if pct >= 90.0 {
+                C_BAD()
+            } else if pct >= 75.0 {
+                C_WARN()
+            } else {
+                C_OK()
+            }),
+        ));
+        legend.push(Span::styled(
+            format!(
+                " / {} ({:.0}% used)",
+                iec_bytes(cap.total_bytes),
+                pct
+            ),
+            Style::default().fg(C_DIM()),
+        ));
+    }
+    ll.push(Line::from(legend));
     if items.is_empty() {
         ll.push(Line::from(Span::styled(
             "(배포 가능한 모델 없음 — catalog/models.yaml 또는 스토어 인벤토리)",

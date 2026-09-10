@@ -169,6 +169,47 @@ mod tests {
         assert!(d.contains("optimum-rbln=0.10.2"), "with the value");
     }
 
+    /// Free space belongs on the view where builds are created and removed. Render it.
+    #[test]
+    fn store_free_space_is_shown_on_the_library_view() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let _g = crate::ui::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut a = app_with_store();
+        a.snap.store_capacity = Some(crate::collect::StoreCapacity {
+            total_bytes: 57_504_801_730_560,
+            used_bytes: 7_038_588_125_184,
+            avail_bytes: 50_466_213_605_376,
+        });
+        let render = |a: &App| {
+            let mut fx = crate::ui::FxState::disabled();
+            let mut t = Terminal::new(TestBackend::new(180, 40)).unwrap();
+            t.draw(|f| crate::ui::draw(f, a, &mut fx)).unwrap();
+            let buf = t.backend().buffer().clone();
+            let mut s = String::new();
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    if let Some(c) = buf.cell((x, y)) {
+                        s.push_str(c.symbol());
+                    }
+                }
+                s.push('\n');
+            }
+            s
+        };
+        let screen = render(&a);
+        assert!(screen.contains("46T free"), "free space missing from Library");
+        assert!(screen.contains("52T"), "total missing");
+        assert!(screen.contains("12% used"), "used share missing");
+
+        // An unmeasured store must simply omit the figures, not print zeros.
+        a.snap.store_capacity = None;
+        let bare = render(&a);
+        assert!(!bare.contains("free"), "must not invent a figure when unmeasured");
+    }
+
     /// A build whose provenance the scan could not read must say so, not show a blank.
     #[test]
     fn unknown_provenance_is_labelled_not_blank() {
