@@ -528,6 +528,14 @@ pub struct App {
     pub inflight: Option<String>, // label of an in-flight mutating operation (worker thread) — shows spinner. None=none
     pub route_form: Option<RouteForm>, // route edit form (rename/retarget)
     pub store_form: Option<crate::ops::StoreForm>, // shared-store move form (destination path)
+    /// Replica counts we have just applied, held outside the snapshot.
+    ///
+    /// The main loop overwrites `snap` from the collector at the top of every iteration —
+    /// before it drains the mutation channel — so an optimistic write into `snap` is clobbered
+    /// about 100ms later. The replica toggle reads `desired`, so without this, pressing `s`
+    /// twice inside one collect interval computes the second toggle from the pre-scale value
+    /// and scales to 0 again. Entries are dropped once the collector agrees. Found by ACT-01.
+    pub pending_desired: std::collections::HashMap<String, i64>,
     pub palette: Option<crate::palette::Palette>, // command palette (open with `:` for fuzzy search of views/display actions)
     // ── Cross-layer drill ──
     pub nav_stack: Vec<NavState>, // pivot breadcrumb (retraced with esc)
@@ -624,6 +632,7 @@ impl App {
             inflight: None,
             route_form: None,
             store_form: None,
+            pending_desired: std::collections::HashMap::new(),
             palette: None,
             nav_stack: Vec::new(),
             perf_detail: None,
@@ -1913,6 +1922,56 @@ mod tests {
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
             t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
         }
+    }
+
+    /// A toast must be visible while a confirm popup is open, because the confirm's own
+    /// `v` (server dry-run) and `e` (edit) report *only* through a toast — and they can only
+    /// be pressed in that state. The footer used to return the generic confirm hint first,
+    /// making both silent. Found by ACT-04.
+    #[test]
+    fn a_toast_is_visible_while_a_confirm_popup_is_open() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let _g = crate::ui::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut a = App::new();
+        a.confirm = Some(Pending::Apply {
+            title: "compile something".into(),
+            yaml: "kind: Job\n".into(),
+        });
+        a.notify("valid ✓ job.batch/compile-x created (server dry run)".to_string());
+        let mut fx = crate::ui::FxState::disabled();
+        let mut t = Terminal::new(TestBackend::new(150, 40)).unwrap();
+        t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if let Some(c) = buf.cell((x, y)) {
+                    text.push_str(c.symbol());
+                }
+            }
+        }
+        assert!(
+            text.contains("valid ✓"),
+            "the dry-run result must reach the screen while the confirm is open"
+        );
+
+        // With no live toast the confirm hint is still what the footer shows.
+        a.toast = None;
+        let mut t2 = Terminal::new(TestBackend::new(150, 40)).unwrap();
+        t2.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+        let buf2 = t2.backend().buffer().clone();
+        let mut text2 = String::new();
+        for y in 0..buf2.area.height {
+            for x in 0..buf2.area.width {
+                if let Some(c) = buf2.cell((x, y)) {
+                    text2.push_str(c.symbol());
+                }
+            }
+        }
+        assert!(text2.contains("confirm popup"), "the hint returns once the toast expires");
     }
 
     /// The help overlay is a fixed-height box listing fixed content, so adding a line can

@@ -43,11 +43,9 @@ impl App {
                 let Some(a) = self.selected_artifact() else {
                     return;
                 };
-                let running = self
-                    .snap
-                    .models
-                    .iter()
-                    .any(|m| m.name == a.model && m.desired > 0);
+                // Same source as the replica toggle, so the menu does not offer Stop for
+                // something we just stopped.
+                let running = self.effective_desired(&a.model).is_some_and(|d| d > 0);
                 items.push(ActionItem::info("show full deployment detail"));
                 items.push(ActionItem::logs("tail serving pod logs"));
                 items.push(ActionItem::yaml("live Deployment YAML (read-only)"));
@@ -178,7 +176,7 @@ impl App {
                 let Some(m) = self.selected_model() else {
                     return;
                 };
-                let running = m.desired > 0;
+                let running = self.effective_desired(&m.name).unwrap_or(m.desired) > 0;
                 items.push(ActionItem::info("model detail"));
                 items.push(ActionItem::logs("tail pod logs"));
                 items.push(ActionItem::yaml("live Deployment YAML (read-only)"));
