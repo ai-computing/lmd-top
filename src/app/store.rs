@@ -99,6 +99,35 @@ impl App {
     }
 }
 
+impl App {
+    /// The selected artifact's (deployment, node, hostPath), when a provenance probe is possible.
+    ///
+    /// Requires a node-local directory: a PVC-backed build already has its toolchain in the
+    /// store inventory, and there is nothing to probe for an `emptyDir`.
+    pub fn provenance_target(&mut self) -> Option<(String, String, String)> {
+        let a = self.selected_artifact()?;
+        let (deployment, node, raw) = (a.model.clone(), a.node.clone(), a.host_path.clone());
+        if node.is_empty() {
+            self.notify("provenance: this deployment has no scheduled node".into());
+            return None;
+        }
+        let Some(raw) = raw else {
+            self.notify(
+                "provenance: not a node-local artifact — store builds show it in Deploy▸Library"
+                    .into(),
+            );
+            return None;
+        };
+        match crate::probe::validate_host_path(&raw) {
+            Ok(p) => Some((deployment, node, p)),
+            Err(e) => {
+                self.notify(format!("provenance: {}", e));
+                None
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::app::App;

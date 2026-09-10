@@ -20,6 +20,7 @@ mod manifest;
 mod metrics;
 mod ops;
 mod palette;
+mod probe;
 mod prom;
 mod quote;
 mod store;
@@ -386,6 +387,11 @@ struct OkInfo {
     audit_detail: String,
     notify: String,
     clear_preview: bool,
+    /// A (title, body) to open in the scrollable window on success.
+    ///
+    /// The failure path has always done this; a read-only probe needs it too, since its whole
+    /// output is the answer and a toast would truncate it.
+    window: Option<(String, String)>,
 }
 
 /// Execute a confirmed mutation via actual kubectl and return a MutationOutcome. (for worker threads)
@@ -408,6 +414,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: "scaled".into(),
                     notify: format!("scaled {} → {}", name, target),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk(format!("scale→{}", target), name, "scale", r)
@@ -418,6 +425,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: "restarted".into(),
                     notify: format!("rollout restart {}", name),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk("rollout-restart".into(), name, "restart", r)
@@ -428,6 +436,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: "rolled back".into(),
                     notify: format!("rollout undo {} (previous revision)", name),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk("rollout-undo".into(), name, "rollback", r)
@@ -438,6 +447,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: format!("drained {}", detail),
                     notify: format!("drained {} {} — in-flight streams finish", pod, detail),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk("drain".into(), pod, "drain", r)
@@ -448,6 +458,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: "stopped".into(),
                     notify: format!("stopped {} (scaled → 0)", name),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk("stop(scale→0)".into(), name, "stop", r)
@@ -464,6 +475,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: o.lines().next().unwrap_or("applied").to_string(),
                     notify: format!("{} stored in secret {}/{}", purpose, name, key),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk("set-secret".into(), format!("{}/{}", name, key), "set secret", r)
@@ -475,6 +487,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: "ok".into(),
                     notify: format!("{} {}", if on { "cordoned" } else { "uncordoned" }, node),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk(act.into(), node, "cordon", r)
@@ -485,9 +498,29 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: "deleted".into(),
                     notify: format!("deleted pod {}", name),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk("delete-pod".into(), name, "delete", r)
+        }
+        Pending::Provenance {
+            deployment,
+            node,
+            path,
+        } => {
+            let (m, job) = crate::probe::provenance_manifest(ns, &deployment, &node, &path);
+            let r = kube::run_job_for_output(ns, &m.to_yaml(), &job, 90)
+                .map(|body| OkInfo {
+                    audit_detail: format!("read {}", path),
+                    notify: format!("provenance of {} — see window", deployment),
+                    clear_preview: false,
+                    window: Some((
+                        format!("provenance · {} @ {} (q to close)", deployment, node),
+                        body,
+                    )),
+                })
+                .map_err(|e| e.to_string());
+            mk("provenance".into(), deployment, "provenance", r)
         }
         Pending::StoreRefresh => {
             let r = kube::refresh_inventory(ns)
@@ -495,6 +528,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: job.clone(),
                     notify: format!("store re-scan started ({})", job),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk("store-refresh".into(), "model-inventory".into(), "store refresh", r)
@@ -505,6 +539,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: "deleted".into(),
                     notify: format!("deleted job {}", name),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk("delete-job".into(), name, "delete job", r)
@@ -515,6 +550,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: "renamed".into(),
                     notify: format!("renamed route {} → {}", old, new),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk(
@@ -535,6 +571,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: "retargeted".into(),
                     notify: format!("retargeted {} → {}", path, backend),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk(
@@ -550,6 +587,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     audit_detail: "deleted".into(),
                     notify: format!("deleted route {}", path),
                     clear_preview: false,
+                    window: None,
                 })
                 .map_err(|e| e.to_string());
             mk(
@@ -567,6 +605,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                         audit_detail: line.clone(),
                         notify: format!("applied — {}", line),
                         clear_preview: true,
+                        window: None,
                     }
                 })
                 .map_err(|e| e.to_string());
@@ -580,6 +619,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                         audit_detail: format!("{} ({} objects)", url, n),
                         notify: format!("applied {} — {} object(s)", title, n),
                         clear_preview: true,
+                        window: None,
                     }
                 })
                 .map_err(|e| e.to_string());
@@ -598,7 +638,11 @@ fn apply_outcome(app: &mut App, o: MutationOutcome) {
                 &o.audit_target,
                 Ok(&ok.audit_detail),
             );
-            if ok.clear_preview {
+            if let Some((title, body)) = ok.window {
+                app.preview = Some((title, body));
+                app.preview_scroll = 0;
+                app.preview_apply = false;
+            } else if ok.clear_preview {
                 app.preview = None;
             }
             app.notify(ok.notify);
@@ -794,6 +838,15 @@ fn dispatch_action(
         Action::StoreDelete => app.open_store_delete(),
         Action::StoreMove => app.open_store_move(),
         Action::StoreRefresh => app.confirm = Some(Pending::StoreRefresh),
+        Action::Provenance => {
+            if let Some((deployment, node, path)) = app.provenance_target() {
+                app.confirm = Some(Pending::Provenance {
+                    deployment,
+                    node,
+                    path,
+                });
+            }
+        }
         Action::RouteDelete => {
             if require_action(app, action) {
                 // Same rule as Scale: the target is the route the menu was opened on (BUG-02).
@@ -2042,6 +2095,7 @@ mod tests {
                     audit_detail: "created".into(),
                     notify: "applied — created".into(),
                     clear_preview: true,
+                    window: None,
                 }),
             },
         );

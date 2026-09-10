@@ -2684,8 +2684,11 @@ mod tests {
     /// model as living in /usr/lib for eight of sixteen deployments.
     #[test]
     fn model_mount_is_the_model_not_the_vendor_libraries() {
-        // (deployment, [(volume, mountPath, hostPath or "")], expected picked volume)
-        let cases: [(&str, &[(&str, &str, &str)], &str); 4] = [
+        /// (volume name, mountPath, hostPath or "" for an emptyDir).
+        type Mount = (&'static str, &'static str, &'static str);
+        /// (deployment, its mounts, the volume the picker must choose).
+        type Case = (&'static str, &'static [Mount], &'static str);
+        let cases: [Case; 4] = [
             (
                 "gemma4-rbln",
                 &[

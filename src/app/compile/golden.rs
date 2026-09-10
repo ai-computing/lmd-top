@@ -107,6 +107,13 @@ const CASES: &[(&str, &str, &str, &str)] = &[
         "",
         "compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192",
     ),
+    // Provenance probe: `model` carries the node-local artifact path.
+    (
+        "probe-provenance",
+        "probe",
+        "",
+        "/home/gspark/rbln-gemma4-26b-a4b-tp4-s8192",
+    ),
 ];
 
 fn generate(op: &str, vendor: &'static str, model: &str) -> Result<(String, String), String> {
@@ -132,6 +139,12 @@ fn generate(op: &str, vendor: &'static str, model: &str) -> Result<(String, Stri
                 "compiled/archive/Qwen--Qwen2.5-0.5B-Instruct/rbln/RBLN-CA22-tp4-s8192",
             )
             .to_yaml(),
+        )),
+        "probe" => Ok((
+            format!("provenance {}", model),
+            crate::probe::provenance_manifest("llm-serving", "gemma4-rbln", "etri-001", model)
+                .0
+                .to_yaml(),
         )),
         _ => unreachable!(),
     }
@@ -211,6 +224,29 @@ fn manifests_carry_the_right_semantics() {
         // The manifest is about the requested model (BUG-17 guard, as data not substring luck).
         let repo_dir = model.replace('/', "--");
         let slug = model.replace(['/', '.'], "-").to_lowercase();
+        if *op == "probe" {
+            let kinds: Vec<&str> = docs.iter().filter_map(|d| d["kind"].as_str()).collect();
+            assert_eq!(kinds, vec!["Job"], "{}: probe is a single Job", name);
+            let pod = &docs[0]["spec"]["template"]["spec"];
+            assert!(
+                pod["nodeSelector"]["kubernetes.io/hostname"].as_str().is_some(),
+                "{}: a hostPath probe must be pinned to its node",
+                name
+            );
+            assert_eq!(
+                pod["containers"][0]["volumeMounts"][0]["readOnly"].as_bool(),
+                Some(true),
+                "{}: a probe must mount read-only",
+                name
+            );
+            assert_eq!(
+                pod["volumes"][0]["hostPath"]["path"].as_str(),
+                Some(*model),
+                "{}: must mount the artifact directory itself",
+                name
+            );
+            continue;
+        }
         if op.starts_with("store-") {
             // Store maintenance: one Job, the path under the store mount, and — the point of
             // the whole module — an argv command with no shell to reinterpret the path.

@@ -95,6 +95,12 @@ pub enum Pending {
     }, // stop serving = replicas to 0 (frees devices, reversible)
     /// Run the store discovery scan now rather than waiting for its CronJob schedule.
     StoreRefresh,
+    /// Read an artifact's recorded toolchain off the node holding it (read-only probe Job).
+    Provenance {
+        deployment: String,
+        node: String,
+        path: String,
+    },
     Apply {
         title: String,
         yaml: String,
@@ -167,6 +173,14 @@ impl Pending {
             Pending::StoreRefresh => {
                 "re-scan the shared store now (read-only scan Job)?".to_string()
             }
+            Pending::Provenance {
+                deployment,
+                node,
+                path,
+            } => format!(
+                "read what built {} — mount {} on {} read-only?",
+                deployment, path, node
+            ),
             Pending::Apply { title, .. } => format!("apply manifest to cluster — {}?", title),
             Pending::ApplyUrl { title, url } => {
                 format!("apply upstream manifest — {} (from {})?", title, url)

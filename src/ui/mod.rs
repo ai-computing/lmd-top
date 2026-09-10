@@ -418,6 +418,7 @@ fn help_overlay(f: &mut Frame) {
         g("y / l", "YAML / logs (accelerators, also in the ⏎ menu)"),
         g("s S x", "scale / restart / stop"),
         g("V M r", "store build: move / remove / rescan (Deploy▸Library)"),
+        g("P", "provenance: what built this artifact (read-only probe)"),
         g(
             "p i r e m",
             "pivot across pods, infra, routes, EPP, and models",

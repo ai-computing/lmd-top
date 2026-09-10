@@ -444,6 +444,97 @@ pub fn refresh_inventory(ns: &str) -> Result<String> {
     Ok(name)
 }
 
+/// Apply a one-shot Job, wait for it to finish, and return its logs.
+///
+/// Synchronous by design: it runs on the mutation worker thread, so the UI keeps rendering and
+/// the header shows the operation in flight. Bounded by `timeout_secs` — a probe that cannot
+/// be scheduled (a node cordoned or gone) must report that rather than hang.
+///
+/// The Job is left in place; its `ttlSecondsAfterFinished` cleans it up, which also means the
+/// logs are still readable afterwards if the caller wants a second look.
+pub fn run_job_for_output(
+    ns: &str,
+    yaml: &str,
+    job: &str,
+    timeout_secs: u64,
+) -> Result<String> {
+    apply_manifest(ns, yaml, false)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut last_state;
+    loop {
+        let out = std::process::Command::new("kubectl")
+            .args([
+                "get",
+                "job",
+                job,
+                "-n",
+                ns,
+                "-o",
+                "jsonpath={.status.succeeded}/{.status.failed}",
+                "--request-timeout=8s",
+            ])
+            .output()?;
+        last_state = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if last_state.starts_with('1') || last_state.ends_with('1') {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            // Say why nothing came back, and leave the Job for inspection.
+            let why = pending_reason(ns, job).unwrap_or_default();
+            return Err(anyhow!(
+                "probe did not finish within {}s (job status {:?}){}",
+                timeout_secs,
+                last_state,
+                if why.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", why)
+                }
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(700));
+    }
+    let out = std::process::Command::new("kubectl")
+        .args([
+            "logs",
+            &format!("job/{}", job),
+            "-n",
+            ns,
+            "--tail=200",
+            "--request-timeout=15s",
+        ])
+        .output()?;
+    let body = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if body.is_empty() {
+        return Err(anyhow!(
+            "probe produced no output (job status {:?}): {}",
+            last_state,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(body)
+}
+
+/// Why a Job's pod has not started — the scheduler's own message, when there is one.
+fn pending_reason(ns: &str, job: &str) -> Option<String> {
+    let out = std::process::Command::new("kubectl")
+        .args([
+            "get",
+            "pods",
+            "-n",
+            ns,
+            "-l",
+            &format!("job-name={}", job),
+            "-o",
+            "jsonpath={.items[0].status.conditions[0].message}",
+            "--request-timeout=8s",
+        ])
+        .output()
+        .ok()?;
+    let m = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!m.is_empty()).then_some(m)
+}
+
 pub fn delete_job(ns: &str, name: &str) -> Result<()> {
     let out = std::process::Command::new("kubectl")
         .args([

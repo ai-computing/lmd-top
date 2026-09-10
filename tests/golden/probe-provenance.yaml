@@ -1,0 +1,47 @@
+# title: provenance /home/gspark/rbln-gemma4-26b-a4b-tp4-s8192
+# Provenance probe — read /home/gspark/rbln-gemma4-26b-a4b-tp4-s8192 on node etri-001 (read-only)
+# Reads the toolchain the artifact recorded; changes nothing.
+# for deployment gemma4-rbln
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: probe-gemma4-rbln
+  namespace: llm-serving
+  labels:
+    app.kubernetes.io/component: provenance-probe
+    lmd-top/probe-of: gemma4-rbln
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: etri-001
+      tolerations:
+      - operator: Exists
+      volumes:
+      - name: artifact
+        hostPath:
+          path: /home/gspark/rbln-gemma4-26b-a4b-tp4-s8192
+          type: Directory
+      containers:
+      - name: read
+        image: busybox:1.36
+        command:
+        - sh
+        - -c
+        - "set -u\necho \"path: $DIR\"\nif [ ! -d \"$DIR\" ]; then echo \"MISSING: not a directory on this node\"; exit 0; fi\necho \"files:\"\nls -la \"$DIR\" 2>/dev/null | head -20\necho\n\nread_rbln() {\n  f=$1\n  v=$(grep -o '\"optimum_rbln_version\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' \"$f\" 2>/dev/null       | head -1 | sed 's/.*\"\\([^\"]*\\)\"$/\x01/')\n  echo \"built_with: optimum-rbln=${v:-unknown}   ($f)\"\n  grep -o '\"cls_name\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' \"$f\" 2>/dev/null | head -1\n  grep -o '\"dtype\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' \"$f\" 2>/dev/null | head -1\n}\n\nread_fxb() {\n  f=$1\n  v=$(tail -c 262144 \"$f\" 2>/dev/null | tr -c '[:print:]\n' '\n'       | awk '/\"furiosa_compiler\"/{f=1} f && /\"version\"/{ if (match($0,/[0-9][0-9.]*/)) { print substr($0,RSTART,RLENGTH); exit } }')\n  echo \"built_with: furiosa-compiler=${v:-unknown}   ($f)\"\n}\n\nfound=0\nif [ -f \"$DIR/rbln_config.json\" ]; then read_rbln \"$DIR/rbln_config.json\"; found=1\nelif [ -f \"$DIR/model.fxb\" ]; then read_fxb \"$DIR/model.fxb\"; found=1\nfi\n\n# Disaggregated builds keep one artifact per role (prefill/decode), so the config lives one\n# level down. Report every role rather than the first, since they can differ.\nif [ \"$found\" = 0 ]; then\n  for d in \"$DIR\"/*/; do\n    [ -d \"$d\" ] || continue\n    if [ -f \"$d/rbln_config.json\" ]; then read_rbln \"$d/rbln_config.json\"; found=1\n    elif [ -f \"$d/model.fxb\" ]; then read_fxb \"$d/model.fxb\"; found=1\n    fi\n  done\nfi\n\n[ \"$found\" = 0 ] && echo \"built_with: unknown (no rbln_config.json or model.fxb here or one level down)\"\nexit 0\n"
+        env:
+        - name: DIR
+          value: /artifact
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            memory: 128Mi
+        volumeMounts:
+        - name: artifact
+          mountPath: /artifact
+          readOnly: true

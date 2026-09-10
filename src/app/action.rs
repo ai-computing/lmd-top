@@ -55,6 +55,11 @@ impl App {
                 items.push(ActionItem::restart());
                 items.push(ActionItem::rollback());
                 items.push(ActionItem::objective());
+                // Only offered when we know where the artifact is; a PVC-backed one already
+                // has its provenance in the store inventory.
+                if a.host_path.is_some() && !a.node.is_empty() {
+                    items.push(ActionItem::provenance());
+                }
                 if running {
                     items.push(ActionItem::stop("scale serving → 0 (frees devices)"));
                 }
