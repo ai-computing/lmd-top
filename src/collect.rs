@@ -242,6 +242,12 @@ pub struct ModelArtifact {
     pub image: String,               // 컨테이너 이미지
     pub source: String,              // 모델 소스: HF id / --model 경로 / MODEL_ID
     pub mount: String,               // 저장 위치: "mountPath ← PVC/hostPath/emptyDir"
+    /// Node-local directory backing the model volume, when it is a `hostPath`.
+    ///
+    /// Structured rather than scraped back out of `mount`, which is a display string. The
+    /// artifacts actually serving on this cluster are hand-compiled hostPath directories, and
+    /// reading anything out of one means running a pod on `node` with this path mounted.
+    pub host_path: Option<String>,
     pub opts: Vec<(String, String)>, // 컴파일/서빙 옵션(TP·PP·max-len·batch·dtype·quant·NPU bucket 등)
 }
 
@@ -652,6 +658,75 @@ fn detect_engine(d: &serde_json::Value, accel: &str) -> String {
 }
 
 /// deploy 컨테이너 spec(command/args/env/volumeMounts)에서 모델 저장 위치 + 컴파일/서빙 옵션 추출.
+/// Host directory backing a volume, if it is a `hostPath`.
+fn volume_host_path<'a>(pod: &'a serde_json::Value, vol_name: &str) -> Option<&'a str> {
+    pod["volumes"]
+        .as_array()?
+        .iter()
+        .find(|v| v["name"].as_str() == Some(vol_name))?["hostPath"]["path"]
+        .as_str()
+}
+
+/// Is this mount plainly a library/system directory rather than a model?
+///
+/// Judged on the *backing* path, not the mount point: the RBLN deployments here mount
+/// `/usr/lib` at `/host-rbln-lib`, so the container-side path looks model-ish and the host side
+/// does not. Python package directories under a home directory are libraries too.
+fn is_system_mount(mount_path: &str, backing: Option<&str>) -> bool {
+    const SYS_PREFIXES: [&str; 9] = [
+        "/usr/", "/lib", "/bin", "/sbin", "/etc/", "/dev/", "/proc", "/sys/", "/run/",
+    ];
+    let sys = |p: &str| {
+        SYS_PREFIXES.iter().any(|q| p.starts_with(q))
+            || matches!(p, "/usr" | "/lib" | "/bin" | "/sbin" | "/dev")
+            || p.contains("/site-packages")
+            || p.contains("/dist-packages")
+    };
+    sys(mount_path) || backing.is_some_and(sys)
+}
+
+/// Choose the volumeMount that holds the model, by scoring rather than first-match.
+///
+/// First-match was wrong on this cluster: every RBLN deployment has a volume *named*
+/// `host-rbln-lib`, the hint "rbln" matched its name, and it sorts before the volume actually
+/// named `model` — so lmd-top reported the model as living in `/usr/lib` for eight of sixteen
+/// deployments. Scoring with system mounts disqualified picks the model directory instead.
+fn pick_model_mount<'a>(
+    vms: &'a [serde_json::Value],
+    pod: &serde_json::Value,
+) -> Option<&'a serde_json::Value> {
+    // Strong: names a model or its artifacts. Medium: a vendor build directory. Weak: a cache
+    // that may or may not be the model's.
+    const STRONG: [&str; 7] = [
+        "model", "artifact", "ckpt", "checkpoint", "weight", "gguf", "safetensor",
+    ];
+    const MEDIUM: [&str; 4] = ["rbln", "furiosa", "fxb", "compiled"];
+    const WEAK: [&str; 5] = ["hf", "cache", "data", "npu", "store"];
+
+    let score = |m: &serde_json::Value| -> i32 {
+        let mp = m["mountPath"].as_str().unwrap_or("").to_lowercase();
+        let vn = m["name"].as_str().unwrap_or("");
+        let backing = volume_host_path(pod, vn);
+        if is_system_mount(&mp, backing) {
+            return -1;
+        }
+        let hay = format!("{} {} {}", mp, vn.to_lowercase(), backing.unwrap_or("").to_lowercase());
+        let hits = |set: &[&str]| set.iter().filter(|h| hay.contains(**h)).count() as i32;
+        hits(&STRONG) * 3 + hits(&MEDIUM) * 2 + hits(&WEAK)
+    };
+
+    // Highest score wins. Ties keep document order, which preserves the old behaviour for the
+    // cases that were already right -- max_by_key returns the *last* maximum, so the index is
+    // reversed to make the first one win. If everything is disqualified we still fall back to
+    // the first mount, so the field says something rather than nothing.
+    vms.iter()
+        .enumerate()
+        .filter(|(_, m)| score(m) >= 0)
+        .max_by_key(|(i, m)| (score(m), std::cmp::Reverse(*i)))
+        .map(|(_, m)| m)
+        .or_else(|| vms.first())
+}
+
 fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtifact {
     let pod = &d["spec"]["template"]["spec"];
     let c = model_container(pod);
@@ -718,24 +793,19 @@ fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtif
         .or_else(|| toks.iter().find(looks_like_model).cloned())
         .unwrap_or_default();
 
-    // 저장 위치: model/hf/cache/weight/rbln/npu 힌트가 있는 volumeMount 우선, 없으면 첫 번째.
+    // 저장 위치: 어느 volumeMount 가 "모델"인지 점수로 고른다.
     let mut mount = String::new();
+    let mut host_path: Option<String> = None;
     if let Some(vms) = c["volumeMounts"].as_array() {
-        let pick = vms
-            .iter()
-            .find(|m| {
-                let p = m["mountPath"].as_str().unwrap_or("").to_lowercase();
-                let n = m["name"].as_str().unwrap_or("").to_lowercase();
-                [
-                    "model", "hf", "cache", "data", "weight", "ckpt", "rbln", "npu",
-                ]
-                .iter()
-                .any(|h| p.contains(h) || n.contains(h))
-            })
-            .or_else(|| vms.first());
+        let pick = pick_model_mount(vms, pod);
         if let Some(m) = pick {
             let mp = m["mountPath"].as_str().unwrap_or("").to_string();
             let vn = m["name"].as_str().unwrap_or("");
+            host_path = pod["volumes"]
+                .as_array()
+                .and_then(|vs| vs.iter().find(|v| v["name"].as_str() == Some(vn)))
+                .and_then(|v| v["hostPath"]["path"].as_str())
+                .map(|p| p.to_string());
             let backing = pod["volumes"]
                 .as_array()
                 .and_then(|vs| vs.iter().find(|v| v["name"].as_str() == Some(vn)))
@@ -851,6 +921,7 @@ fn model_artifact(d: &serde_json::Value, name: &str, engine: &str) -> ModelArtif
         image,
         source,
         mount,
+        host_path,
         opts,
     }
 }
@@ -2604,6 +2675,132 @@ mod tests {
     fn strip_variant_tags_drops_hw_and_precision() {
         assert_eq!(strip_variant_tags("vllm-koni-rbln"), "koni");
         assert_eq!(strip_variant_tags("Model-BF16-Instruct"), "model");
+    }
+
+    /// The volume layouts of this cluster's real Deployments, verbatim.
+    ///
+    /// BUG: every RBLN deployment mounts /usr/lib at /host-rbln-lib from a volume *named*
+    /// `host-rbln-lib`. The old first-match picker matched "rbln" in that name and reported the
+    /// model as living in /usr/lib for eight of sixteen deployments.
+    #[test]
+    fn model_mount_is_the_model_not_the_vendor_libraries() {
+        // (deployment, [(volume, mountPath, hostPath or "")], expected picked volume)
+        let cases: [(&str, &[(&str, &str, &str)], &str); 4] = [
+            (
+                "gemma4-rbln",
+                &[
+                    ("host-local-pkgs", "/home/gspark/.local/lib/python3.10/site-packages", "/home/gspark/.local/lib/python3.10/site-packages"),
+                    ("host-sys-local-pkgs", "/host-sys-local-pkgs", "/usr/local/lib/python3.10/dist-packages"),
+                    ("host-sys-pkgs", "/host-sys-pkgs", "/usr/lib/python3/dist-packages"),
+                    ("host-libs", "/host-libs", "/usr/lib/x86_64-linux-gnu"),
+                    ("host-rbln-lib", "/host-rbln-lib", "/usr/lib"),
+                    ("host-rbln-bin", "/host-rbln-bin", "/usr/bin"),
+                    ("model", "/model", "/home/gspark/rbln-gemma4-26b-a4b-tp4-s8192"),
+                    ("shm", "/dev/shm", ""),
+                ],
+                "model",
+            ),
+            (
+                "sw-atom-decode-b1",
+                &[
+                    ("local-pkgs", "/home/gspark/.local/lib/python3.10/site-packages", "/home/gspark/.local/lib/python3.10/site-packages"),
+                    ("libs", "/host-libs", "/usr/lib/x86_64-linux-gnu"),
+                    ("rbln-lib", "/host-rbln-lib", "/usr/lib"),
+                    ("rbln-bin", "/host-rbln-bin", "/usr/bin"),
+                    ("app", "/app", "/home/gspark/workspace/01_pd_disag/rngd_llmd"),
+                    ("hf", "/hf", "/home/gspark/.cache/huggingface"),
+                    ("dshm", "/dev/shm", "/dev/shm"),
+                    ("artifacts", "/artifacts", "/home/gspark/rbln-llama8b-pd"),
+                ],
+                "artifacts",
+            ),
+            (
+                // No artifact directory at all: the HF cache is the best available answer.
+                "hetero-pd-gateway",
+                &[
+                    ("rbln-lib", "/host-rbln-lib", "/usr/lib"),
+                    ("app", "/app", "/home/gspark/workspace/01_pd_disag/rngd_llmd"),
+                    ("hf", "/hf", "/home/gspark/.cache/huggingface"),
+                    ("dshm", "/dev/shm", "/dev/shm"),
+                    ("cfg", "/cfg", ""),
+                ],
+                "hf",
+            ),
+            (
+                "ds4-v4flash-gb10",
+                &[
+                    ("ds4bin", "/ds4", "/home/gspark/ds4"),
+                    ("gguf", "/gguf", "/home/gspark/model-cache/ds4-gguf"),
+                    ("kv", "/tmp/ds4-kv", ""),
+                    ("dshm", "/dev/shm", ""),
+                ],
+                "gguf",
+            ),
+        ];
+        for (deploy, mounts, want) in cases {
+            let vms: Vec<serde_json::Value> = mounts
+                .iter()
+                .map(|(n, mp, _)| serde_json::json!({ "name": n, "mountPath": mp }))
+                .collect();
+            let vols: Vec<serde_json::Value> = mounts
+                .iter()
+                .map(|(n, _, hp)| {
+                    if hp.is_empty() {
+                        serde_json::json!({ "name": n, "emptyDir": {} })
+                    } else {
+                        serde_json::json!({ "name": n, "hostPath": { "path": hp } })
+                    }
+                })
+                .collect();
+            let pod = serde_json::json!({ "volumes": vols });
+            let got = pick_model_mount(&vms, &pod).expect("a mount");
+            assert_eq!(
+                got["name"].as_str(),
+                Some(want),
+                "{}: picked {:?}",
+                deploy,
+                got["name"]
+            );
+        }
+    }
+
+    /// A pod whose every mount is a system directory must still report something, and a pod
+    /// with no mounts at all must not panic.
+    #[test]
+    fn model_mount_degrades_without_a_candidate() {
+        let vms = vec![
+            serde_json::json!({ "name": "libs", "mountPath": "/host-libs" }),
+            serde_json::json!({ "name": "bin", "mountPath": "/host-bin" }),
+        ];
+        let pod = serde_json::json!({ "volumes": [
+            { "name": "libs", "hostPath": { "path": "/usr/lib" } },
+            { "name": "bin", "hostPath": { "path": "/usr/bin" } },
+        ] });
+        assert_eq!(
+            pick_model_mount(&vms, &pod).map(|m| m["name"].as_str()),
+            Some(Some("libs")),
+            "falls back to the first mount rather than reporting nothing"
+        );
+        assert!(pick_model_mount(&[], &pod).is_none());
+    }
+
+    /// The system-mount judgement is on the backing path, since the container-side path can
+    /// look perfectly model-ish.
+    #[test]
+    fn system_mounts_are_judged_by_where_they_come_from() {
+        assert!(is_system_mount("/host-rbln-lib", Some("/usr/lib")));
+        assert!(is_system_mount("/model", Some("/usr/lib/python3/dist-packages")));
+        assert!(is_system_mount(
+            "/home/gspark/.local/lib/python3.10/site-packages",
+            None
+        ));
+        assert!(is_system_mount("/dev/shm", None));
+        // A real model directory under a home directory is not a system mount.
+        assert!(!is_system_mount(
+            "/model",
+            Some("/home/gspark/rbln-gemma4-26b-a4b-tp4-s8192")
+        ));
+        assert!(!is_system_mount("/model-cache", None));
     }
 
     /// The exact string the cluster's scan publishes, and the ways it can be absent.

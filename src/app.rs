@@ -1181,6 +1181,7 @@ mod tests {
                 image: String::new(),
                 source: "KISTI-KONI/KONI-Llama3.1-8B-Instruct".into(),
                 mount: "/mnt/store ← PVC:model-store".into(),
+                host_path: None,
                 opts: vec![("tp".into(), "4".into()), ("max-len".into(), "8192".into())],
             }],
             ..Default::default()
@@ -1328,6 +1329,7 @@ mod tests {
                     image: String::new(),
                     source: "Qwen/Qwen2.5-0.5B-Instruct".into(),
                     mount: String::new(),
+                    host_path: None,
                     opts: vec![("max-len".into(), "8192".into())],
                 }],
                 ..Default::default()
@@ -1486,6 +1488,7 @@ mod tests {
                 image: String::new(),
                 source: "LGAI-EXAONE/EXAONE-4.0".into(),
                 mount: String::new(),
+                host_path: None,
                 opts: vec![],
             }],
             ..Default::default()
@@ -1554,6 +1557,7 @@ mod tests {
                     image: String::new(),
                     source: source.into(),
                     mount: "/mnt/store/compiled/x ← PVC:model-store".into(),
+                    host_path: None,
                     opts: vec![("tp".into(), "4".into())],
                 }],
                 ..Default::default()
@@ -1670,6 +1674,7 @@ mod tests {
                     image: String::new(),
                     source: source.into(),
                     mount: String::new(),
+                    host_path: None,
                     opts: vec![],
                 }],
                 ..Default::default()
@@ -1710,6 +1715,7 @@ mod tests {
                 image: String::new(),
                 source: "KISTI-KONI/KONI".into(),
                 mount: String::new(),
+                host_path: None,
                 opts: vec![],
             }],
             ..Default::default()
@@ -1803,6 +1809,7 @@ mod tests {
                     image: String::new(),
                     source: source.into(),
                     mount: String::new(),
+                    host_path: None,
                     opts: vec![],
                 }],
                 ..Default::default()
@@ -1859,6 +1866,7 @@ mod tests {
                 image: String::new(),
                 source: "org/m1".into(),
                 mount: String::new(),
+                host_path: None,
                 opts: vec![],
             }],
             routes: vec![Route {
@@ -2421,6 +2429,7 @@ mod tests {
             image: String::new(),
             source: format!("org/{}", model),
             mount: String::new(),
+            host_path: None,
             opts: Vec::new(),
         };
         for vendor in ["rbln", "furiosa", "gpu"] {
@@ -2553,6 +2562,7 @@ mod tests {
             image: String::new(),
             source: source.into(),
             mount: String::new(),
+            host_path: None,
             opts: vec![("tp".into(), "4".into())],
         };
         let mut running = model("llama-a");
