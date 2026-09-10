@@ -392,6 +392,14 @@ struct OkInfo {
     /// The failure path has always done this; a read-only probe needs it too, since its whole
     /// output is the answer and a toast would truncate it.
     window: Option<(String, String)>,
+    /// `(deployment, replicas)` to write into the local snapshot on success.
+    ///
+    /// The replica toggle reads `desired` from the snapshot, which is up to a full tick (~3s)
+    /// old. Without this, pressing `s` twice in quick succession computes the second toggle
+    /// from the pre-scale value and scales to 0 again — so the second press looks like it did
+    /// nothing. Found by ACT-01. `ready` is deliberately left alone: the row should keep
+    /// showing that it has not converged yet.
+    desired_now: Option<(String, i64)>,
 }
 
 /// Execute a confirmed mutation via actual kubectl and return a MutationOutcome. (for worker threads)
@@ -409,12 +417,14 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
     };
     match pending {
         Pending::Scale { name, target } => {
+            let applied = (name.clone(), target);
             let r = kube::scale_deploy(ns, &name, target)
                 .map(|_| OkInfo {
                     audit_detail: "scaled".into(),
                     notify: format!("scaled {} → {}", name, target),
                     clear_preview: false,
                     window: None,
+                    desired_now: Some(applied),
                 })
                 .map_err(|e| e.to_string());
             mk(format!("scale→{}", target), name, "scale", r)
@@ -426,6 +436,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     notify: format!("rollout restart {}", name),
                     clear_preview: false,
                     window: None,
+                    desired_now: None,
                 })
                 .map_err(|e| e.to_string());
             mk("rollout-restart".into(), name, "restart", r)
@@ -437,6 +448,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     notify: format!("rollout undo {} (previous revision)", name),
                     clear_preview: false,
                     window: None,
+                    desired_now: None,
                 })
                 .map_err(|e| e.to_string());
             mk("rollout-undo".into(), name, "rollback", r)
@@ -448,17 +460,20 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     notify: format!("drained {} {} — in-flight streams finish", pod, detail),
                     clear_preview: false,
                     window: None,
+                    desired_now: None,
                 })
                 .map_err(|e| e.to_string());
             mk("drain".into(), pod, "drain", r)
         }
         Pending::Stop { name } => {
+            let stopped = (name.clone(), 0);
             let r = kube::scale_deploy(ns, &name, 0)
                 .map(|_| OkInfo {
                     audit_detail: "stopped".into(),
                     notify: format!("stopped {} (scaled → 0)", name),
                     clear_preview: false,
                     window: None,
+                    desired_now: Some(stopped),
                 })
                 .map_err(|e| e.to_string());
             mk("stop(scale→0)".into(), name, "stop", r)
@@ -476,6 +491,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     notify: format!("{} stored in secret {}/{}", purpose, name, key),
                     clear_preview: false,
                     window: None,
+                    desired_now: None,
                 })
                 .map_err(|e| e.to_string());
             mk("set-secret".into(), format!("{}/{}", name, key), "set secret", r)
@@ -488,6 +504,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     notify: format!("{} {}", if on { "cordoned" } else { "uncordoned" }, node),
                     clear_preview: false,
                     window: None,
+                    desired_now: None,
                 })
                 .map_err(|e| e.to_string());
             mk(act.into(), node, "cordon", r)
@@ -499,6 +516,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     notify: format!("deleted pod {}", name),
                     clear_preview: false,
                     window: None,
+                    desired_now: None,
                 })
                 .map_err(|e| e.to_string());
             mk("delete-pod".into(), name, "delete", r)
@@ -518,6 +536,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                         format!("provenance · {} @ {} (q to close)", deployment, node),
                         body,
                     )),
+                    desired_now: None,
                 })
                 .map_err(|e| e.to_string());
             mk("provenance".into(), deployment, "provenance", r)
@@ -529,6 +548,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     notify: format!("store re-scan started ({})", job),
                     clear_preview: false,
                     window: None,
+                    desired_now: None,
                 })
                 .map_err(|e| e.to_string());
             mk("store-refresh".into(), "model-inventory".into(), "store refresh", r)
@@ -540,6 +560,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     notify: format!("deleted job {}", name),
                     clear_preview: false,
                     window: None,
+                    desired_now: None,
                 })
                 .map_err(|e| e.to_string());
             mk("delete-job".into(), name, "delete job", r)
@@ -551,6 +572,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     notify: format!("renamed route {} → {}", old, new),
                     clear_preview: false,
                     window: None,
+                    desired_now: None,
                 })
                 .map_err(|e| e.to_string());
             mk(
@@ -572,6 +594,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     notify: format!("retargeted {} → {}", path, backend),
                     clear_preview: false,
                     window: None,
+                    desired_now: None,
                 })
                 .map_err(|e| e.to_string());
             mk(
@@ -588,6 +611,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                     notify: format!("deleted route {}", path),
                     clear_preview: false,
                     window: None,
+                    desired_now: None,
                 })
                 .map_err(|e| e.to_string());
             mk(
@@ -606,6 +630,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                         notify: format!("applied — {}", line),
                         clear_preview: true,
                         window: None,
+                        desired_now: None,
                     }
                 })
                 .map_err(|e| e.to_string());
@@ -620,6 +645,7 @@ fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
                         notify: format!("applied {} — {} object(s)", title, n),
                         clear_preview: true,
                         window: None,
+                        desired_now: None,
                     }
                 })
                 .map_err(|e| e.to_string());
@@ -638,6 +664,11 @@ fn apply_outcome(app: &mut App, o: MutationOutcome) {
                 &o.audit_target,
                 Ok(&ok.audit_detail),
             );
+            // Reflect the change locally so the next keystroke computes from what we just did
+            // rather than from a snapshot up to a full tick old (ACT-01).
+            if let Some((name, replicas)) = ok.desired_now {
+                app.pending_desired.insert(name, replicas);
+            }
             if let Some((title, body)) = ok.window {
                 app.preview = Some((title, body));
                 app.preview_scroll = 0;
@@ -753,8 +784,8 @@ fn dispatch_action(
                 // here let a selection change between opening the menu and running the action
                 // produce "scale A → 1" when the user meant to stop A (BUG-02 / FORM-02).
                 let target = app
-                    .model_by_name(subject)
-                    .map(|m| if m.desired == 0 { 1 } else { 0 })
+                    .effective_desired(subject)
+                    .map(|d| if d == 0 { 1 } else { 0 })
                     .unwrap_or(1);
                 app.confirm = Some(Pending::Scale {
                     name: subject.to_string(),
@@ -1800,8 +1831,12 @@ fn ui_loop(
                         KeyCode::Char('s') => {
                             // Admin+ : 즉시 실행하지 않고 확인(y/n) 대기로 — dry-run→confirm.
                             if let Some(m) = app.selected_model() {
-                                let (name, target) =
-                                    (m.name.clone(), if m.desired == 0 { 1 } else { 0 });
+                                let name = m.name.clone();
+                                // effective_desired, not m.desired: the snapshot is up to a
+                                // full tick behind the scale we may have just applied, and
+                                // reading it here made a second `s` scale to 0 again (ACT-01).
+                                let now = app.effective_desired(&name).unwrap_or(m.desired);
+                                let target = if now == 0 { 1 } else { 0 };
                                 app.confirm = Some(Pending::Scale { name, target });
                             } else {
                                 app.notify("scale: select a model in Models/Overview".to_string());
@@ -1834,7 +1869,12 @@ fn ui_loop(
                         }
                         KeyCode::Char('x') => {
                             if let Some(m) = app.selected_model() {
-                                if m.desired == 0 {
+                                // Same reason as `s`: right after a stop the snapshot still
+                                // says it is running, so this would offer to stop it again.
+                                let now = app
+                                    .effective_desired(&m.name.clone())
+                                    .unwrap_or(m.desired);
+                                if now == 0 {
                                     app.notify(format!(
                                         "{} is already stopped (0 replicas)",
                                         m.name
@@ -2096,6 +2136,7 @@ mod tests {
                     notify: "applied — created".into(),
                     clear_preview: true,
                     window: None,
+                    desired_now: None,
                 }),
             },
         );
@@ -2107,6 +2148,99 @@ mod tests {
             body.contains("\tapply\tmanifest-x\tok\tcreated"),
             "audit ok line: {}",
             body
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ACT-01: pressing `s` twice must toggle twice. The toggle reads `desired` from the
+    /// snapshot, so a successful scale has to be reflected locally or the second press
+    /// recomputes from the pre-scale value and scales to 0 again.
+    #[test]
+    fn a_successful_scale_updates_the_local_desired_so_the_toggle_flips() {
+        let _g = crate::audit::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let path = std::env::temp_dir().join("lmd-audit-desired-now.log");
+        let _ = std::fs::remove_file(&path);
+        std::env::set_var("LMD_AUDIT", &path);
+        let mut app = App::new();
+        app.snap.models = vec![crate::collect::ModelRow {
+            name: "qa-dummy".into(),
+            ready: 1,
+            desired: 1,
+            status: "● Running".into(),
+            route: "/x".into(),
+            engine: "vllm".into(),
+            accel: "-".into(),
+            running: None,
+            waiting: None,
+            tps: None,
+            kv: None,
+            ttft: None,
+        }];
+        apply_outcome(
+            &mut app,
+            MutationOutcome {
+                mode: Mode::Admin,
+                audit_action: "scale→0".into(),
+                audit_target: "qa-dummy".into(),
+                fail_label: "scale",
+                result: Ok(OkInfo {
+                    audit_detail: "scaled".into(),
+                    notify: "scaled qa-dummy → 0".into(),
+                    clear_preview: false,
+                    window: None,
+                    desired_now: Some(("qa-dummy".into(), 0)),
+                }),
+            },
+        );
+        assert_eq!(
+            app.effective_desired("qa-dummy"),
+            Some(0),
+            "the next toggle must see 0, or it will scale to 0 again"
+        );
+        // The snapshot itself is untouched — the main loop overwrites it from the collector at
+        // the top of every iteration, which is exactly why this lives outside it.
+        assert_eq!(app.snap.models[0].desired, 1);
+        assert_eq!(app.snap.models[0].ready, 1);
+
+        // Once the collector reports the new value, the override must retire rather than
+        // pinning the toggle forever.
+        let mut fresh = app.snap.clone();
+        fresh.ts += 1;
+        fresh.models[0].desired = 0;
+        app.apply(fresh);
+        assert!(
+            app.pending_desired.is_empty(),
+            "the override must clear once the collector agrees"
+        );
+        assert_eq!(app.effective_desired("qa-dummy"), Some(0));
+
+        // An unknown deployment must be ignored rather than panicking or inventing a row.
+        apply_outcome(
+            &mut app,
+            MutationOutcome {
+                mode: Mode::Admin,
+                audit_action: "scale→1".into(),
+                audit_target: "gone".into(),
+                fail_label: "scale",
+                result: Ok(OkInfo {
+                    audit_detail: "scaled".into(),
+                    notify: "scaled gone → 1".into(),
+                    clear_preview: false,
+                    window: None,
+                    desired_now: Some(("gone".into(), 1)),
+                }),
+            },
+        );
+        assert_eq!(app.snap.models.len(), 1);
+        // An override for a deployment that is not in the snapshot must not survive a collect.
+        let mut fresh2 = app.snap.clone();
+        fresh2.ts += 2;
+        app.apply(fresh2);
+        assert!(
+            !app.pending_desired.contains_key("gone"),
+            "an override for a vanished deployment must be dropped"
         );
         let _ = std::fs::remove_file(&path);
     }

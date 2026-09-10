@@ -817,6 +817,27 @@ fn compact_footer(parts: &[String], width: usize) -> String {
 }
 
 fn footer(f: &mut Frame, area: Rect, app: &App) {
+    // A live toast outranks every static hint below.
+    //
+    // It used to come last, after early returns for panel-focus mode and for "a confirm popup
+    // is open". That made the confirm's own `v` (server-side dry-run) and `e` (edit in vi)
+    // silent by construction: both are reachable *only* while a confirm is open, and their
+    // entire result is a toast. Pressing v validated the manifest against the API server and
+    // then showed the operator nothing at all. Found by ACT-04.
+    if let Some(t) = &app.toast {
+        if crate::collect::now_secs() < app.toast_until {
+            let msg = truncw(t, area.width.saturating_sub(1) as usize);
+            let bg = if app.toast_bad { C_BAD() } else { C_WARN() };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {} ", msg),
+                    Style::default().fg(Color::Black).bg(bg),
+                ))),
+                area,
+            );
+            return;
+        }
+    }
     // vi/tmux panel-focus mode — a persistent banner so the user knows arrows now move panels.
     if app.panel_move {
         f.render_widget(
@@ -877,20 +898,6 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
             area,
         );
         return;
-    }
-    if let Some(t) = &app.toast {
-        if crate::collect::now_secs() < app.toast_until {
-            let msg = truncw(t, area.width.saturating_sub(1) as usize);
-            let bg = if app.toast_bad { C_BAD() } else { C_WARN() };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!(" {} ", msg),
-                    Style::default().fg(Color::Black).bg(bg),
-                ))),
-                area,
-            );
-            return;
-        }
     }
     let mut spans: Vec<Span> = Vec::new();
     if !app.filter.is_empty() {

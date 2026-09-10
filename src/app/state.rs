@@ -143,6 +143,15 @@ impl App {
             }
         }
         self.snap = snap;
+        // An optimistic replica count is only interesting until the collector reports it (or
+        // the deployment disappears, in which case there is nothing left to toggle).
+        let models = &self.snap.models;
+        self.pending_desired.retain(|name, want| {
+            models
+                .iter()
+                .find(|m| &m.name == name)
+                .is_some_and(|m| m.desired != *want)
+        });
         let n = self.list_len();
         if n > 0 && self.selected >= n {
             self.selected = n - 1;

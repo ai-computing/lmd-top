@@ -128,6 +128,20 @@ impl App {
     }
 }
 
+impl App {
+    /// Replica count to reason about for a deployment: what we last applied if the collector
+    /// has not caught up, otherwise what the collector reports.
+    ///
+    /// Used by the replica toggle and by the menu's "is it running" gate, so both agree with
+    /// each other and with the last thing the operator did.
+    pub fn effective_desired(&self, deployment: &str) -> Option<i64> {
+        if let Some(d) = self.pending_desired.get(deployment) {
+            return Some(*d);
+        }
+        self.model_by_name(deployment).map(|m| m.desired)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::app::App;
