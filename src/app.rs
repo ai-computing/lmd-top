@@ -1402,6 +1402,7 @@ mod tests {
                 size: "8G".into(),
                 path: "compiled/KISTI-KONI--KONI-Llama3.1-8B-Instruct/rbln/rbln-ca22-tp4-s8192/"
                     .into(),
+                built_with: "optimum-rbln=0.10.2".into(),
             }],
             ..Default::default()
         };
@@ -1425,6 +1426,21 @@ mod tests {
             .find(|(_, m)| m.contains("이미 컴파일됨"))
             .map(|(ok, _)| *ok)
             .unwrap());
+        // 기존 빌드의 툴체인을 컴파일 직전에 알려준다 — RBLN 사건에서 몇 시간을 아꼈을 정보.
+        let tc = pf
+            .iter()
+            .find(|(_, m)| m.starts_with("toolchain:"))
+            .expect("preflight 에 기존 빌드 툴체인 줄");
+        assert!(tc.1.contains("optimum-rbln=0.10.2"), "{}", tc.1);
+        assert!(tc.0, "정보이지 블로커가 아니다");
+        // 출처를 못 읽은 빌드에서는 그 줄이 아예 없어야 한다(빈 값을 보여주면 안 됨).
+        a.snap.stored[0].built_with = "-".into();
+        assert!(
+            !a.compile_preflight(&form)
+                .iter()
+                .any(|(_, m)| m.starts_with("toolchain:")),
+            "출처 미상이면 툴체인 줄을 만들지 않는다"
+        );
         // 옵션이 다르면(seq 변경) 다른 target → 중복 아님.
         let mut form2 = form.clone();
         if let Some(f) = form2.fields.iter_mut().find(|f| f.key == "max-len") {
@@ -2599,6 +2615,7 @@ mod tests {
                 compiled_for: "RNGD-tp4-s8192".into(),
                 size: "9G".into(),
                 path: "compiled/furiosa-ai--Qwen3-4B-FP8/furiosa/rngd-tp4".into(),
+                built_with: "furiosa-compiler=2026.3.0".into(),
             }],
             ..Default::default()
         };
@@ -2654,6 +2671,7 @@ mod tests {
                 compiled_for: "RNGD-tp4-s8192".into(),
                 size: "9G".into(),
                 path: "compiled/x".into(),
+                built_with: "furiosa-compiler=2026.3.0".into(),
             }],
             ..Default::default()
         };

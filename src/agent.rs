@@ -165,6 +165,8 @@ struct Stored {
     revision: Option<String>,
     size: String,
     path: String,
+    /// Toolchain the artifact records having been built with, when the scan could read it.
+    built_with: Option<String>,
 }
 
 /// In-progress/recent compile Jobs (compile-*) — status, elapsed time, progress hints.
@@ -292,6 +294,7 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             revision: noneify(&m.revision),
             size: m.size.clone(),
             path: m.path.clone(),
+            built_with: noneify(&m.built_with),
         })
         .collect();
 

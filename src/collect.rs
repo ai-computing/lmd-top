@@ -175,6 +175,13 @@ pub struct StoredModel {
     pub compiled_for: String, // 컴파일 타깃/옵션(예: RBLN-CA22-tp4-s8192) 또는 "-"
     pub size: String,         // du -sh 결과
     pub path: String,         // 스토어 내 상대 경로
+    /// Toolchain that produced this build, as the scan read it out of the artifact itself
+    /// (`optimum-rbln=0.10.2`, `furiosa-compiler=2026.3.0`), or `-` when unknown.
+    ///
+    /// This is the one fact that identifies *why* a build works when an identical-looking
+    /// rebuild does not — see docs/RBLN-COMPILE-INCIDENT.md, where the answer was a version
+    /// recorded inside a working artifact and nowhere else.
+    pub built_with: String,
 }
 
 /// 컴파일 Job 진행 상태(Deploy 뷰 '진행 중 컴파일' 패널). `compile-*` Job 을 요약.
@@ -869,7 +876,7 @@ fn strip_variant_tags(s: &str) -> String {
 
 /// 트리 그룹 키(모델 계열) — 표준 정체성. 우선순위: HF repo id(org/name) > 경로 leaf > deploy 이름.
 /// 같은 모델의 여러 배포/컴파일본(다른 TP·양자화·노드)이 한 계열로 묶이도록 정규화.
-fn model_family(source: &str, name: &str) -> String {
+pub(crate) fn model_family(source: &str, name: &str) -> String {
     // 1) HF id: "org/Name" — org 유지(중복 방지) + name 부분 변형태그 제거.
     if source.contains('/')
         && !source.starts_with('/')
@@ -1991,6 +1998,20 @@ async fn collect_stored(cfg: &Config, snap: &mut Snapshot) {
         kube::get_json(&["get", "cm", "model-inventory", "-n", &cfg.ns, "-o", "json"]).await
     {
         if let Some(txt) = v["data"]["inventory"].as_str() {
+            snap.stored = parse_inventory(txt);
+        }
+    }
+}
+
+/// Parse the discovery scan's pipe-separated inventory.
+///
+/// Format: `repo | revision | format | compiled_for | size | path [| built_with]`. The last
+/// column is a later addition, so a cluster still running the older CronJob is read as before
+/// rather than losing its inventory to a format bump.
+fn parse_inventory(txt: &str) -> Vec<StoredModel> {
+    let mut out = Vec::new();
+    {
+        {
             for line in txt.lines() {
                 let l = line.trim();
                 if l.is_empty() || l.starts_with('#') {
@@ -1998,7 +2019,7 @@ async fn collect_stored(cfg: &Config, snap: &mut Snapshot) {
                 }
                 let f: Vec<&str> = l.split('|').map(|s| s.trim()).collect();
                 if f.len() >= 6 {
-                    snap.stored.push(StoredModel {
+                    out.push(StoredModel {
                         family: model_family(f[0], f[0]),
                         repo: f[0].into(),
                         revision: f[1].into(),
@@ -2006,11 +2027,21 @@ async fn collect_stored(cfg: &Config, snap: &mut Snapshot) {
                         compiled_for: f[3].into(),
                         size: f[4].into(),
                         path: f[5].into(),
+                        // Provenance is a later addition to the scan's output. A cluster
+                        // running the older discovery CronJob publishes six fields, and must
+                        // keep working rather than losing its whole inventory to a format bump.
+                        built_with: f
+                            .get(6)
+                            .map(|x| x.trim())
+                            .filter(|x| !x.is_empty())
+                            .unwrap_or("-")
+                            .to_string(),
                     });
                 }
             }
         }
     }
+    out
 }
 
 /// k8s RFC3339 타임스탬프("2026-07-03T12:34:56Z")를 epoch 초로. 실패 시 None.
@@ -2526,6 +2557,53 @@ mod tests {
     fn strip_variant_tags_drops_hw_and_precision() {
         assert_eq!(strip_variant_tags("vllm-koni-rbln"), "koni");
         assert_eq!(strip_variant_tags("Model-BF16-Instruct"), "model");
+    }
+
+    /// The exact bytes the cluster's discovery CronJob publishes today, plus the seventh
+    /// column it publishes after the provenance change. Both must parse.
+    #[test]
+    fn inventory_parses_with_and_without_provenance() {
+        // Six columns: what a cluster running the older scan emits.
+        let old = "\
+# repo | revision | format | compiled_for | size | path
+furiosa-ai/Qwen3-4B-FP8 | - | furiosa | rngd-tp8-pp1-s8192 | 109M | compiled/furiosa-ai--Qwen3-4B-FP8/furiosa/rngd-tp8-pp1-s8192/
+";
+        let rows = parse_inventory(old);
+        assert_eq!(rows.len(), 1, "comment line must be skipped");
+        assert_eq!(rows[0].repo, "furiosa-ai/Qwen3-4B-FP8");
+        assert_eq!(rows[0].size, "109M");
+        assert_eq!(
+            rows[0].built_with, "-",
+            "an older inventory must read as unknown provenance, not drop the row"
+        );
+
+        // Seven columns, both vendors, as the updated scan emits them.
+        let new = "\
+# repo | revision | format | compiled_for | size | path | built_with
+furiosa-ai/Qwen3-4B-FP8 | - | furiosa | rngd-tp8-pp1-s8192 | 109M | compiled/a/furiosa/x/ | furiosa-compiler=2026.3.0
+KISTI-KONI/KONI | - | rbln | RBLN-CA22-tp4-s8192 | 20G | compiled/b/rbln/y/ | optimum-rbln=0.10.2
+meta-llama/L | main | hf | - | 16G | hub/models--meta-llama--L/snapshots/abc/ | -
+";
+        let rows = parse_inventory(new);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].built_with, "furiosa-compiler=2026.3.0");
+        assert_eq!(rows[1].built_with, "optimum-rbln=0.10.2");
+        assert_eq!(
+            rows[2].built_with, "-",
+            "source weights have no compiler, and an explicit - must stay unknown"
+        );
+        // The added column must not disturb the columns before it.
+        assert_eq!(rows[1].compiled_for, "RBLN-CA22-tp4-s8192");
+        assert_eq!(rows[1].path, "compiled/b/rbln/y/");
+    }
+
+    /// A blank seventh column (a scan that found no version) must read as unknown rather than
+    /// as an empty string that would render as a gap.
+    #[test]
+    fn inventory_treats_a_blank_provenance_column_as_unknown() {
+        let rows = parse_inventory("org/n | - | rbln | tp4 | 1G | compiled/x/rbln/tp4/ |  \n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].built_with, "-");
     }
 
     #[test]

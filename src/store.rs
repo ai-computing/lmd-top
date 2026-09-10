@@ -298,6 +298,7 @@ mod tests {
             compiled_for: "RBLN-CA22-tp4".into(),
             size: "12G".into(),
             path: path.into(),
+            built_with: "optimum-rbln=0.10.2".into(),
         }
     }
 

@@ -3008,6 +3008,22 @@ fn library_detail(f: &mut Frame, area: Rect, app: &App) {
                 C_DIM(),
             ));
             lines.push(kv("size", &s.size, C_DIM()));
+            // Read out of the artifact itself by the discovery scan. Two builds with identical
+            // options can behave differently when different toolchains produced them, and that
+            // is invisible everywhere else.
+            lines.push(kv(
+                "built-with",
+                if s.built_with.is_empty() || s.built_with == "-" {
+                    "unknown (scan predates provenance, or artifact records none)"
+                } else {
+                    &s.built_with
+                },
+                if s.built_with.is_empty() || s.built_with == "-" {
+                    C_DIM()
+                } else {
+                    C_OK()
+                },
+            ));
             lines.push(kv("path", &s.path, C_TRACK()));
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
@@ -4035,9 +4051,22 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(if is_src { C_DIM() } else { C_WARN() }),
                 ));
                 sp.push(Span::styled(
-                    format!("{} ", s.size),
+                    format!("{} ", padw(&s.size, 6)),
                     Style::default().fg(C_DIM()),
                 ));
+                // The toolchain, short form: two builds of one model that came from different
+                // compilers should be distinguishable without opening each one.
+                if !s.built_with.is_empty() && s.built_with != "-" {
+                    let short = s
+                        .built_with
+                        .split(&[',', ' '][..])
+                        .next()
+                        .unwrap_or(&s.built_with);
+                    sp.push(Span::styled(
+                        truncw(short, 26).to_string(),
+                        Style::default().fg(C_TRACK()),
+                    ));
+                }
             }
         }
         let mut line = Line::from(sp);

@@ -113,6 +113,7 @@ mod tests {
             compiled_for: "RBLN-CA22-tp4".into(),
             size: "12G".into(),
             path: path.into(),
+            built_with: "optimum-rbln=0.10.2".into(),
         }
     }
 
@@ -130,6 +131,68 @@ mod tests {
             a.move_sel(1);
         }
         a
+    }
+
+    /// Provenance is only worth collecting if an operator can see it. Render the tree and the
+    /// detail panel and check the toolchain is on screen in both.
+    #[test]
+    fn the_toolchain_that_built_a_store_row_is_visible() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let _g = crate::ui::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut a = app_with_store();
+        let screen = |a: &App| {
+            let mut fx = crate::ui::FxState::disabled();
+            let mut t = Terminal::new(TestBackend::new(160, 40)).unwrap();
+            t.draw(|f| crate::ui::draw(f, a, &mut fx)).unwrap();
+            let buf = t.backend().buffer().clone();
+            let mut s = String::new();
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    if let Some(c) = buf.cell((x, y)) {
+                        s.push_str(c.symbol());
+                    }
+                }
+                s.push('\n');
+            }
+            s
+        };
+        assert!(
+            screen(&a).contains("optimum-rbln=0.10.2"),
+            "the tree row should carry the toolchain"
+        );
+        a.detail = true;
+        let d = screen(&a);
+        assert!(d.contains("built-with"), "detail panel needs a built-with row");
+        assert!(d.contains("optimum-rbln=0.10.2"), "with the value");
+    }
+
+    /// A build whose provenance the scan could not read must say so, not show a blank.
+    #[test]
+    fn unknown_provenance_is_labelled_not_blank() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let _g = crate::ui::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut a = app_with_store();
+        a.snap.stored[0].built_with = "-".into();
+        a.detail = true;
+        let mut fx = crate::ui::FxState::disabled();
+        let mut t = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        t.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if let Some(c) = buf.cell((x, y)) {
+                    s.push_str(c.symbol());
+                }
+            }
+        }
+        assert!(s.contains("unknown"), "must say unknown: {}", &s[..s.len().min(400)]);
     }
 
     #[test]
