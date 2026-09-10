@@ -168,8 +168,8 @@ fn print_table(recs: &[Record]) {
         return;
     }
     println!(
-        "{:<20} {:<8} {:<26} {:<9} {:<9} {}",
-        "WHEN", "KIND", "MODEL", "VENDOR", "OUTCOME", "OPTIONS / CAUSE"
+        "{:<20} {:<8} {:<26} {:<9} {:<9} OPTIONS / CAUSE",
+        "WHEN", "KIND", "MODEL", "VENDOR", "OUTCOME"
     );
     for r in recs {
         let opts = r

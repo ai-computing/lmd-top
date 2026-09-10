@@ -111,7 +111,7 @@ pub async fn fetch_zoo_live() -> Vec<ZooModel> {
             zoo.extend(models);
         }
     }
-    zoo.sort_by(|a, b| a.source.to_lowercase().cmp(&b.source.to_lowercase()));
+    zoo.sort_by_key(|z| z.source.to_lowercase());
     zoo
 }
 
