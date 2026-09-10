@@ -32,6 +32,7 @@ pub enum Overlay {
     Alerts,
     Preview,
     RouteForm,
+    StoreForm,
     ObjectiveForm,
     SecretForm,
     PlacePicker,
@@ -44,7 +45,7 @@ pub enum Overlay {
 
 impl Overlay {
     /// topmost 우선. 입력 소비·z-order 공용. (Help 가 가장 위, Logs 가 가장 아래)
-    pub const PRECEDENCE: [Overlay; 15] = [
+    pub const PRECEDENCE: [Overlay; 16] = [
         Overlay::Help,
         Overlay::ExitConfirm,
         Overlay::Confirm,
@@ -52,6 +53,7 @@ impl Overlay {
         Overlay::Alerts,
         Overlay::Preview,
         Overlay::RouteForm,
+        Overlay::StoreForm,
         Overlay::ObjectiveForm,
         Overlay::SecretForm,
         Overlay::PlacePicker,
@@ -72,6 +74,7 @@ impl Overlay {
             Overlay::Alerts => app.alerts_panel,
             Overlay::Preview => app.preview.is_some(),
             Overlay::RouteForm => app.route_form.is_some(),
+            Overlay::StoreForm => app.store_form.is_some(),
             Overlay::ObjectiveForm => app.objective_form.is_some(),
             Overlay::SecretForm => app.secret_form.is_some(),
             Overlay::PlacePicker => app.place_picker.is_some(),
@@ -100,6 +103,7 @@ impl Overlay {
             Overlay::Alerts => alerts_overlay(f, app),
             Overlay::Preview => preview_overlay(f, app),
             Overlay::RouteForm => route_form_overlay(f, app),
+            Overlay::StoreForm => store_form_overlay(f, app),
             Overlay::ObjectiveForm => objective_form_overlay(f, app),
             Overlay::SecretForm => secret_form_overlay(f, app),
             Overlay::PlacePicker => place_picker_overlay(f, app),

@@ -80,6 +80,10 @@ impl App {
                 } else {
                     "serve this compiled build → Deployment"
                 }));
+                // Store housekeeping. A build that took hours occupies tens of GB, and until
+                // now the only way to reclaim it was a shell on a pod with the PVC mounted.
+                items.push(ActionItem::store_move());
+                items.push(ActionItem::store_delete());
                 let label = if s.1 == "hf" {
                     format!("store · {} (source)", s.0)
                 } else {

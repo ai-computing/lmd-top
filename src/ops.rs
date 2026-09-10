@@ -231,6 +231,8 @@ pub enum Action {
     RouteRename,           // 라우트 경로 변경(HTTPRoute path)
     RouteRetarget,         // 라우트 백엔드 변경
     RouteDelete,           // 라우트 규칙 삭제
+    StoreDelete,           // 공유 스토어의 빌드 산출물 삭제(되돌릴 수 없음)
+    StoreMove,             // 공유 스토어 안에서 산출물 경로 이동/개명
     Pivot(char), // 관련 레이어로 점프(크로스레이어 pivot) — char 는 pivot 대상 키(p/i/r/e/m)
 }
 
@@ -252,8 +254,15 @@ impl Action {
             | Action::Cordon
             | Action::Uncordon
             | Action::RouteRename
-            | Action::RouteRetarget => Mode::Admin,
-            Action::Delete | Action::DeleteJob | Action::RouteDelete => Mode::Danger,
+            | Action::RouteRetarget
+            // A move is reversible — the bytes are still there under a different name.
+            | Action::StoreMove => Mode::Admin,
+            // Deleting a store artifact destroys tens of GB that took hours to build, and
+            // nothing in the cluster keeps a copy. Same tier as deleting a pod.
+            Action::Delete
+            | Action::DeleteJob
+            | Action::RouteDelete
+            | Action::StoreDelete => Mode::Danger,
         }
     }
 
@@ -276,6 +285,8 @@ impl Action {
             Action::Cordon | Action::Uncordon => "cordon",
             Action::Yaml => "yaml",
             Action::Delete | Action::DeleteJob => "delete",
+            Action::StoreDelete => "store delete",
+            Action::StoreMove => "store move",
             Action::Objective => "objective",
             Action::RouteRename | Action::RouteRetarget | Action::RouteDelete => "route edit",
             Action::Pivot(_) => "go",
@@ -293,6 +304,18 @@ pub struct RouteForm {
     pub choices: Vec<String>, // retarget 후보(kind:name)
     pub cursor: usize,        // retarget 선택 인덱스
 }
+/// Move form for a shared-store build — one editable destination path.
+///
+/// The source is fixed at open time from the selected inventory row, so a stale selection
+/// cannot retarget the move after the fact.
+#[derive(Clone)]
+pub struct StoreForm {
+    pub src: String,   // inventory path being moved (fixed)
+    pub repo: String,  // model id, for the prompt
+    pub size: String,  // du -sh of the source, for the prompt
+    pub value: String, // destination path, text-editable (starts as the source)
+}
+
 #[derive(Clone)]
 pub struct ActionItem {
     pub key: char, // 단축키(가속기) — 메뉴 안에서도 직접 누르면 실행
@@ -368,6 +391,24 @@ impl ActionItem {
     }
     pub fn delete(desc: &'static str) -> Self {
         Self::new('D', "Delete", desc, Action::Delete)
+    }
+    /// Delete a build artifact from the shared store. `M` for "store maintenance" — `D` is
+    /// already the pod/route delete key in the views that have one.
+    pub fn store_delete() -> Self {
+        Self::new(
+            'M',
+            "Remove",
+            "delete this build from the shared store (irreversible)",
+            Action::StoreDelete,
+        )
+    }
+    pub fn store_move() -> Self {
+        Self::new(
+            'V',
+            "Move",
+            "relocate/rename this build inside the store",
+            Action::StoreMove,
+        )
     }
     pub fn delete_job() -> Self {
         Self::new(
