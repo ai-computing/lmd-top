@@ -203,7 +203,41 @@ lmd-top 레시피는 이미 `rbln_create_runtimes=False` 를 넣고 있다 — �
 남은 변수는 **둘뿐이다: 툴체인 버전(0.10.2 vs 0.10.3), 그리고 모델.** 성공 사례는 전부
 Llama-3.1 계열 8B 였고, 내 실패는 전부 Qwen 등 다른 계열이었다.
 
-## 원인 확정: rebel-compiler 0.10.3 회귀 (0.10.2 에서는 됨)
+## 정정: 0.11.0 은 이 호스트에서 **동작한다** — 회귀는 decoder-only 경로에 있다
+
+새로 만든 provenance 프로브(Serving▸`P`)로 이 노드의 아티팩트를 직접 읽었더니, 앞선 결론을
+좁혀야 하는 사실이 나왔다:
+
+| 아티팩트 | 빌드 시점 | optimum-rbln | 클래스 | 결과 |
+|---|---|---|---|---|
+| `rbln-KONI-Llama3.1-8B-...-tp4-bs1-s8192` | 2026-06-01 | **0.10.2** | `RBLNLlamaForCausalLMConfig` | 성공 |
+| `rbln-gemma4-26b-a4b-tp4-s8192` | 2026-06-30 | **0.11.0.post1** | `RBLNGemma4ForConditionalGenerationConfig` | **성공** |
+| `rbln-llama8b-pd` | 2026-08 | (해당 없음 — `compile_from_torch` 원시 `.rbln`) | - | 성공 |
+
+**0.11.0.post1 은 망가지지 않았다.** 같은 호스트에서 Gemma4 를 정상 컴파일했다. 즉 "설치가
+깨졌다"·"이 환경이 문제다"는 완전히 배제된다.
+
+그런데 내 실패는 전부 **decoder-only 경로**를 지난다:
+
+```
+optimum/rbln/transformers/models/decoderonly/modeling_decoderonly.py:285 in get_compiled_model
+optimum/rbln/transformers/models/decoderonly/modeling_decoderonly.py:246 in _compile_model
+```
+
+Gemma4 는 `RBLNGemma4ForConditionalGeneration` — **다른 클래스, 다른 경로**다.
+
+### 좁혀진 결론
+
+| 경로 | 0.10.2 | 0.10.3 | 0.11.0.post1 |
+|---|---|---|---|
+| decoder-only (Llama·Qwen) | **성공** | 실패 `_impl:946` | 실패 `_impl:974` |
+| conditional-generation (Gemma4) | 미시험 | 미시험 | **성공** |
+
+**회귀는 decoder-only 컴파일 경로에 있고, 0.10.3 과 0.11.0 양쪽에 있으며, 0.10.2 에는 없었다.**
+앞서 "0.10.3 회귀"라고 쓴 것보다 정확하고, 벤더에 보고할 내용으로도 훨씬 강하다 — 같은 호스트
+·같은 SDK 버전에서 성공하는 대조군이 있으니까.
+
+## (앞선 결론) rebel-compiler 0.10.3 회귀 — 위 절에서 decoder-only 경로로 좁혀졌다
 
 **모델 축도 닫혔다.** 검증된 파라미터를 고정하고 모델만 바꿔서:
 

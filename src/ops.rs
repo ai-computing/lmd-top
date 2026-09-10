@@ -234,6 +234,7 @@ pub enum Action {
     StoreDelete,           // 공유 스토어의 빌드 산출물 삭제(되돌릴 수 없음)
     StoreMove,             // 공유 스토어 안에서 산출물 경로 이동/개명
     StoreRefresh,          // 스토어 인벤토리 재스캔(디스커버리 CronJob 을 즉시 1회 실행)
+    Provenance,            // 노드에 있는 아티팩트의 툴체인 출처를 읽기 전용 Job 으로 조회
     Pivot(char), // 관련 레이어로 점프(크로스레이어 pivot) — char 는 pivot 대상 키(p/i/r/e/m)
 }
 
@@ -260,7 +261,10 @@ impl Action {
             | Action::StoreMove
             // Creates a Job, like every other object-creating action, though the scan it runs
             // only reads the store.
-            | Action::StoreRefresh => Mode::Admin,
+            | Action::StoreRefresh
+            // Creates a Job, so it sits with the other object-creating actions — but the pod
+            // mounts the artifact read-only and only reads from it.
+            | Action::Provenance => Mode::Admin,
             // Deleting a store artifact destroys tens of GB that took hours to build, and
             // nothing in the cluster keeps a copy. Same tier as deleting a pod.
             Action::Delete
@@ -292,6 +296,7 @@ impl Action {
             Action::StoreDelete => "store delete",
             Action::StoreMove => "store move",
             Action::StoreRefresh => "store refresh",
+            Action::Provenance => "provenance",
             Action::Objective => "objective",
             Action::RouteRename | Action::RouteRetarget | Action::RouteDelete => "route edit",
             Action::Pivot(_) => "go",
@@ -409,6 +414,17 @@ impl ActionItem {
     }
     /// Re-scan the store now. Offered next to the destructive actions because that is when
     /// the inventory is most obviously stale.
+    /// Read the toolchain a node-local artifact recorded. The store inventory already carries
+    /// this for store builds; the hand-compiled hostPath directories that actually serve here
+    /// are reachable no other way.
+    pub fn provenance() -> Self {
+        Self::new(
+            'P',
+            "Provenance",
+            "read what built this artifact (read-only probe on its node)",
+            Action::Provenance,
+        )
+    }
     pub fn store_refresh() -> Self {
         Self::new(
             'r',

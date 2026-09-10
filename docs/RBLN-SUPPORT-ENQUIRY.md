@@ -75,14 +75,37 @@ after graph optimization, during result assembly.
 The Python exception carries no `__cause__`; the message originates in native code in
 `librbln.so`.
 
+## A positive control on the same host: 0.11.0.post1 compiles a different model class
+
+This is not a broken installation. On the same host, `optimum-rbln 0.11.0.post1` successfully
+compiled `RBLNGemma4ForConditionalGeneration` on 2026-06-30, and that artifact is in service.
+Its `rbln_config.json` records `"optimum_rbln_version": "0.11.0.post1"`.
+
+Every failure we see goes through the decoder-only path:
+
+```
+optimum/rbln/transformers/models/decoderonly/modeling_decoderonly.py:285  get_compiled_model
+optimum/rbln/transformers/models/decoderonly/modeling_decoderonly.py:246  _compile_model
+```
+
+Gemma4 uses a different class and a different path. So the failure appears specific to
+decoder-only models rather than to the SDK version or this machine:
+
+| Path | 0.10.2 | 0.10.3 | 0.11.0.post1 |
+|---|---|---|---|
+| decoder-only (Llama, Qwen) | **succeeds** | fails at `_impl:946` | fails at `_impl:974` |
+| conditional generation (Gemma4) | not tried | not tried | **succeeds** |
+
 ## What we are asking for
 
 1. **A 0.10.2 wheel bundle**, so we can restore the configuration that demonstrably works
    here. We already hold a matched 0.10.3 bundle, so the same delivery route is fine.
 2. Failing that, **a development build** (or a documented way to raise compiler log level in a
    deploy build) so the underlying error becomes visible.
-3. Any known regression between 0.10.2 and 0.10.3 affecting Llama-family decoder-only models
-   at `rbln_tensor_parallel_size=4`.
+3. Any known regression after 0.10.2 in the **decoder-only** compile path
+   (`RBLNLlamaForCausalLM` and friends) at `rbln_tensor_parallel_size=4`. Note the same SDK
+   version compiles a conditional-generation model on this host without trouble, so a
+   whole-SDK or host-level explanation is already ruled out.
 
 Environment: Ubuntu, Python 3.10, RBLN-CA22 × 4 on the compile host; compilation performed
 without claiming devices (`rbln_create_runtimes=False`).
