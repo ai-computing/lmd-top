@@ -68,7 +68,7 @@ fn epp_config(vendor: &str) -> Value {
     });
 
     ymap! {
-        "apiVersion" => s("inference.networking.x-k8s.io/v1alpha1"),
+        "apiVersion" => s("llm-d.ai/v1alpha1"),
         "kind" => s("EndpointPickerConfig"),
         "plugins" => seq(plugins),
         "schedulingProfiles" => seq(vec![ymap! {
