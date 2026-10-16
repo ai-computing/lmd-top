@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Furiosa SDK 2026.4 readiness (2026-10-16)
+- The default furiosa-llm image for compile, serve and training Jobs is pinned to `furiosaai/furiosa-llm:2026.3.0` (`accel::furiosa::DEFAULT_IMAGE`) instead of `:latest`. 2026.4 removed `serve --tensor-parallel-size` and legacy artifacts, so a floating tag would break existing manifests on their next restart.
+- Furiosa serve manifests pass `--tensor-parallel-size` only to images before 2026.4; for 2026.4+ (and unversioned tags, which will become 2026.4) TP comes from the FXB artifact. Measured on one RNGD with Qwen3-4B-FP8: 2026.4 serves +27–29% tok/s over 2026.3 (106→137 c1, 1146→1459 c16), so moving to it is a matter of setting `LMD_COMPILE_IMAGE_FURIOSA` once a 2026.4 image is published.
+
 ### Accelerator coverage: unknown is not zero (2026-10-16)
 - A Prometheus outage no longer reads as an empty or idle fleet. Overview shows `accel unknown` with the cause, aggregates render as `–` instead of `util 0% temp 0°C ⚡0W`, the Status band and `--snapshot` say the state is unknown, not idle.
 - Devices a node declares (feature-discovery `*.npu.count`/`nvidia.com/gpu.count` labels, plus allocatable) are compared with exporter samples. A shortfall is shown in the accelerator panel, the Status band, alerts, `--snapshot` and `--json` (`accelerator_coverage.gaps`) with its likely cause: node NotReady, node pressure (evicted vendor pods), device plugin not advertising, or exporter not reporting. Families whose metrics source is itself failing are reported as unknown, not as missing devices.

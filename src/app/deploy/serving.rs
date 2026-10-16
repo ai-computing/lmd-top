@@ -162,9 +162,16 @@ fn furiosa(form: &DeployForm, plan: &ServePlan, images: &Images) -> Vendor {
         form.model_id.clone(),
         "--port".into(),
         plan.port.clone(),
-        "--tensor-parallel-size".into(),
-        plan.serve_tp.clone(),
     ];
+    let image = images
+        .furiosa
+        .unwrap_or(crate::accel::furiosa::DEFAULT_IMAGE)
+        .to_string();
+    // 2026.4+ takes parallelism from the FXB artifact and rejects the flag outright.
+    if crate::accel::furiosa::serve_takes_tp_flag(&image) {
+        serve_args.push("--tensor-parallel-size".into());
+        serve_args.push(plan.serve_tp.clone());
+    }
     if store_backed {
         serve_args.push("--fxb".into());
         serve_args.push(format!("{}/model.fxb", form.mount.trim_end_matches('/')));
@@ -176,13 +183,11 @@ fn furiosa(form: &DeployForm, plan: &ServePlan, images: &Images) -> Vendor {
         volumes.push(store_volume());
     }
     Vendor {
-        image: images
-            .furiosa
-            .map(str::to_string)
-            .unwrap_or_else(|| "furiosaai/furiosa-llm:latest".into()),
+        image,
         note: "Furiosa: furiosa-llm serve. Store-backed artifacts use the HF id plus --fxb so \
-               config/tokenizer still come from HF. Serving TP is PE count; resource devices \
-               are RNGD count.",
+               config/tokenizer still come from HF. Serving TP is PE count (passed only to \
+               images before 2026.4, which fix it in the artifact); resource devices are RNGD \
+               count.",
         container: vec![
             ("args", args(serve_args)),
             ("ports", container_port(&plan.port)),

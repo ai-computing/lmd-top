@@ -49,7 +49,7 @@ pub const SOURCES: &[(&str, &str)] = &[
 ];
 pub const NPU_LORA_VERSION: &str = include_str!("../../assets/npu-lora/VERSION");
 
-const IMAGE: &str = "furiosaai/furiosa-llm:latest";
+const IMAGE: &str = crate::accel::furiosa::DEFAULT_IMAGE;
 const STORE: &str = "/mnt/store";
 const STORE_PVC: &str = "model-store";
 const METRICS_PORT: u16 = 9400;
