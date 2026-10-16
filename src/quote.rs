@@ -50,8 +50,6 @@ pub fn valid_model_id(s: &str) -> bool {
 mod tests {
     use super::*;
 
-
-
     #[test]
     fn valid_model_id_accepts_real_ids() {
         for ok in [
@@ -70,18 +68,17 @@ mod tests {
     fn valid_model_id_rejects_injection() {
         for bad in [
             "",
-            "Qwen/x\"-0.5B",              // breaks the YAML scalar
-            "Qwen/x\nbar",                // breaks the document
-            "Qwen/x; echo PWNED; #",      // shell injection
-            "Qwen/$(id)",                 // command substitution
-            "Qwen/x y",                   // space splits a shell word
-            "a/b/c",                      // not an HF repo id
-            "../../etc/passwd",           // traversal
+            "Qwen/x\"-0.5B",         // breaks the YAML scalar
+            "Qwen/x\nbar",           // breaks the document
+            "Qwen/x; echo PWNED; #", // shell injection
+            "Qwen/$(id)",            // command substitution
+            "Qwen/x y",              // space splits a shell word
+            "a/b/c",                 // not an HF repo id
+            "../../etc/passwd",      // traversal
             "/mnt/store/../../etc/shadow",
-            "Qwen/큐원",                  // non-ASCII is not a valid HF repo id
+            "Qwen/큐원", // non-ASCII is not a valid HF repo id
         ] {
             assert!(!valid_model_id(bad), "should reject {:?}", bad);
         }
     }
 }
-

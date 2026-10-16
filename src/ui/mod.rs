@@ -37,6 +37,7 @@ pub enum Overlay {
     SecretForm,
     PlacePicker,
     DeployForm,
+    PolicyForm,
     CompileForm,
     PrefetchForm,
     ActionMenu,
@@ -45,7 +46,7 @@ pub enum Overlay {
 
 impl Overlay {
     /// topmost 우선. 입력 소비·z-order 공용. (Help 가 가장 위, Logs 가 가장 아래)
-    pub const PRECEDENCE: [Overlay; 16] = [
+    pub const PRECEDENCE: [Overlay; 17] = [
         Overlay::Help,
         Overlay::ExitConfirm,
         Overlay::Confirm,
@@ -58,6 +59,7 @@ impl Overlay {
         Overlay::SecretForm,
         Overlay::PlacePicker,
         Overlay::DeployForm,
+        Overlay::PolicyForm,
         Overlay::CompileForm,
         Overlay::PrefetchForm,
         Overlay::ActionMenu,
@@ -79,6 +81,7 @@ impl Overlay {
             Overlay::SecretForm => app.secret_form.is_some(),
             Overlay::PlacePicker => app.place_picker.is_some(),
             Overlay::DeployForm => app.deploy_form.is_some(),
+            Overlay::PolicyForm => app.policy_form.is_some(),
             Overlay::CompileForm => app.compile_form.is_some(),
             Overlay::PrefetchForm => app.prefetch_form.is_some(),
             Overlay::ActionMenu => app.action_menu.is_some(),
@@ -96,7 +99,7 @@ impl Overlay {
 
     fn render(self, f: &mut Frame, app: &App) {
         match self {
-            Overlay::Help => help_overlay(f),
+            Overlay::Help => help_overlay(f, app),
             Overlay::ExitConfirm => exit_confirm_overlay(f, app),
             Overlay::Confirm => confirm_overlay(f, app),
             Overlay::Palette => palette_overlay(f, app),
@@ -108,6 +111,7 @@ impl Overlay {
             Overlay::SecretForm => secret_form_overlay(f, app),
             Overlay::PlacePicker => place_picker_overlay(f, app),
             Overlay::DeployForm => deploy_form_overlay(f, app),
+            Overlay::PolicyForm => policy_form_overlay(f, app),
             Overlay::CompileForm => compile_form_overlay(f, app),
             Overlay::PrefetchForm => prefetch_form_overlay(f, app),
             Overlay::ActionMenu => action_menu_overlay(f, app),
@@ -194,11 +198,53 @@ pub fn draw(f: &mut Frame, app: &App, fxs: &mut FxState) {
     }
 }
 
+fn manifest_review_text(pending: &crate::app::Pending, error: Option<&str>) -> String {
+    match pending {
+        crate::app::Pending::Apply { reviewed: Some(plan), .. } =>
+            format!("Targets fixed for this confirmation. Updates fail if UID/version changes; creates fail if the name already exists.\n\n{}", serde_json::to_string_pretty(&plan.targets()).unwrap_or_default()),
+        _ => format!("Targets not prepared yet. Return to confirmation; v retries preparation after an error.\n\n{}", error.unwrap_or("Preparation in progress.")),
+    }
+}
+pub fn manifest_review_scroll_max(
+    pending: &crate::app::Pending,
+    width: u16,
+    height: u16,
+    error: Option<&str>,
+) -> u16 {
+    let area = centered(Rect::new(0, 0, width, height), 95, height.saturating_sub(2));
+    Paragraph::new(manifest_review_text(pending, error))
+        .wrap(Wrap { trim: false })
+        .line_count(area.width.saturating_sub(2))
+        .saturating_sub(area.height.saturating_sub(2) as usize)
+        .min(u16::MAX as usize) as u16
+}
+
 /// Mutation confirmation popup. Defaults to No; ←→ selects Yes/No, Enter confirms.
 fn confirm_overlay(f: &mut Frame, app: &App) {
     let Some(pending) = &app.confirm else { return };
     let full = f.area();
-    let area = centered(full, 80, 9);
+    if app.manifest_review_details {
+        let area = centered(full, 95, full.height.saturating_sub(2));
+        let max = manifest_review_scroll_max(
+            pending,
+            full.width,
+            full.height,
+            app.manifest_review.error.as_deref(),
+        );
+        f.render_widget(Clear, area);
+        f.render_widget(
+            Paragraph::new(manifest_review_text(
+                pending,
+                app.manifest_review.error.as_deref(),
+            ))
+            .wrap(Wrap { trim: false })
+            .scroll((app.manifest_review_scroll.min(max), 0))
+            .block(block("reviewed targets · ↑↓/PgUp/PgDn · Esc back")),
+            area,
+        );
+        return;
+    }
+    let area = centered(full, 90, 10);
     f.render_widget(Clear, area);
     let yes = app.confirm_yes;
     let btn = |label: &str, on: bool| {
@@ -226,7 +272,15 @@ fn confirm_overlay(f: &mut Frame, app: &App) {
     ];
     if is_apply {
         lines.push(Line::from(Span::styled(
-            "  Applies a generated manifest · e=edit in vi · v=validate dry-run",
+            match pending {
+                crate::app::Pending::Apply {
+                    reviewed: Some(_), ..
+                } => "  Targets fixed · p=review targets · e=edit · v=refresh targets",
+                _ if app.manifest_review.error.is_some() => {
+                    "  Preparation failed · p=details · v=retry · e=edit"
+                }
+                _ => "  Preparing targets… apply waits · e=edit · Esc=cancel",
+            },
             Style::default().fg(C_DIM()),
         )));
     } else {
@@ -235,7 +289,27 @@ fn confirm_overlay(f: &mut Frame, app: &App) {
             Style::default().fg(C_DIM()),
         )));
     }
-    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  mode {} · requires {}+",
+            app.mode.name(),
+            pending.required_mode().name()
+        ),
+        Style::default().fg(if app.mode < pending.required_mode() {
+            C_BAD()
+        } else {
+            C_DIM()
+        }),
+    )));
+    lines.push(Line::from(format!(
+        "  context {} · namespace {}{}",
+        crate::kube_session::context().unwrap_or("unavailable"),
+        app.ns,
+        pending
+            .reviewed_identity()
+            .map(|i| format!(" · rv {}", i.version))
+            .unwrap_or_default()
+    )));
     lines.push(Line::from(vec![
         Span::raw("      "),
         btn("Yes run", yes),
@@ -243,7 +317,7 @@ fn confirm_overlay(f: &mut Frame, app: &App) {
         btn("No cancel", !yes),
     ]));
     let title = if is_apply {
-        "confirm apply · default No · ←→ select · Enter confirm · e edit · v validate · Esc cancel"
+        "confirm apply · default No · ←→ select · Enter confirm · p targets · e edit · v refresh · Esc cancel"
     } else {
         "confirm · default No · ←→ select · Enter confirm · Esc cancel"
     };
@@ -371,7 +445,7 @@ pub(super) fn centered(area: Rect, w: u16, h: u16) -> Rect {
     }
 }
 
-fn help_overlay(f: &mut Frame) {
+fn help_lines() -> Vec<Line<'static>> {
     let g = |k: &str, d: &str| {
         Line::from(vec![
             Span::styled(
@@ -387,7 +461,8 @@ fn help_overlay(f: &mut Frame) {
             Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
         ))
     };
-    let lines = vec![
+    let lines =
+        vec![
         sec("navigate"),
         g(
             "0-6 / Tab",
@@ -403,6 +478,7 @@ fn help_overlay(f: &mut Frame) {
         ),
         g("↑↓ j k", "move selection or scroll"),
         g("g / G", "jump to first / last row"),
+        g("P (EPP)", "cycle configured scheduling profile; reset local what-if weights"),
         g("Ctrl-u/d", "half-page up / down"),
         g(
             "Enter / a",
@@ -465,29 +541,40 @@ fn help_overlay(f: &mut Frame) {
     // Size the box from its content rather than a hardcoded height. The paragraph wraps, so a
     // long line costs more than one row — a fixed height silently pushed the last block out of
     // frame when a line was added, which is exactly what a keybinding list must not do.
-    const W: u16 = 68;
-    let inner = W.saturating_sub(2).max(1);
-    let rows: u16 = lines
-        .iter()
-        .map(|l| {
-            let w = l
-                .spans
-                .iter()
-                .map(|sp| unicode_width::UnicodeWidthStr::width(sp.content.as_ref()))
-                .sum::<usize>() as u16;
-            w / inner + 1
-        })
-        .sum();
-    let area = centered(f.area(), W, (rows + 2).min(f.area().height));
+    lines
+}
+
+pub(crate) fn help_scroll_max(width: u16, height: u16) -> u16 {
+    let paragraph = Paragraph::new(help_lines()).wrap(Wrap { trim: false });
+    paragraph
+        .line_count(width.min(68).saturating_sub(2).max(1))
+        .saturating_sub(height.saturating_sub(2) as usize)
+        .min(u16::MAX as usize) as u16
+}
+
+fn help_overlay(f: &mut Frame, app: &App) {
+    let lines = help_lines();
+    let width = 68.min(f.area().width);
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let rows = paragraph.line_count(width.saturating_sub(2).max(1));
+    let area = centered(
+        f.area(),
+        width,
+        (rows.saturating_add(2).min(u16::MAX as usize) as u16).min(f.area().height),
+    );
+    let max_scroll = rows
+        .saturating_sub(area.height.saturating_sub(2) as usize)
+        .min(u16::MAX as usize) as u16;
+    let scroll = app.help_scroll.min(max_scroll);
     f.render_widget(Clear, area);
     f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        paragraph.scroll((scroll, 0)).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(C_ACC()))
                 .title(Span::styled(
-                    " lmd-top · help (press any key to close) ",
+                    " help · ↑↓ PgUp/PgDn Home/End · Esc close ",
                     Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
                 )),
         ),
@@ -553,6 +640,14 @@ fn logs_overlay(f: &mut Frame, app: &App) {
     );
 }
 
+fn source_quality(s: &crate::collect::Snapshot, key: &str) -> crate::quality::Quality {
+    s.sources
+        .get(key)
+        .map_or(crate::quality::Quality::Unknown, |status| {
+            status.state(crate::collect::now_secs(), s.stale_after_secs.max(10))
+        })
+}
+
 // ── 헤더 ───────────────────────────────────────────────
 fn title_bar(f: &mut Frame, area: Rect, app: &App) {
     let s = &app.snap;
@@ -562,7 +657,15 @@ fn title_bar(f: &mut Frame, area: Rect, app: &App) {
     } else {
         SPINNER[(tick as usize) % SPINNER.len()]
     };
-    let gw = if s.gw_addr.is_empty() {
+    let gw = if !matches!(
+        source_quality(s, "gateway"),
+        crate::quality::Quality::Fresh | crate::quality::Quality::Empty
+    ) {
+        Span::styled(
+            format!("⌂ gw {:?}", source_quality(s, "gateway")).to_lowercase(),
+            Style::default().fg(C_WARN()),
+        )
+    } else if s.gw_addr.is_empty() {
         Span::styled("⌂ gw —", Style::default().fg(C_DIM()))
     } else if s.gw_ok {
         Span::styled(format!("⌂ gw {} ●", s.gw_addr), Style::default().fg(C_OK()))
@@ -577,9 +680,22 @@ fn title_bar(f: &mut Frame, area: Rect, app: &App) {
         Span::styled("  · connecting…", Style::default().fg(C_DIM()))
     } else {
         let age = crate::collect::now_secs().saturating_sub(s.ts);
-        let col = if age > 10 { C_WARN() } else { C_DIM() };
+        let degraded = s.degraded_sources(crate::collect::now_secs()).len();
+        let col = if age > s.stale_after_secs.max(10) || degraded > 0 {
+            C_WARN()
+        } else {
+            C_DIM()
+        };
         Span::styled(
-            format!("  · updated {}s ago", age),
+            format!(
+                "  · full {}s ago{}",
+                age,
+                if degraded > 0 {
+                    format!(" · {} source(s) stale/error", degraded)
+                } else {
+                    String::new()
+                }
+            ),
             Style::default().fg(col),
         )
     };
@@ -629,22 +745,17 @@ fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
     // 서빙/SLO 우선(왼쪽), 인프라는 뒤(오른쪽). "지금 서빙 건강한가?"가 항상 보이는 자리로.
     let s = &app.snap;
     let p = &s.perf;
-    let (mut busy, mut mu, mut mt, mut pw) = (0usize, 0.0f64, 0.0f64, 0.0f64);
-    for a in &s.accel {
-        if a.util > IDLE_UTIL {
-            busy += 1; // "busy" 기준을 LED/util_color 와 동일(IDLE_UTIL)하게 통일
-        }
-        mu += a.mem_used_gb;
-        mt += a.mem_total_gb;
-        pw += a.power;
-    }
+    let busy = crate::measurement::busy_count(s.accel.iter().map(|a| a.util));
+    let mu = crate::measurement::complete_sum(s.accel.iter().map(|a| Some(a.mem_used_gb)));
+    let mt = crate::measurement::complete_sum(s.accel.iter().map(|a| Some(a.mem_total_gb)));
+    let pw = crate::measurement::complete_sum(s.accel.iter().map(|a| Some(a.power)));
     let nacc = s.accel.len();
     let serving = s.serving_count();
     let total = s.models.len();
-    let mempct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
+    let mempct = if mt > 0.0 { mu / mt * 100.0 } else { f64::NAN };
     let err = p.err_rate;
     // 에러가 "의미있게" 있을 때만 경고: 비율(err/req) > 1% (또는 req 없는데 err 발생).
-    let err_bad = !err.is_nan() && err > 0.0 && (err / p.req_rate.max(err) > 0.01);
+    let err_bad = err.is_finite() && err > 0.0 && (err / p.req_rate.max(err) > 0.01);
     // 서빙 건강 글리프: 0서빙=✗, 유의미 에러=⚠, 아니면 ●.
     let (sg, sc) = if total == 0 {
         ("○", C_DIM())
@@ -678,14 +789,29 @@ fn summary_bar(f: &mut Frame, area: Rect, app: &App) {
         ),
         Span::raw("│ "),
         Span::styled(
-            format!("accel {}/{} busy  ", busy, nacc),
+            format!(
+                "accel {}/{} busy  ",
+                busy.map(|n| n.to_string()).unwrap_or_else(|| "—".into()),
+                nacc
+            ),
             Style::default().fg(C_DIM()),
         ),
         Span::styled(
-            format!("VRAM {:.0}%  ", mempct),
+            if mempct.is_finite() {
+                format!("VRAM {:.0}%  ", Metric(mempct))
+            } else {
+                "VRAM —  ".into()
+            },
             Style::default().fg(mem_color(mempct)),
         ),
-        Span::styled(format!("⚡{:.0}W", pw), Style::default().fg(C_DIM())),
+        Span::styled(
+            if nacc > 0 && pw.is_finite() {
+                format!("⚡{:.0}W", Metric(pw))
+            } else {
+                "⚡—".into()
+            },
+            Style::default().fg(C_DIM()),
+        ),
     ];
     // Prometheus 도달 불가 — 빈 테이블이 "장비 없음"이 아니라 연결 문제임을 명시.
     if !s.prom_ok {
@@ -994,22 +1120,18 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 truncw(&a.busy_model, 22)
             };
-            let mempct = if a.mem_total_gb > 0.0 {
-                a.mem_used_gb / a.mem_total_gb * 100.0
-            } else {
-                0.0
-            };
+            let mempct = percent(a.mem_used_gb, a.mem_total_gb);
             let mut util = dot_bar(a.util, 9, util_color(a.util)).spans;
             util.push(Span::styled(
-                format!(" {:>3.0}%", a.util),
+                format!(" {:>3.0}%", Metric(a.util)),
                 Style::default().fg(util_color(a.util)),
             ));
             let mut mem = dot_bar(mempct, 7, mem_color(mempct)).spans;
             mem.push(Span::styled(
                 format!(
                     " {:.0}/{:.0}GB{}",
-                    a.mem_used_gb,
-                    a.mem_total_gb,
+                    Metric(a.mem_used_gb),
+                    Metric(a.mem_total_gb),
                     if a.unified_mem { "∪" } else { "" }
                 ),
                 Style::default().fg(C_DIM()),
@@ -1042,10 +1164,10 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
                 Cell::from(Line::from(util)),
                 Cell::from(Line::from(mem)),
                 Cell::from(Span::styled(
-                    format!("{:.0}°C", a.temp),
+                    format!("{:.0}°C", Metric(a.temp)),
                     Style::default().fg(temp_color(a.temp)),
                 )),
-                cellw(format!("{:.0}W", a.power), 5),
+                cellw(format!("{:.0}W", Metric(a.power)), 5),
                 Cell::from(Span::styled(trend, Style::default().fg(util_color(a.util)))), // 인라인 트렌드(all-smi식)
                 Cell::from(Span::styled(model_cell, Style::default().fg(C_DIM()))),
             ])
@@ -1270,18 +1392,18 @@ fn scorer_desc(name: &str) -> &'static str {
         "active-request-scorer" => "Prefers endpoints with fewer in-flight requests.",
         "session-affinity-scorer" => "Keeps a session's requests pinned to the same endpoint.",
         "latency-prediction-scorer" => "Uses a predicted-latency model to pick the fastest endpoint.",
-        _ => "EPP scoring plugin. Weighted scores are summed; the max-score endpoint is picked.",
+        _ => "Scoring plugin reference; inspect its configured type and picker for selection behavior.",
     }
 }
 
 fn view_epp(f: &mut Frame, area: Rect, app: &App) {
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(6), Constraint::Length(6)])
+        .constraints([Constraint::Min(6), Constraint::Length(10)])
         .split(area);
     let (top_l, top_r) = two_panes(split[0], 52);
 
-    match &app.snap.epp {
+    match app.selected_epp() {
         Some(cfg) => {
             let sfocus = app.panel_focus == 0; // scorers 패널 포커스
                                                // 유효 가중치(what-if 오버라이드 반영) + 상대 영향도(%).
@@ -1291,15 +1413,16 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                 .map(|(n, w)| app.epp_weight(n, *w))
                 .collect();
             let maxw = eff.iter().cloned().fold(1.0, f64::max);
-            let total: f64 = eff.iter().sum::<f64>().max(1e-9);
+            let shares = crate::epp_config::weight_shares(&eff);
             let simulating = !app.epp_weights.is_empty();
             let srows: Vec<Row> = cfg
                 .scorers
                 .iter()
-                .map(|(name, base)| {
+                .enumerate()
+                .map(|(index, (name, base))| {
                     let w = app.epp_weight(name, *base);
                     let ov = app.epp_weights.contains_key(name);
-                    let infl = w / total * 100.0;
+                    let infl = shares.as_ref().and_then(|shares| shares.get(index));
                     Row::new(vec![
                         cellw(name.clone(), 26),
                         Cell::from(Span::styled(
@@ -1314,7 +1437,8 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                         )),
                         Cell::from(bar_line(w / maxw * 100.0, 8, C_ACC())), // 고정폭 + track(░)
                         Cell::from(Span::styled(
-                            format!("{:>3.0}%", infl),
+                            infl.map(|share| format!("{share:>3.0}%"))
+                                .unwrap_or_else(|| "   –".into()),
                             Style::default().fg(C_DIM()),
                         )),
                     ])
@@ -1367,12 +1491,33 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
             let mut dl: Vec<Line> = vec![
                 Line::from(vec![
                     Span::styled("profile: ", Style::default().fg(C_DIM())),
-                    Span::styled(cfg.profile.clone(), Style::default().fg(Color::White)),
+                    Span::styled(
+                        format!(
+                            "{} · {:?}",
+                            cfg.profile,
+                            source_quality(&app.snap, "epp_config")
+                        ),
+                        Style::default().fg(Color::White),
+                    ),
                     Span::styled("   picker: ", Style::default().fg(C_DIM())),
                     Span::styled(cfg.picker.clone(), Style::default().fg(Color::White)),
                 ]),
                 Line::from(""),
             ];
+            dl.push(Line::from(
+                "P: next profile (local view; resets what-if weights)",
+            ));
+            if shares.is_none() {
+                dl.push(Line::from(
+                    "Weight share unavailable: needs nonnegative weights with positive total",
+                ));
+            }
+            if let Some(all) = &app.snap.epp {
+                dl.push(Line::from(format!("Profiles: {}", all.profiles.join(", "))));
+            }
+            for plugin in &cfg.other_plugins {
+                dl.push(Line::from(format!("Other: {plugin}")));
+            }
             if let Some((name, w)) = sel {
                 dl.push(Line::from(vec![
                     Span::styled(
@@ -1396,7 +1541,10 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
         }
         None => f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "EPP ConfigMap not found (llmd-router-epp)",
+                format!(
+                    "EPP configuration unavailable ({:?}); inspect source diagnostics",
+                    source_quality(&app.snap, "epp_config")
+                ),
                 Style::default().fg(C_DIM()),
             )))
             .block(block("EPP scorers")),
@@ -1464,23 +1612,14 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
 
     // request distribution
     let mut dl: Vec<Line> = vec![Line::from(vec![
-        Span::styled("EPP in path: ", Style::default().fg(C_DIM())),
         Span::styled(
-            if app.snap.epp_in_path {
-                "yes"
-            } else {
-                "no (bypassed)"
-            },
-            Style::default().fg(if app.snap.epp_in_path {
-                C_OK()
-            } else {
-                C_WARN()
-            }),
+            crate::routing::evidence(&app.snap).summary(),
+            Style::default().fg(C_DIM()),
         ),
         Span::styled(
             format!(
                 "   prefix idx: {}",
-                if app.snap.prefix_idx.is_nan() {
+                if !app.snap.prefix_idx.is_finite() {
                     "-".into()
                 } else {
                     format!("{:.0}", app.snap.prefix_idx)
@@ -1489,21 +1628,29 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(C_DIM()),
         ),
     ])];
+    dl.push(Line::from(
+        "Observed endpoints · profile attribution unavailable",
+    ));
+    dl.push(Line::from(format!(
+        "picks {:?} · queues {:?} · scores {:?}",
+        source_quality(&app.snap, "epp_decisions"),
+        source_quality(&app.snap, "epp_queues"),
+        source_quality(&app.snap, "epp_scores")
+    )));
     let eps = app.epp_endpoints();
-    let observed = eps.iter().any(|e| e.picks > 0.0);
+    let observed = eps.iter().any(|e| e.picks.is_some_and(|p| p > 0.0));
     if !observed && !eps.iter().any(|e| e.queue.is_some() || e.score.is_some()) {
         dl.push(Line::from(Span::styled(
-            if app.snap.epp_in_path {
-                "no endpoint data (waiting for traffic)"
-            } else {
-                "no endpoint data (EPP bypassed - see Topo)"
-            },
+            "endpoint data unavailable; check traffic and metric source states",
             Style::default().fg(C_DIM()),
         )));
     } else {
         // per-endpoint decision 표(스켈레톤): pod · share bar · queue(관측) · kv/score(EPP 노출 대기).
         dl.push(Line::from(Span::styled(
-            format!("{:<20} {:>4}  {:>5} {:>4} {:>5}", "ENDPOINT", "pick", "queue", "kv", "score"),
+            format!(
+                "{:<20} {:>4}  {:>5} {:>4} {:>5}",
+                "ENDPOINT", "pick", "queue", "kv", "score"
+            ),
             Style::default().fg(C_DIM()),
         )));
         for e in eps.iter().take(4) {
@@ -1512,11 +1659,16 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::White),
             )];
             sp.push(Span::styled(
-                format!("{:>3.0}% ", e.share),
+                e.share
+                    .map(|share| format!("{share:>3.0}% "))
+                    .unwrap_or_else(|| "   – ".into()),
                 Style::default().fg(C_ACC()),
             ));
             let cell = |v: Option<f64>, dec: usize| match v {
-                Some(x) => Span::styled(format!("{:>5.*}", dec, x), Style::default().fg(Color::White)),
+                Some(x) => Span::styled(
+                    format!("{:>5.*}", dec, x),
+                    Style::default().fg(Color::White),
+                ),
                 None => Span::styled(format!("{:>5}", "–"), Style::default().fg(C_DIM())),
             };
             sp.push(cell(e.queue, 0));
@@ -1534,7 +1686,9 @@ fn view_epp(f: &mut Frame, area: Rect, app: &App) {
         }
     }
     f.render_widget(
-        Paragraph::new(dl).block(block("endpoint decisions · why this pick (kv/score = EPP-exposed)")),
+        Paragraph::new(dl).block(block(
+            "endpoint decisions · why this pick (kv/score = EPP-exposed)",
+        )),
         bottom_r,
     );
 }
@@ -1585,7 +1739,9 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         format!(
             "llm-d-gateway  {}  {}",
             s.gw_addr,
-            if s.gw_ok {
+            if source_quality(s, "gateway") != crate::quality::Quality::Fresh {
+                "? status unverified (see sources)"
+            } else if s.gw_ok {
                 "●Programmed"
             } else {
                 "○ pending"
@@ -1624,12 +1780,17 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
     for (i, r) in s.routes.iter().enumerate() {
         let last = i + 1 == n;
         let rbr = if last { "   └─ " } else { "   ├─ " };
-        let m = s.models.iter().find(|m| m.name == r.backend);
+        let owners = crate::routing::owners(s, r);
+        let m = if owners.len() == 1 {
+            s.models.iter().find(|m| m.name == owners[0])
+        } else {
+            None
+        };
         let up = m.map(|m| m.ready > 0).unwrap_or(false);
         let is_pool = r.kind == "InferencePool";
         // backend 계층 배지: InferencePool → [EPP], Service → [SVC](직결).
         let (btag, bcol) = if is_pool {
-            ("EPP", c_epp())
+            ("POOL", c_epp())
         } else {
             ("SVC", c_svc())
         };
@@ -1639,7 +1800,11 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
         }
         let mut spans = vec![
             Span::styled(rbr, Style::default().fg(C_DIM())),
-            dot(up),
+            if m.is_some() {
+                dot(up)
+            } else {
+                Span::styled("? ", Style::default().fg(C_DIM()))
+            },
             Span::styled(
                 format!("{} ", padw(&r.path, 13)),
                 Style::default().fg(Color::White),
@@ -1666,7 +1831,10 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
                 ),
                 Style::default().fg(if up { C_OK() } else { C_DIM() }),
             )),
-            None => spans.push(Span::styled("(no serving)", Style::default().fg(C_WARN()))),
+            None => spans.push(Span::styled(
+                "(model relation unknown or shared)",
+                Style::default().fg(C_DIM()),
+            )),
         }
         let mut rl = Line::from(spans);
         if sel {
@@ -1674,12 +1842,30 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
             // 선택 route(정렬 유지 위해 배경만)
         }
         lines.push(rl);
+        if !r.match_summary.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("      {} · {}", r.route, r.match_summary),
+                Style::default().fg(C_DIM()),
+            )));
+        }
+        if !r.backend_summary.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("      {}", r.backend_summary),
+                Style::default().fg(C_DIM()),
+            )));
+        }
         // 하위: [INFRA] 이 backend 의 파드들(트리 자식)
         let cont = if last { "      " } else { "   │  " };
         let pods: Vec<&crate::collect::PodRow> = s
             .pods
             .iter()
-            .filter(|p| p.name.starts_with(&r.backend))
+            .filter(|p| {
+                owners.iter().any(|owner| {
+                    s.deployment_pods
+                        .get(*owner)
+                        .is_some_and(|names| names.contains(&p.name))
+                })
+            })
             .collect();
         for (j, p) in pods.iter().enumerate() {
             let pbr = if j + 1 == pods.len() {
@@ -1703,20 +1889,10 @@ fn view_routing(f: &mut Frame, area: Rect, app: &App) {
             ]));
         }
     }
-    // EPP 경유 여부 진단
-    if !s.routes.is_empty() {
-        if s.epp_in_path {
-            lines.push(Line::from(Span::styled(
-                "  ✓ routes go through InferencePool (EPP-routed)",
-                Style::default().fg(C_OK()),
-            )));
-        } else {
-            lines.push(Line::from(Span::styled(
-                "  ⚠ some HTTPRoutes point to Service directly → EPP bypassed (no model-aware routing)",
-                Style::default().fg(C_WARN()),
-            )));
-        }
-    }
+    lines.push(Line::from(Span::styled(
+        crate::routing::evidence(s).summary(),
+        Style::default().fg(C_DIM()),
+    )));
 
     let top = Layout::default()
         .direction(Direction::Vertical)
@@ -1897,7 +2073,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         let ncnt = s.accel.len().max(1);
         let avg = usum / ncnt as f64;
         let avg_temp = tsum / ncnt as f64;
-        let mempct = if mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
+        let mempct = percent(mu, mt);
         let ready = s.serving_count();
         // 인벤토리 라벨(GB10×2 …) + 라벨된 집계(util·temp·VRAM·W·models). req/s·TTFT 는 상단바에 있어 생략.
         let mut sp = vec![Span::styled(
@@ -1911,15 +2087,20 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
             ));
         }
         sp.push(Span::styled(
-            format!("│ util {:.0}% ", avg),
+            format!("│ util {:.0}% ", Metric(avg)),
             Style::default().fg(util_color(avg)),
         ));
         sp.push(Span::styled(
-            format!("temp {:.0}°C ", avg_temp),
+            format!("temp {:.0}°C ", Metric(avg_temp)),
             Style::default().fg(temp_color(avg_temp)),
         ));
         sp.push(Span::styled(
-            format!("│ VRAM {:.0}/{:.0}GB {:.0}% ", mu, mt, mempct),
+            format!(
+                "│ VRAM {:.0}/{:.0}GB {:.0}% ",
+                Metric(mu),
+                Metric(mt),
+                Metric(mempct)
+            ),
             Style::default().fg(mem_color(mempct)),
         ));
         // 노드 루트 디스크 집계(존재하는 노드만)
@@ -1927,14 +2108,14 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
             (u + n.disk_used_gb, t + n.disk_total_gb)
         });
         if dt > 0.0 {
-            let dp = du / dt * 100.0;
+            let dp = percent(du, dt);
             sp.push(Span::styled(
-                format!("disk {:.0}% ", dp),
+                format!("disk {:.0}% ", Metric(dp)),
                 Style::default().fg(mem_color(dp)),
             ));
         }
         sp.push(Span::styled(
-            format!("⚡{:.0}W ", pw),
+            format!("⚡{:.0}W ", Metric(pw)),
             Style::default().fg(C_DIM()),
         ));
         sp.push(Span::styled(
@@ -1946,7 +2127,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
             .accel
             .iter()
             .map(|a| app.energy_session_wh(a))
-            .filter(|x| !x.is_nan())
+            .filter(|x| x.is_finite())
             .sum();
         if ewh > 0.0 {
             sp.push(Span::styled(
@@ -1966,7 +2147,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
             )];
             vsp.extend(stacked_bar(&segs, mt, barw));
             vsp.push(Span::styled(
-                format!(" {:.0}/{:.0}GB used", mu, mt),
+                format!(" {:.0}/{:.0}GB used", Metric(mu), Metric(mt)),
                 Style::default().fg(C_DIM()),
             ));
             cluster_lines.push(Line::from(vsp));
@@ -2086,7 +2267,7 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
     let mut al: Vec<Line> = Vec::new();
     for (kind, node, cnt, us, mu, mt, alive, thr, model) in &groups {
         let util = us / (*cnt as f64);
-        let mempct = if *mt > 0.0 { mu / mt * 100.0 } else { 0.0 };
+        let mempct = percent(*mu, *mt);
         let (hi, hc) = if !*alive {
             ("✗", C_BAD())
         } else if *thr {
@@ -2109,14 +2290,14 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         ];
         sp.extend(dot_bar(util, 10, util_color(util)).spans); // overview 는 레인보우 바(장식) — 수치는 severity 색으로 의미 유지
         sp.push(Span::styled(
-            format!(" {:>3.0}% ", util),
+            format!(" {:>3.0}% ", Metric(util)),
             Style::default().fg(util_color(util)),
         ));
         sp.push(Span::styled("mem ", Style::default().fg(C_DIM())));
         sp.extend(dot_bar(mempct, 10, mem_color(mempct)).spans); // MEM 도 레인보우 바 — 유휴 때도 채움이 보임
                                                                  // GB 필드 고정폭(우측정렬) → 뒤따르는 트렌드 스파크라인이 열 정렬됨.
         sp.push(Span::styled(
-            format!(" {:>3.0}/{:>3.0}GB  ", mu, mt),
+            format!(" {:>3.0}/{:>3.0}GB  ", Metric(*mu), Metric(*mt)),
             Style::default().fg(mem_color(mempct)),
         ));
         sp.push(Span::styled("trend ", Style::default().fg(C_DIM())));
@@ -2151,17 +2332,10 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
 
     // Inference: EPP 경로 + 풀 endpoints + scorers + autoscale
     let mut pl: Vec<Line> = Vec::new();
-    pl.push(Line::from(vec![
-        Span::styled("EPP path ", Style::default().fg(C_DIM())),
-        Span::styled(
-            if s.epp_in_path {
-                "via InferencePool ●"
-            } else {
-                "bypassed (HTTPRoute→Service) ⚠"
-            },
-            Style::default().fg(if s.epp_in_path { C_OK() } else { C_WARN() }),
-        ),
-    ]));
+    pl.push(Line::from(vec![Span::styled(
+        crate::routing::evidence(s).summary(),
+        Style::default().fg(C_DIM()),
+    )]));
     for p in s.pools.iter().take(2) {
         pl.push(Line::from(vec![
             dot(p.ep_ready > 0),
@@ -2187,7 +2361,11 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
             .map(|(n, w)| format!("{}·{:.0}", n.replace("-scorer", ""), w))
             .collect();
         pl.push(Line::from(Span::styled(
-            format!("scorers: {}", names.join("  ")),
+            format!(
+                "scorers ({:?}): {}",
+                source_quality(s, "epp_config"),
+                names.join("  ")
+            ),
             Style::default().fg(C_DIM()),
         )));
     }
@@ -2223,11 +2401,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(11), Constraint::Min(6)])
             .split(area);
-        let mempct = if a.mem_total_gb > 0.0 {
-            a.mem_used_gb / a.mem_total_gb * 100.0
-        } else {
-            0.0
-        };
+        let mempct = percent(a.mem_used_gb, a.mem_total_gb);
         let health = if !a.alive {
             ("✗ not alive", C_BAD())
         } else {
@@ -2257,7 +2431,10 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
                     health.0,
                     Style::default().fg(health.1).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("   {:.0} W", a.power), Style::default().fg(C_DIM())),
+                Span::styled(
+                    format!("   {:.0} W", Metric(a.power)),
+                    Style::default().fg(C_DIM()),
+                ),
                 Span::styled(
                     format!(
                         "   {}",
@@ -2274,7 +2451,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             gauge_row(
                 "compute",
                 a.util,
-                &format!("{:.0} %", a.util),
+                &format!("{:.0} %", Metric(a.util)),
                 util_color(a.util),
                 barw,
             ),
@@ -2283,9 +2460,9 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
                 mempct,
                 &format!(
                     "{:.1} / {:.1} GB  ({:.0}%){}",
-                    a.mem_used_gb,
-                    a.mem_total_gb,
-                    mempct,
+                    Metric(a.mem_used_gb),
+                    Metric(a.mem_total_gb),
+                    Metric(mempct),
                     if a.unified_mem {
                         "  unified w/ host"
                     } else {
@@ -2297,14 +2474,14 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             ),
             gauge_row(
                 "temp",
-                a.temp.min(100.0),
-                &format!("{:.0} °C", a.temp),
+                a.temp,
+                &format!("{:.0} °C", Metric(a.temp)),
                 temp_color(a.temp),
                 barw,
             ),
         ];
         // 메모리 대역폭(통합 메모리에선 진짜 병목) — DCGM MEM_COPY_UTIL. 있을 때만.
-        if !a.mem_bw.is_nan() {
+        if a.mem_bw.is_finite() {
             lines.push(gauge_row(
                 "mem bw",
                 a.mem_bw,
@@ -2313,11 +2490,11 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
                 barw,
             ));
         }
-        if !a.clock_mhz.is_nan() || !a.mem_temp.is_nan() {
+        if a.clock_mhz.is_finite() || a.mem_temp.is_finite() {
             lines.push(Line::from(vec![
                 Span::styled(format!("{:<8} ", "clock"), Style::default().fg(C_DIM())),
                 Span::styled(
-                    if a.clock_mhz.is_nan() {
+                    if !a.clock_mhz.is_finite() {
                         "–".into()
                     } else {
                         format!("{:.0} MHz", a.clock_mhz)
@@ -2328,7 +2505,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
                 ),
                 Span::styled("    mem temp ", Style::default().fg(C_DIM())),
                 Span::styled(
-                    if a.mem_temp.is_nan() {
+                    if !a.mem_temp.is_finite() {
                         "–".into()
                     } else {
                         format!("{:.0} °C", a.mem_temp)
@@ -2339,7 +2516,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         }
         // 세션 에너지(누적) — R 로 리셋
         let ewh = app.energy_session_wh(a);
-        if !ewh.is_nan() {
+        if ewh.is_finite() {
             let hrs = crate::collect::now_secs().saturating_sub(app.energy_since) as f64 / 3600.0;
             let avg = if hrs > 1e-6 { ewh / hrs } else { f64::NAN };
             lines.push(Line::from(vec![
@@ -2351,10 +2528,10 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled(
                     format!(
                         "  (session · avg {})",
-                        if avg.is_nan() {
+                        if !avg.is_finite() {
                             "–".into()
                         } else {
-                            format!("{:.0} W", avg)
+                            format!("{:.0} W", Metric(avg))
                         }
                     ),
                     Style::default().fg(C_DIM()),
@@ -2400,11 +2577,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         } else {
             ("● ready", C_OK())
         };
-        let mempct = if n.mem_total_gb > 0.0 {
-            n.mem_used_gb / n.mem_total_gb * 100.0
-        } else {
-            0.0
-        };
+        let mempct = percent(n.mem_used_gb, n.mem_total_gb);
         let barw = (rows[0].width as usize).saturating_sub(34).clamp(10, 46);
         let lines = vec![
             Line::from(vec![
@@ -2431,39 +2604,37 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             Line::from(""),
             gauge_row(
                 "cpu",
-                if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct },
-                &if n.cpu_pct.is_nan() {
+                n.cpu_pct,
+                &if !n.cpu_pct.is_finite() {
                     "–".into()
                 } else {
                     format!("{:.0} %", n.cpu_pct)
                 },
-                util_color(n.cpu_pct.max(0.0)),
+                util_color(n.cpu_pct),
                 barw,
             ),
             gauge_row(
                 "memory",
                 mempct,
-                &if n.mem_total_gb <= 0.0 {
+                &if !percent(n.mem_used_gb, n.mem_total_gb).is_finite() {
                     "–".into()
                 } else {
                     format!(
                         "{:.0} / {:.0} GB  ({:.0}%)",
-                        n.mem_used_gb, n.mem_total_gb, mempct
+                        Metric(n.mem_used_gb),
+                        Metric(n.mem_total_gb),
+                        Metric(mempct)
                     )
                 },
                 mem_color(mempct),
                 barw,
             ),
             {
-                let dp = if n.disk_total_gb > 0.0 {
-                    n.disk_used_gb / n.disk_total_gb * 100.0
-                } else {
-                    0.0
-                };
+                let dp = percent(n.disk_used_gb, n.disk_total_gb);
                 gauge_row(
                     "disk /",
                     dp,
-                    &if n.disk_total_gb <= 0.0 {
+                    &if !percent(n.disk_used_gb, n.disk_total_gb).is_finite() {
                         "–".into()
                     } else {
                         format!(
@@ -2478,7 +2649,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled(format!("{:<8} ", "load1"), Style::default().fg(C_DIM())),
                 Span::styled(
-                    if n.load1.is_nan() {
+                    if !n.load1.is_finite() {
                         "–".into()
                     } else {
                         format!("{:.2}", n.load1)
@@ -2820,11 +2991,7 @@ fn detail_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(pivot_prev(
             "e",
             "epp",
-            if app.snap.epp_in_path {
-                "via InferencePool ●"
-            } else {
-                "bypassed → Service ⚠"
-            },
+            crate::routing::evidence(&app.snap).summary(),
         ));
         lines.push(Line::from(Span::styled(
             "  s scale · S restart",
@@ -2931,10 +3098,17 @@ fn library_detail(f: &mut Frame, area: Rect, app: &App) {
             if !m.display.is_empty() {
                 lines.push(kv("display", &m.display, C_ACC()));
             }
-            lines.push(kv("role", if m.role.is_empty() { "-" } else { &m.role }, C_DIM()));
+            lines.push(kv(
+                "role",
+                if m.role.is_empty() { "-" } else { &m.role },
+                C_DIM(),
+            ));
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("placement candidates ({}) — 배치 후보 × 라이브 재고", m.placements.len()),
+                format!(
+                    "placement candidates ({}) — 배치 후보 × 라이브 재고",
+                    m.placements.len()
+                ),
                 Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
             )));
             for p in &m.placements {
@@ -2948,12 +3122,11 @@ fn library_detail(f: &mut Frame, area: Rect, app: &App) {
                     Span::styled("  • ", Style::default().fg(C_TRACK())),
                     Span::styled(
                         format!("{} ", p.engine),
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(
-                        format!("on {} ", p.accel),
-                        Style::default().fg(C_ACC()),
-                    ),
+                    Span::styled(format!("on {} ", p.accel), Style::default().fg(C_ACC())),
                     Span::styled(g, Style::default().fg(gc)),
                 ]));
                 lines.push(Line::from(Span::styled(
@@ -2965,7 +3138,11 @@ fn library_detail(f: &mut Frame, area: Rect, app: &App) {
                         p.count.max(1) * p.replicas.max(1),
                         free,
                         need,
-                        if p.requires_artifact { "required" } else { "not needed" },
+                        if p.requires_artifact {
+                            "required"
+                        } else {
+                            "not needed"
+                        },
                     ),
                     Style::default().fg(C_DIM()),
                 )));
@@ -2990,7 +3167,11 @@ fn library_detail(f: &mut Frame, area: Rect, app: &App) {
             lines.push(kv("format", &s.format, C_ACC()));
             lines.push(kv(
                 "compiled-for",
-                if s.compiled_for.is_empty() { "-" } else { &s.compiled_for },
+                if s.compiled_for.is_empty() {
+                    "-"
+                } else {
+                    &s.compiled_for
+                },
                 if s.format == "hf" { C_DIM() } else { C_WARN() },
             ));
             // compiled_for 인코딩을 풀어 "무슨 옵션으로 컴파일됐는지" 명시.
@@ -3002,17 +3183,18 @@ fn library_detail(f: &mut Frame, area: Rect, app: &App) {
                 )));
                 for (label, val) in opts {
                     lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("    {:<18}", label),
-                            Style::default().fg(C_DIM()),
-                        ),
+                        Span::styled(format!("    {:<18}", label), Style::default().fg(C_DIM())),
                         Span::styled(val, Style::default().fg(Color::White)),
                     ]));
                 }
             }
             lines.push(kv(
                 "revision",
-                if s.revision.is_empty() { "-" } else { &s.revision },
+                if s.revision.is_empty() {
+                    "-"
+                } else {
+                    &s.revision
+                },
                 C_DIM(),
             ));
             lines.push(kv("size", &s.size, C_DIM()));
@@ -3094,12 +3276,22 @@ fn kv(k: &str, v: &str, color: Color) -> Line<'static> {
 
 /// Perf 드릴다운 — 선택 모델 구간별 p50/p95/p99 + 지표별 시계열 타임라인 + E2E 버킷 히스토그램.
 fn perf_detail_view(f: &mut Frame, area: Rect, app: &App, d: &PerfDetail) {
+    let age = d.age(crate::collect::now_secs());
+    let stale = age.is_none_or(|seconds| seconds > app.snap.stale_after_secs.max(10));
+    let checked = match age {
+        Some(seconds) => format!(
+            "{}checked {seconds}s ago · Enter refresh · Esc back",
+            if stale { "stale · " } else { "" }
+        ),
+        None => "query time unknown · Enter refresh · Esc back".into(),
+    };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(7), Constraint::Min(4)])
         .split(area);
     // 구간별 percentile 테이블
     let qrow = |label: &str, a: &[f64; 3], col: Color| {
+        let col = if stale { C_DIM() } else { col };
         Row::new(vec![
             Cell::from(Span::styled(
                 label.to_string(),
@@ -3128,10 +3320,17 @@ fn perf_detail_view(f: &mut Frame, area: Rect, app: &App, d: &PerfDetail) {
     )
     .header(hrow(&["METRIC", "p50", "p95", "p99"]))
     .column_spacing(2)
-    .block(block(&format!(
-        "latency percentiles · {} · esc back",
-        truncw(&d.model, 30)
-    )));
+    .block(
+        block(&format!(
+            "latency · {}/{} · 5m",
+            truncw(&d.namespace, 20),
+            truncw(&d.service, 30)
+        ))
+        .title_bottom(Line::from(Span::styled(
+            checked,
+            Style::default().fg(if stale { C_WARN() } else { C_DIM() }),
+        ))),
+    );
     f.render_widget(qt, rows[0]);
 
     // 하단: 좌 = 지표별 시계열 타임라인 그리드, 우 = E2E 버킷 히스토그램.
@@ -3177,7 +3376,17 @@ fn perf_detail_view(f: &mut Frame, area: Rect, app: &App, d: &PerfDetail) {
         .fold(0.0f64, f64::max)
         .max(1e-9);
     let mut hl: Vec<Line> = Vec::new();
-    if d.buckets.iter().all(|(_, c)| *c <= 0.0) {
+    for warning in &d.warnings {
+        hl.push(Line::from(Span::styled(
+            warning.clone(),
+            Style::default().fg(C_WARN()),
+        )));
+    }
+    if d.buckets.is_empty() {
+        hl.push(Line::from(
+            "E2E distribution unavailable — no usable buckets",
+        ));
+    } else if d.buckets.iter().all(|(_, c)| *c <= 0.0) {
         hl.push(Line::from(Span::styled(
             "idle — E2E buckets populate under traffic",
             Style::default().fg(C_DIM()),
@@ -3197,7 +3406,7 @@ fn perf_detail_view(f: &mut Frame, area: Rect, app: &App, d: &PerfDetail) {
                 format!("{:>8} ", lbl),
                 Style::default().fg(C_DIM()),
             )];
-            sp.extend(bar_line(c / maxc * 100.0, bw, C_ACC()).spans);
+            sp.extend(bar_line(c / maxc * 100.0, bw, if stale { C_DIM() } else { C_ACC() }).spans);
             sp.push(Span::styled(
                 format!(" {:.2}/s", c),
                 Style::default().fg(C_DIM()),
@@ -3213,7 +3422,7 @@ fn perf_detail_view(f: &mut Frame, area: Rect, app: &App, d: &PerfDetail) {
 
 // ── Perf (EPP 정책용 성능/분배) ─────────────────────────
 fn ms(v: f64) -> String {
-    if v.is_nan() {
+    if !v.is_finite() {
         "–".into()
     } else if v >= 1.0 {
         format!("{:.2}s", v)
@@ -3222,7 +3431,7 @@ fn ms(v: f64) -> String {
     }
 }
 fn rate(v: f64) -> String {
-    if v.is_nan() {
+    if !v.is_finite() {
         "–".into()
     } else {
         format!("{:.2}", v)
@@ -3342,6 +3551,17 @@ fn nice_ceil(v: f64) -> f64 {
 }
 
 fn view_perf(f: &mut Frame, area: Rect, app: &App) {
+    if app.detail {
+        if let Some(model) = &app.perf_loading {
+            f.render_widget(
+                Paragraph::new(format!(
+                    "Loading latency distribution for {model}…\nEsc to close"
+                )),
+                area,
+            );
+            return;
+        }
+    }
     // 드릴: 선택 모델 지연 분포(Enter). perf_detail 이 채워져 있으면 그것부터.
     if app.detail {
         if let Some(d) = &app.perf_detail {
@@ -3352,7 +3572,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
     let p = &app.snap.perf;
     let any = [p.e2e_p95, p.ttft_p95, p.tps, p.req_rate]
         .iter()
-        .any(|x| !x.is_nan());
+        .any(|x| x.is_finite());
 
     // 디바이스 패널 높이는 대수에 맞춰 가변(작은 클러스터는 컴팩트, 큰 건 상한). 상한 초과분은 "+N more".
     let ndev = app.snap.accel.len().max(1) as u16;
@@ -3381,11 +3601,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
         let uh = app.hist_for(&format!("{}:util", k));
         let mh = app.hist_for(&format!("{}:mem", k));
-        let memp = if a.mem_total_gb > 0.0 {
-            a.mem_used_gb / a.mem_total_gb * 100.0
-        } else {
-            0.0
-        };
+        let memp = percent(a.mem_used_gb, a.mem_total_gb);
         let (hg, hc) = if !a.alive {
             ("✗", C_BAD())
         } else if a.throttling() == Some(true) {
@@ -3401,15 +3617,12 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
                     .fg(kind_color(a.kind))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("{} ", padw(&a.id, 6)),
-                Style::default().fg(C_DIM()),
-            ),
+            Span::styled(format!("{} ", padw(&a.id, 6)), Style::default().fg(C_DIM())),
             Span::styled("util ", Style::default().fg(C_DIM())),
         ];
         sp.extend(spark_colored(&uh, spark_w, 100));
         sp.push(Span::styled(
-            format!(" {:>3.0}%", a.util),
+            format!(" {:>3.0}%", Metric(a.util)),
             Style::default().fg(util_color(a.util)),
         ));
         sp.push(Span::styled(
@@ -3418,7 +3631,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         ));
         sp.extend(spark_colored(&mh, spark_w, 100));
         sp.push(Span::styled(
-            format!(" {:>3.0}%", memp),
+            format!(" {:>3.0}%", Metric(memp)),
             Style::default().fg(mem_color(memp)),
         ));
         dlines.push(Line::from(sp));
@@ -3454,7 +3667,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!("{}  ", rate(p.tps)), Style::default().fg(C_OK())),
         Span::styled("prefix-hit ", Style::default().fg(C_DIM())),
         Span::styled(
-            if p.prefix_hit.is_nan() {
+            if !p.prefix_hit.is_finite() {
                 "–  ".into()
             } else {
                 format!("{:.0}%  ", p.prefix_hit * 100.0)
@@ -3501,7 +3714,7 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .map(|&i| {
                 let r = &app.snap.perf_rows[i];
-                let preempt_cell = if r.preempt.is_nan() || r.preempt <= 0.0 {
+                let preempt_cell = if !r.preempt.is_finite() || r.preempt <= 0.0 {
                     Cell::from(Span::styled("·", Style::default().fg(C_DIM())))
                 } else {
                     Cell::from(Span::styled(
@@ -3615,6 +3828,12 @@ fn view_perf(f: &mut Frame, area: Rect, app: &App) {
                     sp.push(Span::styled(
                         format!("{}{}  ", if *ok { "✓" } else { "✗" }, m),
                         Style::default().fg(if *ok { C_OK() } else { C_BAD() }),
+                    ));
+                }
+                for (metric, reason) in &adv.unknown {
+                    sp.push(Span::styled(
+                        format!("? {metric} ({reason})  "),
+                        Style::default().fg(C_WARN()),
                     ));
                 }
                 if adv.checks.is_empty() {
@@ -3746,8 +3965,9 @@ fn view_serving(f: &mut Frame, area: Rect, app: &App) {
         .map(|&i| {
             let a = &app.snap.artifacts[i];
             let m = app.snap.models.iter().find(|m| m.name == a.model);
-            let (desired, ready, tps) =
-                m.map(|m| (m.desired, m.ready, m.tps)).unwrap_or((0, 0, None));
+            let (desired, ready, tps) = m
+                .map(|m| (m.desired, m.ready, m.tps))
+                .unwrap_or((0, 0, None));
             let phase = app.deploy_phase(&a.model, desired, ready);
             let gc = match phase.label() {
                 "Serving" => C_OK(),
@@ -3756,9 +3976,15 @@ fn view_serving(f: &mut Frame, area: Rect, app: &App) {
                 _ => C_WARN(), // Starting / Degraded
             };
             let opts = opts_summary(a);
-            let target = if opts.is_empty() { "–".to_string() } else { opts };
+            let target = if opts.is_empty() {
+                "–".to_string()
+            } else {
+                opts
+            };
             let npu = a.engine.contains("RBLN") || a.engine.contains("Furiosa");
-            let tps_s = tps.map(|t| format!("{:.0}", t)).unwrap_or_else(|| "–".into());
+            let tps_s = tps
+                .map(|t| format!("{:.0}", t))
+                .unwrap_or_else(|| "–".into());
             Row::new(vec![
                 Cell::from(format!("{} {}", phase.glyph(), phase.label()))
                     .style(Style::default().fg(gc)),
@@ -3768,8 +3994,11 @@ fn view_serving(f: &mut Frame, area: Rect, app: &App) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Cell::from(engine_short(&a.engine)).style(Style::default().fg(C_DIM())),
-                Cell::from(truncw(&target, 20))
-                    .style(Style::default().fg(if npu { C_WARN() } else { Color::Gray })),
+                Cell::from(truncw(&target, 20)).style(Style::default().fg(if npu {
+                    C_WARN()
+                } else {
+                    Color::Gray
+                })),
                 Cell::from(format!("{}/{}", ready, desired)).style(Style::default().fg(gc)),
                 Cell::from(truncw(if a.node.is_empty() { "?" } else { &a.node }, 14))
                     .style(Style::default().fg(C_DIM())),
@@ -3795,7 +4024,11 @@ fn view_serving(f: &mut Frame, area: Rect, app: &App) {
     st.select(Some(app.selected));
     f.render_stateful_widget(
         Table::new(rows, widths)
-            .header(hrow_sorted(&header, app.sort_header_label(), app.sort_arrow()))
+            .header(hrow_sorted(
+                &header,
+                app.sort_header_label(),
+                app.sort_arrow(),
+            ))
             .column_spacing(1)
             .row_highlight_style(hl_style())
             .highlight_symbol("▎")
@@ -3874,7 +4107,11 @@ fn activity_panel(f: &mut Frame, area: Rect, app: &App, active: bool) {
         block(&title)
     };
     let table = Table::new(rows, widths)
-        .header(hrow_sorted(&["KIND", "TARGET", "STARTED", "STATUS"], "", ""))
+        .header(hrow_sorted(
+            &["KIND", "TARGET", "STARTED", "STATUS"],
+            "",
+            "",
+        ))
         .column_spacing(1)
         .block(blk);
     if active {
@@ -3923,6 +4160,21 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
     ];
     // Free space on the shared store. It belongs on this view because this is where builds are
     // created and removed — reclaiming space is pointless if you cannot see how much there is.
+    legend.push(Span::styled(
+        format!(" {:?}", source_quality(&app.snap, "model_store")),
+        Style::default().fg(C_DIM()),
+    ));
+    let scan_age = app
+        .snap
+        .store_scanned_at
+        .map(|at| {
+            format!(
+                " scan {}s ago",
+                crate::collect::now_secs().saturating_sub(at)
+            )
+        })
+        .unwrap_or_else(|| " scan time unknown".into());
+    legend.push(Span::styled(scan_age, Style::default().fg(C_DIM())));
     if let Some(cap) = app.snap.store_capacity {
         let pct = cap.used_pct();
         legend.push(Span::styled("  disk ", Style::default().fg(C_DIM())));
@@ -3937,11 +4189,7 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
             }),
         ));
         legend.push(Span::styled(
-            format!(
-                " / {} ({:.0}% used)",
-                iec_bytes(cap.total_bytes),
-                pct
-            ),
+            format!(" / {} ({:.0}% used)", iec_bytes(cap.total_bytes), pct),
             Style::default().fg(C_DIM()),
         ));
     }
@@ -3974,7 +4222,10 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
         if selected {
             lsel_line = ll.len();
         }
-        let mut sp: Vec<Span> = vec![Span::styled(indent.to_string(), Style::default().fg(C_TRACK()))];
+        let mut sp: Vec<Span> = vec![Span::styled(
+            indent.to_string(),
+            Style::default().fg(C_TRACK()),
+        )];
         match it {
             LibItem::Catalog(k) => {
                 let m = &app.catalog[k];
@@ -4076,7 +4327,10 @@ fn view_library(f: &mut Frame, area: Rect, app: &App) {
                 sp.push(Span::styled("◇ ", Style::default().fg(C_ACC())));
                 sp.push(tbadge);
                 sp.push(Span::styled(
-                    format!(" {} ", padw(s.repo.rsplit('/').next().unwrap_or(&s.repo), 22)),
+                    format!(
+                        " {} ",
+                        padw(s.repo.rsplit('/').next().unwrap_or(&s.repo), 22)
+                    ),
                     Style::default().fg(Color::White),
                 ));
                 sp.push(Span::styled(
@@ -4155,11 +4409,7 @@ fn node_status(n: &crate::collect::NodeInfo) -> (&'static str, Color) {
 
 /// 트리/상세용 디바이스 1줄. full=true 면 mem-bw/clock 도 붙임(상세).
 fn accel_brief(a: &crate::collect::Accel, branch: &str, full: bool) -> Line<'static> {
-    let mempct = if a.mem_total_gb > 0.0 {
-        a.mem_used_gb / a.mem_total_gb * 100.0
-    } else {
-        0.0
-    };
+    let mempct = percent(a.mem_used_gb, a.mem_total_gb);
     let (hg, hc) = if !a.alive {
         ("✗", C_BAD())
     } else if a.throttling() == Some(true) {
@@ -4180,32 +4430,32 @@ fn accel_brief(a: &crate::collect::Accel, branch: &str, full: bool) -> Line<'sta
     ];
     sp.extend(dot_bar(a.util, 8, util_color(a.util)).spans);
     sp.push(Span::styled(
-        format!(" {:>3.0}%", a.util),
+        format!(" {:>3.0}%", Metric(a.util)),
         Style::default().fg(util_color(a.util)),
     ));
     sp.push(Span::styled(
         format!(
             "  {:>3.0}/{:>3.0}GB{} ",
-            a.mem_used_gb,
-            a.mem_total_gb,
+            Metric(a.mem_used_gb),
+            Metric(a.mem_total_gb),
             if a.unified_mem { "∪" } else { " " }
         ),
         Style::default().fg(mem_color(mempct)),
     ));
     sp.push(Span::styled(
-        format!("  {:.0}°C", a.temp),
+        format!("  {:.0}°C", Metric(a.temp)),
         Style::default().fg(temp_color(a.temp)),
     ));
     sp.push(Span::styled(
-        format!("  {:>3.0}W", a.power),
+        format!("  {:>3.0}W", Metric(a.power)),
         Style::default().fg(C_DIM()),
     ));
-    if full && !a.mem_bw.is_nan() {
+    if full && a.mem_bw.is_finite() {
         sp.push(Span::styled(
             format!("  bw {:>3.0}%", a.mem_bw),
             Style::default().fg(grad_color(a.mem_bw)),
         ));
-        if !a.clock_mhz.is_nan() {
+        if a.clock_mhz.is_finite() {
             sp.push(Span::styled(
                 format!("  {:.0}MHz", a.clock_mhz),
                 Style::default().fg(C_DIM()),
@@ -4233,11 +4483,7 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
             sel_line = lines.len();
         }
         let (glyph, gc) = node_status(n);
-        let memp = if n.mem_total_gb > 0.0 {
-            n.mem_used_gb / n.mem_total_gb * 100.0
-        } else {
-            0.0
-        };
+        let memp = percent(n.mem_used_gb, n.mem_total_gb);
         let mut h = vec![
             Span::styled(
                 if selected { "▎" } else { " " },
@@ -4251,16 +4497,9 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ),
         ];
-        h.extend(
-            dot_bar(
-                if n.cpu_pct.is_nan() { 0.0 } else { n.cpu_pct },
-                8,
-                util_color(n.cpu_pct.max(0.0)),
-            )
-            .spans,
-        );
+        h.extend(dot_bar(n.cpu_pct, 8, util_color(n.cpu_pct)).spans);
         h.push(Span::styled(
-            if n.cpu_pct.is_nan() {
+            if !n.cpu_pct.is_finite() {
                 " cpu   –".into()
             } else {
                 format!(" cpu{:>3.0}%", n.cpu_pct)
@@ -4268,20 +4507,20 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(C_DIM()),
         ));
         h.push(Span::styled(
-            if n.mem_total_gb <= 0.0 {
+            if !percent(n.mem_used_gb, n.mem_total_gb).is_finite() {
                 "  mem       –   ".into()
             } else {
-                format!("  mem {:>4.0}/{:>4.0}GB", n.mem_used_gb, n.mem_total_gb)
+                format!(
+                    "  mem {:>4.0}/{:>4.0}GB",
+                    Metric(n.mem_used_gb),
+                    Metric(n.mem_total_gb)
+                )
             },
             Style::default().fg(mem_color(memp)),
         ));
-        let diskp = if n.disk_total_gb > 0.0 {
-            n.disk_used_gb / n.disk_total_gb * 100.0
-        } else {
-            0.0
-        };
+        let diskp = percent(n.disk_used_gb, n.disk_total_gb);
         h.push(Span::styled(
-            if n.disk_total_gb <= 0.0 {
+            if !percent(n.disk_used_gb, n.disk_total_gb).is_finite() {
                 "  disk      –  ".into()
             } else {
                 format!("  disk {:>3.0}%", diskp)
@@ -4289,7 +4528,7 @@ fn view_nodes(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(mem_color(diskp)),
         ));
         h.push(Span::styled(
-            if n.load1.is_nan() {
+            if !n.load1.is_finite() {
                 "  load –".into()
             } else {
                 format!("  load {:.1}", n.load1)
@@ -4507,7 +4746,7 @@ fn view_topo(f: &mut Frame, area: Rect, app: &App) {
                         .filter(|d| d.alive && d.busy_model.is_empty())
                         .count();
                     sp.push(Span::styled(
-                        format!("  {:>3.0}%  {}free", avg, free),
+                        format!("  {:>3.0}%  {}free", Metric(avg), free),
                         Style::default().fg(C_DIM()),
                     ));
                     ctx.print(bx + 1.0, ry, Line::from(sp));
@@ -4561,7 +4800,12 @@ fn view_zoo(f: &mut Frame, area: Rect, app: &App) {
     } else {
         // 목록 정렬은 유지하되 선택 하이라이트는 활성 패널로만.
         let mut idx: Vec<usize> = (0..app.zoo.len()).collect();
-        idx.sort_by(|&a, &b| app.zoo[a].display.to_lowercase().cmp(&app.zoo[b].display.to_lowercase()));
+        idx.sort_by(|&a, &b| {
+            app.zoo[a]
+                .display
+                .to_lowercase()
+                .cmp(&app.zoo[b].display.to_lowercase())
+        });
         idx
     };
     let rows: Vec<Row> = order
@@ -4578,7 +4822,11 @@ fn view_zoo(f: &mut Frame, area: Rect, app: &App) {
                     .collect::<Vec<_>>()
                     .join("+")
             };
-            let vcolor = if vendors.is_empty() { C_DIM() } else { C_WARN() };
+            let vcolor = if vendors.is_empty() {
+                C_DIM()
+            } else {
+                C_WARN()
+            };
             let (state_s, sev) = app.zoo_state(z);
             let state_c = match sev {
                 0 => C_OK(),
@@ -4629,7 +4877,11 @@ fn view_zoo(f: &mut Frame, area: Rect, app: &App) {
     }
     f.render_stateful_widget(
         Table::new(rows, widths)
-            .header(hrow_sorted(&header, app.sort_header_label(), app.sort_arrow()))
+            .header(hrow_sorted(
+                &header,
+                app.sort_header_label(),
+                app.sort_arrow(),
+            ))
             .column_spacing(1)
             .row_highlight_style(hl_style())
             .highlight_symbol("▎")
@@ -4648,7 +4900,7 @@ fn view_zoo(f: &mut Frame, area: Rect, app: &App) {
 fn view_setup(f: &mut Frame, area: Rect, app: &App) {
     use crate::app::CheckState;
     let checks = app.setup_checks();
-    let (mut ok, mut missing) = (0usize, 0usize);
+    let (mut ok, mut missing, mut unknown) = (0usize, 0usize, 0usize);
     let mut prev_cat = "";
     let rows: Vec<Row> = checks
         .iter()
@@ -4656,6 +4908,7 @@ fn view_setup(f: &mut Frame, area: Rect, app: &App) {
             match c.state {
                 CheckState::Ok => ok += 1,
                 CheckState::Missing => missing += 1,
+                CheckState::Unknown => unknown += 1,
                 _ => {}
             }
             let sc = match c.state.sev() {
@@ -4677,7 +4930,8 @@ fn view_setup(f: &mut Frame, area: Rect, app: &App) {
                 _ => C_ACC(),
             };
             Row::new(vec![
-                Cell::from(c.state.glyph()).style(Style::default().fg(sc).add_modifier(Modifier::BOLD)),
+                Cell::from(c.state.glyph())
+                    .style(Style::default().fg(sc).add_modifier(Modifier::BOLD)),
                 Cell::from(cat).style(Style::default().fg(C_DIM())),
                 Cell::from(truncw(&c.name, 20)).style(
                     Style::default()
@@ -4698,9 +4952,9 @@ fn view_setup(f: &mut Frame, area: Rect, app: &App) {
     ];
     let header = ["", "CATEGORY", "CHECK", "DETAIL", "ACTION"];
     let conn = if app.snap.setup.probed {
-        format!("{} ok · {} missing", ok, missing)
+        format!("{} ok · {} missing · {} unknown", ok, missing, unknown)
     } else {
-        "cluster unreachable".to_string()
+        "cluster access unknown".to_string()
     };
     let title = format!(
         "Setup · llm-d platform prerequisites · {} · ⏎ fix/show · read-only checks{}",
@@ -4766,7 +5020,10 @@ fn view_events(f: &mut Frame, area: Rect, app: &App) {
         rows,
         &widths,
         &["TYPE", "REASON", "OBJECT", "CNT", "MESSAGE"],
-        "Events (k8s + llm-d, newest first)",
+        &format!(
+            "Events · {:?} · newest first",
+            source_quality(&app.snap, "events")
+        ),
         app.selected,
         order.len(),
         app.sort_header_label(),
@@ -4813,3 +5070,6 @@ fn diagnose(s: &Snapshot) -> (String, Color) {
     };
     (format!("{} {}", glyph, msg), col)
 }
+
+#[cfg(test)]
+mod tests;

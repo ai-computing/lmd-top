@@ -12,9 +12,18 @@ use serving::{Images, ServePlan};
 
 /// Serving spec derived from the current selection:
 /// (model, model_id, engine, vendor, mount, devices_default, serve_tp_default).
-type DeploySpec = (String, String, String, &'static str, String, String, Option<String>);
+type DeploySpec = (
+    String,
+    String,
+    String,
+    &'static str,
+    String,
+    String,
+    Option<String>,
+);
 
-impl App {    /// Which accelerator serves an artifact, given the engine string discovered on it
+impl App {
+    /// Which accelerator serves an artifact, given the engine string discovered on it
     /// (`detect_engine`, or set by the headless planner).
     ///
     /// Resolved against the packs so a newly declared accelerator is recognised without a
@@ -56,7 +65,9 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
             let pack = crate::accel::by_id(vendor);
             let sub_tp = pack.and_then(|p| p.caps.serving_tp_unit).is_some();
             let tp_default = if sub_tp {
-                pack.and_then(|p| p.caps.max_tensor_parallel).unwrap_or(8).to_string()
+                pack.and_then(|p| p.caps.max_tensor_parallel)
+                    .unwrap_or(8)
+                    .to_string()
             } else {
                 "1".to_string()
             };
@@ -81,7 +92,8 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
         if let Some(s) = self.selected_stored() {
             // The store records its artifact format as the accelerator id, so the pack
             // resolves both the vendor and its serving engine name.
-            let pack = crate::accel::by_id(&s.format).unwrap_or_else(|| crate::accel::by_id("gpu").expect("gpu pack"));
+            let pack = crate::accel::by_id(&s.format)
+                .unwrap_or_else(|| crate::accel::by_id("gpu").expect("gpu pack"));
             let (vendor, engine) = (pack.id, pack.engine);
             // compiled_for(예: RBLN-CA22-tp4-s8192) 에서 tp 추출.
             let tp = s
@@ -217,87 +229,85 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
         let Some(form) = self.deploy_form.as_ref() else {
             return;
         };
-        // Kind, driver-label fragment and resource key all come from one pack lookup.
         let pack = crate::accel::by_id(form.vendor);
         let kind = pack
             .map(|p| p.kind)
             .unwrap_or(crate::collect::AccelKind::Gpu);
-        // GPUs need no driver label — any Ready node can host one.
-        let drv = pack
-            .filter(|p| p.caps.compiles_ahead_of_time)
-            .map(|p| p.label)
-            .unwrap_or("");
-        let res = pack
+        let resource = pack
             .map(|p| p.scheduling.resource_key)
             .unwrap_or("nvidia.com/gpu");
-        // 노드별 집계: (total, util_sum, mem_used, mem_total). free 는 아래에서 총−할당으로.
-        let mut agg: std::collections::BTreeMap<String, (i64, f64, f64, f64)> =
-            std::collections::BTreeMap::new();
-        for a in self
+        let mut candidates = std::collections::BTreeSet::new();
+        for (node, resources) in &self.snap.node_capacity {
+            if resources.get(resource).is_some_and(|n| *n > 0) {
+                candidates.insert(node.clone());
+            }
+        }
+        for device in self
             .snap
             .accel
             .iter()
-            .filter(|a| a.kind == kind && !a.node.is_empty())
+            .filter(|d| d.kind == kind && !d.node.is_empty())
         {
-            let e = agg.entry(a.node.clone()).or_default();
-            e.0 += 1;
-            e.1 += a.util;
-            e.2 += a.mem_used_gb;
-            e.3 += a.mem_total_gb;
+            candidates.insert(device.node.clone());
         }
-        let pseudo = |value: &str, note: &str| PlaceRow {
-            value: value.into(),
-            label: value.into(),
-            free: 0,
-            total: 0,
-            util: f64::NAN,
-            mem_used: 0.0,
-            mem_total: 0.0,
-            schedulable: true,
-            note: note.into(),
-            info_only: false,
-        };
-        let mut rows = vec![
-            pseudo("any", "제약 없음 — 스케줄러가 유휴 리소스로 배치"),
-            pseudo("spread", "replica 를 여러 노드에 고르게 분산"),
-        ];
-        for (node, (total, util_sum, mu, mt)) in agg {
-            let nd = self.snap.nodes.iter().find(|n| n.name == node);
-            let ready = nd.map(|n| n.ready && !n.cordoned).unwrap_or(true);
-            let has_drv =
-                drv.is_empty() || nd.map(|n| n.npu.to_uppercase().contains(drv)).unwrap_or(false);
-            // 할당(파드 requests) 기반 유휴 = 총 − 할당. 이미 배포된 파드가 잡은 디바이스는 free 에서 제외.
-            let alloc = self
+        let mut rows = Vec::new();
+        for node in ["any".to_string(), "spread".to_string()]
+            .into_iter()
+            .chain(candidates)
+        {
+            let mut selected = form.clone();
+            selected.place.clone_from(&node);
+            let fit = self.deploy_fit(&selected);
+            let devices: Vec<_> = self
                 .snap
-                .node_alloc
-                .get(&node)
-                .and_then(|m| m.get(res))
-                .copied()
-                .unwrap_or(0);
-            let free = (total - alloc).max(0);
-            let note = if !ready {
-                "NotReady/cordon".into()
-            } else if !has_drv {
-                format!("{} 드라이버 없음", drv)
-            } else if free == 0 {
-                format!("{} allocated", alloc)
+                .accel
+                .iter()
+                .filter(|d| d.kind == kind && (node == "any" || node == "spread" || d.node == node))
+                .collect();
+            let mean_util = if devices.is_empty() || devices.iter().any(|d| !d.util.is_finite()) {
+                f64::NAN
             } else {
-                String::new()
+                devices.iter().map(|d| d.util).sum::<f64>() / devices.len() as f64
+            };
+            let memory = |used: bool| {
+                if devices.is_empty() {
+                    return f64::NAN;
+                }
+                let values: Vec<_> = devices
+                    .iter()
+                    .map(|d| if used { d.mem_used_gb } else { d.mem_total_gb })
+                    .collect();
+                if values.iter().any(|v| !v.is_finite()) {
+                    f64::NAN
+                } else {
+                    values.iter().sum()
+                }
+            };
+            let total = if node == "any" || node == "spread" {
+                fit.total
+            } else {
+                self.snap
+                    .node_capacity
+                    .get(&node)
+                    .and_then(|r| r.get(resource))
+                    .copied()
+                    .unwrap_or(0)
             };
             rows.push(PlaceRow {
-                util: if total > 0 {
-                    util_sum / total as f64
-                } else {
-                    f64::NAN
-                },
                 value: node.clone(),
                 label: node,
-                free,
+                free: fit.free,
                 total,
-                mem_used: mu,
-                mem_total: mt,
-                schedulable: ready && has_drv,
-                note,
+                util: mean_util,
+                mem_used: memory(true),
+                mem_total: memory(false),
+                schedulable: fit.verdict == FitVerdict::Fits,
+                note: fit.tips.first().cloned().unwrap_or_else(|| {
+                    format!(
+                        "capacity: {} (scheduler constraints still apply)",
+                        fit.verdict.label()
+                    )
+                }),
                 info_only: false,
             });
         }
@@ -356,7 +366,12 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
             .map(|p| p.kind)
             .unwrap_or(crate::collect::AccelKind::Gpu);
         let mut per_node: std::collections::BTreeMap<String, i64> = Default::default();
-        for a in self.snap.accel.iter().filter(|a| a.kind == kind && !a.node.is_empty()) {
+        for a in self
+            .snap
+            .accel
+            .iter()
+            .filter(|a| a.kind == kind && !a.node.is_empty())
+        {
             *per_node.entry(a.node.clone()).or_insert(0) += 1;
         }
         let note_auto = if vendor == "rbln" {
@@ -414,6 +429,27 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
 
     /// 배포 용량 판정 — 총 디바이스 수요 대 클러스터 동종 가속기(총/유휴).
     pub fn deploy_fit(&self, form: &DeployForm) -> DeployFit {
+        // The form is evaluated on every keystroke, before submission validation.
+        // Do not turn partial/invalid input into a default one-replica deployment.
+        let replicas = form
+            .get("replicas")
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n <= i32::MAX as u32);
+        let per = form
+            .get("devices")
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n > 0 && *n <= i32::MAX as u32);
+        let (Some(replicas), Some(per)) = (replicas, per) else {
+            return DeployFit {
+                input_valid: false,
+                demand: 0, total: 0, free: 0, metric_free: 0, resource_free: 0, nodes: 0,
+                verdict: FitVerdict::Unknown,
+                tips: vec!["용량 계산 대기 — replicas는 0 이상의 정수, devices는 양의 정수로 입력하세요(최대 2147483647).".into()],
+            };
+        };
+        let (replicas, per) = (i64::from(replicas), i64::from(per));
         let want_kind = crate::accel::by_id(form.vendor)
             .map(|p| p.kind)
             .unwrap_or(crate::collect::AccelKind::Gpu);
@@ -423,7 +459,7 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
             .iter()
             .filter(|x| x.kind == want_kind)
             .collect();
-        let total = devs.len() as i64;
+
         let res_key = crate::accel::by_id(form.vendor)
             .map(|p| p.scheduling.resource_key)
             .unwrap_or("nvidia.com/gpu");
@@ -433,17 +469,53 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
         // 노드별 metric 유휴(busy_model 미점유) — 정보용(idle 이지만 예약됐을 수 있음).
         let mut metric_free_by_node: std::collections::BTreeMap<&str, i64> =
             std::collections::BTreeMap::new();
-        for d in &devs {
-            if !d.node.is_empty() && d.alive {
-                *total_by_node.entry(d.node.as_str()).or_insert(0) += 1;
-                if d.busy_model.is_empty() {
-                    *metric_free_by_node.entry(d.node.as_str()).or_insert(0) += 1;
+        let specific_node = !matches!(form.place.as_str(), "" | "any" | "spread");
+        let stale_inventory = self.snap.sources.get("inventory").is_some_and(|status| {
+            !matches!(
+                status.state(
+                    crate::collect::now_secs(),
+                    self.snap.stale_after_secs.max(10)
+                ),
+                crate::quality::Quality::Fresh | crate::quality::Quality::Empty
+            )
+        });
+        let mut unknown_nodes = self.snap.node_capacity.is_empty();
+        let total: i64 = self
+            .snap
+            .node_capacity
+            .values()
+            .filter_map(|r| r.get(res_key))
+            .sum();
+        for (node, resources) in &self.snap.node_capacity {
+            if specific_node && *node != form.place {
+                continue;
+            }
+            let Some(&count) = resources.get(res_key) else {
+                unknown_nodes = true;
+                continue;
+            };
+            if count == 0 {
+                continue;
+            }
+            match self.snap.nodes.iter().find(|n| n.name == *node) {
+                Some(n) if !n.ready || n.cordoned => continue,
+                None => {
+                    unknown_nodes = true;
+                    continue;
                 }
+                _ => {}
+            }
+            total_by_node.insert(node.as_str(), count);
+        }
+        for d in &devs {
+            if total_by_node.contains_key(d.node.as_str()) && d.alive && d.busy_model.is_empty() {
+                *metric_free_by_node.entry(d.node.as_str()).or_insert(0) += 1;
             }
         }
         // 노드별 스케줄가능 유휴 = 노드 디바이스 수 − 리소스 예약(node_alloc requests).
         // 스케줄러가 실제로 보는 값 — metric 유휴여도 예약(request)돼 있으면 배치 불가.
-        // (node_alloc 없으면 metric 유휴로 폴백.)
+        // Missing reservations are unknown; metric idle never proves schedulability.
+        let mut unknown_reservations = false;
         let free_by_node: std::collections::BTreeMap<&str, i64> = total_by_node
             .iter()
             .map(|(&node, &tot)| {
@@ -455,7 +527,10 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
                     .copied();
                 let free = match req {
                     Some(r) => (tot - r).max(0),
-                    None => metric_free_by_node.get(node).copied().unwrap_or(0),
+                    None => {
+                        unknown_reservations = true;
+                        0
+                    }
                 };
                 (node, free)
             })
@@ -464,8 +539,6 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
         let metric_free: i64 = metric_free_by_node.values().sum();
         let nodes = free_by_node.len() as i64;
         let max_node_free = free_by_node.values().copied().max().unwrap_or(0);
-        let replicas = form.get("replicas").parse::<i64>().unwrap_or(1).max(1);
-        let per = form.get("devices").parse::<i64>().unwrap_or(1).max(1);
         let demand = replicas * per;
         // 클러스터 리소스 관점 유휴 = allocatable - requested (인벤토리 집계, 위 노드별 합과 일치해야 함).
         let resource_free = self
@@ -474,10 +547,13 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
             .iter()
             .find(|(k, _, _)| k == res_key)
             .map(|(_, alloc, req)| (alloc - req).max(0))
-            .unwrap_or(free); // inventory 없으면 노드별 합으로 폴백
-                              // 실제 배치 가능 replica 수 = Σ floor(node_free / per) (한 노드 안에 per 개가 모여야).
+            .unwrap_or(free)
+            .min(free); // Selected/eligible node capacity also bounds cluster-wide inventory.
+                        // 실제 배치 가능 replica 수 = Σ floor(node_free / per) (한 노드 안에 per 개가 모여야).
         let placeable: i64 = free_by_node.values().map(|f| f / per).sum();
-        let verdict = if total == 0 {
+        let verdict = if replicas == 0 {
+            FitVerdict::Fits
+        } else if unknown_nodes || unknown_reservations || stale_inventory {
             FitVerdict::Unknown
         } else if demand > resource_free {
             // 스케줄러 관점 리소스 부족 — metric 유휴여도 예약돼 있으면 못 뜸(우선).
@@ -490,9 +566,19 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
             FitVerdict::Fits
         };
         let mut tips: Vec<String> = Vec::new();
-        if demand > resource_free {
+        if replicas == 0 {
+            tips.push("replicas=0 — 정지 상태 배포이며 가속기를 요청하지 않습니다.".into());
+        } else if stale_inventory {
+            tips.push(
+                "예약·용량 정보가 오래되었거나 수집에 실패했습니다 — 배치 가능성 확인 대기.".into(),
+            );
+        } else if unknown_reservations {
+            tips.push("예약 정보 없음 — 사용률만으로 배치 가능성을 판정하지 않습니다.".into());
+        } else if unknown_nodes {
+            tips.push("노드 Ready/cordon 정보 없음 — 배치 가능성을 확인할 수 없습니다.".into());
+        } else if demand > resource_free {
             tips.push(format!(
-                "리소스 예약 기준 유휴 {} < 수요 {} — 다른 배포가 {} 를 점유(request)함. 그 서빙을 stop 하거나 replicas/devices↓",
+                "선택한 배치 범위의 가용 {} < 수요 {} ({}) — 노드 상태·예약량 확인 또는 replicas/devices↓",
                 resource_free, demand, res_key
             ));
         } else if matches!(verdict, FitVerdict::Oom) {
@@ -517,6 +603,7 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
             tips.push("replica당 다중 칩은 컴파일 TP 와 일치해야 함".into());
         }
         DeployFit {
+            input_valid: true,
             demand,
             total,
             free,
@@ -531,26 +618,36 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
     /// 배포 사전 점검(preflight) — apply 전에 서빙 전제조건 확인(사전 방어).
     pub fn deploy_preflight(&self, form: &DeployForm) -> Vec<(bool, String)> {
         let mut out: Vec<(bool, String)> = Vec::new();
-        // 이미지 — deploy_form_submit 의 벤더별 기본값과 동일 판정(불일치로 오탐 방지).
-        //   furiosa=furiosaai/furiosa-llm:latest, gpu=vllm/vllm-openai:latest 기본 존재 → OK.
-        //   rbln 은 vllm_rbln 런타임이 든 이미지가 필요(기본 없음) → LMD_SERVING_IMAGE 미지정이면 차단.
+        // Configuration presence is not a registry pull or runtime compatibility check.
         let (img_ok, img_msg) = match form.vendor {
             "furiosa" => (
                 true,
-                "image ready: furiosaai/furiosa-llm:latest (furiosa-llm serve)".to_string(),
+                format!(
+                    "configured: {} (pull/runtime unverified)",
+                    self.img_furiosa
+                        .as_deref()
+                        .unwrap_or("furiosaai/furiosa-llm:latest")
+                ),
             ),
             "gpu" => {
                 let img = self
                     .img_serving
                     .clone()
                     .unwrap_or_else(|| "vllm/vllm-openai:latest".into());
-                (true, format!("image ready: {} (vLLM serve)", img))
+                (
+                    true,
+                    format!("configured: {} (pull/runtime unverified)", img),
+                )
             }
             _ => match &self.img_serving {
-                Some(img) => (true, format!("image ready: {} (vllm_rbln runtime)", img)),
+                Some(img) => (
+                    true,
+                    format!("configured: {} (pull/runtime unverified)", img),
+                ),
                 None => (
                     true,
-                    "image fallback: ubuntu:22.04 with host RBLN stack on the target node".into(),
+                    "fallback: ubuntu:22.04 with host RBLN stack (availability/runtime unverified)"
+                        .into(),
                 ),
             },
         };
@@ -574,20 +671,22 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
             } else {
                 "RNGD"
             };
-            let any = self
-                .snap
-                .nodes
-                .iter()
-                .any(|n| n.npu.to_uppercase().contains(want));
+            let any = self.snap.nodes.iter().any(|n| {
+                n.ready
+                    && !n.cordoned
+                    && (matches!(form.place.as_str(), "" | "any" | "spread")
+                        || n.name == form.place)
+                    && n.npu.to_uppercase().contains(want)
+            });
             out.push((
                 any,
                 format!(
                     "3. accelerator driver: {} node {}",
                     want,
                     if any {
-                        "exists: schedulable"
+                        "label observed on a Ready candidate; runtime compatibility unverified"
                     } else {
-                        "missing: pods will stay Pending"
+                        "label not observed on a Ready candidate; driver availability unverified"
                     }
                 ),
             ));
@@ -597,17 +696,13 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
         let cap_ok = matches!(fit.verdict, FitVerdict::Fits);
         out.push((
             cap_ok,
-            format!(
-                "4. capacity: needs {} device(s), {} free -> {}{}",
-                fit.demand,
-                fit.resource_free,
-                fit.verdict.label(),
-                if cap_ok {
-                    ""
-                } else {
-                    " (stop another serving workload or lower replicas/devices)"
-                }
-            ),
+            if !fit.input_valid {
+                "4. capacity: invalid replicas/devices; correct the form first".into()
+            } else if fit.verdict == FitVerdict::Unknown {
+                "4. capacity: unknown — refresh node and reservation data".into()
+            } else {
+                format!("4. capacity: needs {} device(s), {} free -> {} (resource estimate; other scheduler constraints apply)", fit.demand, fit.resource_free, fit.verdict.label())
+            },
         ));
         out
     }
@@ -617,6 +712,44 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
         let Some(form) = self.deploy_form.take() else {
             return;
         };
+        let issue = form.fields.iter().find_map(|field| {
+            if field.numeric {
+                let parsed = field.value.parse::<u32>();
+                let valid = match field.key.as_str() {
+                    "replicas" => matches!(parsed, Ok(n) if n <= i32::MAX as u32),
+                    "port" => matches!(parsed, Ok(1..=65535)),
+                    _ => matches!(parsed, Ok(n) if n > 0 && n <= i32::MAX as u32),
+                };
+                (!valid).then(|| {
+                    format!(
+                        "invalid {} {:?}: {}",
+                        field.label,
+                        field.value,
+                        if field.key == "port" {
+                            "expected 1..65535"
+                        } else if field.key == "replicas" {
+                            "expected a nonnegative 32-bit integer"
+                        } else {
+                            "expected a positive 32-bit integer"
+                        }
+                    )
+                })
+            } else {
+                (!field.choices.contains(&field.value)).then(|| {
+                    format!(
+                        "invalid {} {:?}; choose {}",
+                        field.label,
+                        field.value,
+                        field.choices.join("/")
+                    )
+                })
+            }
+        });
+        if let Some(issue) = issue {
+            self.notify(format!("deploy blocked — {issue}"));
+            self.deploy_form = Some(form);
+            return;
+        }
         // model_id/mount 는 Deployment 의 args·env 로 들어간다. 문법이 아닌 값은 거부한다 —
         // 직렬화가 YAML 탈출은 막지만, 애초에 모델 id 가 아닌 문자열은 배포할 대상이 아니다.
         let bad_field = [
@@ -634,7 +767,10 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
             return;
         }
 
-        let name = format!("serve-{}", form.model_id.replace(['/', '.'], "-").to_lowercase());
+        let name = format!(
+            "serve-{}",
+            form.model_id.replace(['/', '.'], "-").to_lowercase()
+        );
         let replicas = form.get("replicas");
         let devices = form.get("devices");
         let or = |key: &str, def: &str| {
@@ -688,6 +824,8 @@ impl App {    /// Which accelerator serves an artifact, given the engine string 
         }
 
         self.confirm = Some(Pending::Apply {
+            reviewed: None,
+            required: crate::app::Mode::Admin,
             title: format!("deploy {} ×{}", form.model, replicas),
             yaml: manifest.to_yaml(),
         });
@@ -722,16 +860,24 @@ mod deploy_routing_tests {
     /// metrics source and extractor plugins the scorers read nothing and routing is inert.
     #[test]
     fn routing_docs_has_metric_source_plugins_and_auth() {
-        let docs = objects("llm-serving", "myserve", "rbln", "meta-llama/Llama-3.1-8B-Instruct");
+        let docs = objects(
+            "llm-serving",
+            "myserve",
+            "rbln",
+            "meta-llama/Llama-3.1-8B-Instruct",
+        );
 
         // The EPP config is a YAML document embedded in the ConfigMap — parse it too.
         let cm = docs
             .iter()
             .find(|d| d["kind"].as_str() == Some("ConfigMap"))
             .expect("EPP ConfigMap");
-        let cfg: serde_yaml::Value =
-            serde_yaml::from_str(cm["data"]["default-plugins.yaml"].as_str().expect("plugins"))
-                .expect("embedded EPP config parses as YAML");
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            cm["data"]["default-plugins.yaml"]
+                .as_str()
+                .expect("plugins"),
+        )
+        .expect("embedded EPP config parses as YAML");
         let types: Vec<&str> = cfg["plugins"]
             .as_sequence()
             .expect("plugins list")
@@ -746,7 +892,12 @@ mod deploy_routing_tests {
             "kv-cache-utilization-scorer",
             "prefix-cache-scorer",
         ] {
-            assert!(types.contains(&want), "EPP plugins missing {}: {:?}", want, types);
+            assert!(
+                types.contains(&want),
+                "EPP plugins missing {}: {:?}",
+                want,
+                types
+            );
         }
         // Every scorer in the profile refers to a declared plugin, with a weight.
         for entry in cfg["schedulingProfiles"][0]["plugins"]
@@ -754,13 +905,20 @@ mod deploy_routing_tests {
             .expect("profile plugins")
         {
             let r = entry["pluginRef"].as_str().expect("pluginRef");
-            assert!(types.contains(&r), "profile references undeclared plugin {}", r);
+            assert!(
+                types.contains(&r),
+                "profile references undeclared plugin {}",
+                r
+            );
             assert!(entry["weight"].as_u64().is_some(), "{} needs a weight", r);
         }
 
         // EPP verifies pool membership through TokenReview, so it needs auth delegation.
         let crb = find(&docs, "ClusterRoleBinding");
-        assert_eq!(crb["roleRef"]["name"].as_str(), Some("system:auth-delegator"));
+        assert_eq!(
+            crb["roleRef"]["name"].as_str(),
+            Some("system:auth-delegator")
+        );
         assert_eq!(
             crb["subjects"][0]["name"].as_str(),
             Some("myserve-epp"),
@@ -780,8 +938,14 @@ mod deploy_routing_tests {
 
         // The pool selects the serving pods and points at the EPP service.
         let pool = find(&docs, "InferencePool");
-        assert_eq!(pool["spec"]["selector"]["matchLabels"]["app"].as_str(), Some("myserve"));
-        assert_eq!(pool["spec"]["endpointPickerRef"]["name"].as_str(), Some("myserve-epp"));
+        assert_eq!(
+            pool["spec"]["selector"]["matchLabels"]["app"].as_str(),
+            Some("myserve")
+        );
+        assert_eq!(
+            pool["spec"]["endpointPickerRef"]["name"].as_str(),
+            Some("myserve-epp")
+        );
 
         // And the route sends traffic to the pool, not straight to a Service — which is exactly
         // the misconfiguration that used to bypass the EPP entirely.

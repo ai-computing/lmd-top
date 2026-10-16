@@ -246,7 +246,12 @@ pub fn by_kind(kind: AccelKind) -> &'static Pack {
     all.iter()
         .copied()
         .find(|p| p.kind == kind)
-        .unwrap_or_else(|| all.iter().copied().find(|p| p.kind == AccelKind::Gpu).unwrap_or(all[0]))
+        .unwrap_or_else(|| {
+            all.iter()
+                .copied()
+                .find(|p| p.kind == AccelKind::Gpu)
+                .unwrap_or(all[0])
+        })
 }
 
 /// Packs that support an ahead-of-time compile (the ones a compile form can target).
@@ -256,7 +261,6 @@ pub fn compilable() -> impl Iterator<Item = &'static Pack> {
         .copied()
         .filter(|p| p.caps.compiles_ahead_of_time)
 }
-
 
 // ── Runtime packs ────────────────────────────────────────────────────────────────────────
 //
@@ -394,10 +398,9 @@ impl PackFile {
         }
         let mut series = Vec::new();
         for sf in self.series {
-            let field = parse_field(&sf.field)
-                .ok_or_else(|| format!("unknown field '{}'", sf.field))?;
-            let unit =
-                parse_unit(&sf.unit).ok_or_else(|| format!("unknown unit '{}'", sf.unit))?;
+            let field =
+                parse_field(&sf.field).ok_or_else(|| format!("unknown field '{}'", sf.field))?;
+            let unit = parse_unit(&sf.unit).ok_or_else(|| format!("unknown unit '{}'", sf.unit))?;
             let agg = match sf.agg.as_deref().unwrap_or("max") {
                 "max" => Agg::Max,
                 "avg" => Agg::Avg,
@@ -497,9 +500,7 @@ impl PackFile {
                 } else {
                     self.resource_key
                 }),
-                product_label: self
-                    .product_label
-                    .map(|(k, v)| (intern(k), intern(v))),
+                product_label: self.product_label.map(|(k, v)| (intern(k), intern(v))),
                 route_segment: intern(if self.route_segment.is_empty() {
                     id.to_string()
                 } else {
@@ -731,7 +732,9 @@ mod tests {
             );
         }
         // A util series is mandatory — everything downstream keys off it.
-        let no_util = MINIMAL.replace("field: util", "field: temp").replace("unit: ratio", "unit: celsius");
+        let no_util = MINIMAL
+            .replace("field: util", "field: temp")
+            .replace("unit: ratio", "unit: celsius");
         assert!(parse(&no_util).unwrap_err().contains("util series"));
         // Health and its series must agree, exactly as for the built-ins.
         let bad_health = format!("{}health: zero-is-healthy\n", MINIMAL);
@@ -744,7 +747,9 @@ mod tests {
         // that guards it, since the loader reads the real filesystem.
         for p in BUILTIN {
             assert!(
-                BUILTIN.iter().any(|b| b.id == p.id || b.aliases.contains(&p.id)),
+                BUILTIN
+                    .iter()
+                    .any(|b| b.id == p.id || b.aliases.contains(&p.id)),
                 "{} should be recognised as taken",
                 p.id
             );

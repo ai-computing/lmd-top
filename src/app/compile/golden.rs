@@ -16,6 +16,7 @@ use crate::collect::{Accel, AccelKind, NodeInfo, Snapshot};
 /// to be stable — a live cluster would make them flap.
 fn fixture() -> Snapshot {
     let node = |name: &str, npu: &str| NodeInfo {
+        identity: None,
         name: name.into(),
         load1: 1.0,
         mem_used_gb: 32.0,
@@ -85,15 +86,60 @@ fn app() -> App {
 
 /// (name, op, vendor, model) — the combinations worth pinning.
 const CASES: &[(&str, &str, &str, &str)] = &[
-    ("compile-rbln-qwen", "compile", "rbln", "Qwen/Qwen2.5-0.5B-Instruct"),
-    ("compile-rbln-llama", "compile", "rbln", "meta-llama/Llama-3.1-8B-Instruct"),
-    ("compile-furiosa-qwen", "compile", "furiosa", "furiosa-ai/Qwen3-4B-FP8"),
-    ("compile-furiosa-llama", "compile", "furiosa", "meta-llama/Llama-3.1-8B-Instruct"),
-    ("deploy-rbln-qwen", "deploy", "rbln", "Qwen/Qwen2.5-0.5B-Instruct"),
-    ("deploy-rbln-llama", "deploy", "rbln", "meta-llama/Llama-3.1-8B-Instruct"),
-    ("deploy-furiosa-qwen", "deploy", "furiosa", "furiosa-ai/Qwen3-4B-FP8"),
-    ("deploy-gpu-qwen", "deploy", "gpu", "Qwen/Qwen2.5-0.5B-Instruct"),
-    ("deploy-gpu-llama", "deploy", "gpu", "meta-llama/Llama-3.1-8B-Instruct"),
+    (
+        "compile-rbln-qwen",
+        "compile",
+        "rbln",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+    ),
+    (
+        "compile-rbln-llama",
+        "compile",
+        "rbln",
+        "meta-llama/Llama-3.1-8B-Instruct",
+    ),
+    (
+        "compile-furiosa-qwen",
+        "compile",
+        "furiosa",
+        "furiosa-ai/Qwen3-4B-FP8",
+    ),
+    (
+        "compile-furiosa-llama",
+        "compile",
+        "furiosa",
+        "meta-llama/Llama-3.1-8B-Instruct",
+    ),
+    (
+        "deploy-rbln-qwen",
+        "deploy",
+        "rbln",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+    ),
+    (
+        "deploy-rbln-llama",
+        "deploy",
+        "rbln",
+        "meta-llama/Llama-3.1-8B-Instruct",
+    ),
+    (
+        "deploy-furiosa-qwen",
+        "deploy",
+        "furiosa",
+        "furiosa-ai/Qwen3-4B-FP8",
+    ),
+    (
+        "deploy-gpu-qwen",
+        "deploy",
+        "gpu",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+    ),
+    (
+        "deploy-gpu-llama",
+        "deploy",
+        "gpu",
+        "meta-llama/Llama-3.1-8B-Instruct",
+    ),
     // Store maintenance: the `model` column carries the store path instead of an HF id.
     (
         "store-delete",
@@ -214,7 +260,11 @@ fn manifests_carry_the_right_semantics() {
 
         // Every document is a namespaced k8s object in the target namespace.
         for d in &docs {
-            assert!(d.get("apiVersion").is_some(), "{}: doc without apiVersion", name);
+            assert!(
+                d.get("apiVersion").is_some(),
+                "{}: doc without apiVersion",
+                name
+            );
             assert!(d.get("kind").is_some(), "{}: doc without kind", name);
             if let Some(ns) = d["metadata"]["namespace"].as_str() {
                 assert_eq!(ns, "llm-serving", "{}: wrong namespace", name);
@@ -229,7 +279,9 @@ fn manifests_carry_the_right_semantics() {
             assert_eq!(kinds, vec!["Job"], "{}: probe is a single Job", name);
             let pod = &docs[0]["spec"]["template"]["spec"];
             assert!(
-                pod["nodeSelector"]["kubernetes.io/hostname"].as_str().is_some(),
+                pod["nodeSelector"]["kubernetes.io/hostname"]
+                    .as_str()
+                    .is_some(),
                 "{}: a hostPath probe must be pinned to its node",
                 name
             );
@@ -300,7 +352,12 @@ fn manifests_carry_the_right_semantics() {
                 repo_dir
             );
             let kinds: Vec<&str> = docs.iter().filter_map(|d| d["kind"].as_str()).collect();
-            assert!(kinds.contains(&"Job"), "{}: compile needs a Job, got {:?}", name, kinds);
+            assert!(
+                kinds.contains(&"Job"),
+                "{}: compile needs a Job, got {:?}",
+                name,
+                kinds
+            );
         } else {
             assert!(
                 yaml.contains(&format!("serve-{}", slug)),

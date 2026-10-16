@@ -57,7 +57,39 @@ impl Default for Config {
 
 /// Parse `~/.config/lmd-top/lmd-top.yaml` (None if absent). Shared file for columns/tunables.
 pub fn load_yaml() -> Option<serde_yaml::Value> {
-    let path = std::env::var("HOME").ok()? + "/.config/lmd-top/lmd-top.yaml";
-    let txt = std::fs::read_to_string(path).ok()?;
-    serde_yaml::from_str(&txt).ok()
+    let path = config_path()?;
+    let txt = match std::fs::read_to_string(&path) {
+        Ok(txt) => txt,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!("lmd-top: cannot read config {}: {e}", path.display());
+            return None;
+        }
+    };
+    match serde_yaml::from_str(&txt) {
+        Ok(value @ serde_yaml::Value::Mapping(_)) => Some(value),
+        Ok(_) => {
+            eprintln!(
+                "lmd-top: config {} must be a YAML mapping; using defaults/environment",
+                path.display()
+            );
+            None
+        }
+        Err(_) => {
+            // Do not echo parser errors: YAML snippets may contain credentials.
+            eprintln!(
+                "lmd-top: invalid YAML in {}; using defaults/environment",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Explicit config selection also makes onboarding possible without touching HOME.
+pub fn config_path() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("LMD_CONFIG").filter(|p| !p.is_empty()) {
+        return Some(path.into());
+    }
+    Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join(".config/lmd-top/lmd-top.yaml"))
 }

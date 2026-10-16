@@ -73,7 +73,11 @@ impl App {
             a.family.clone()
         }
     }
-    pub(crate) fn opt_or<'a>(a: &'a crate::collect::ModelArtifact, k: &str, def: &'a str) -> String {
+    pub(crate) fn opt_or<'a>(
+        a: &'a crate::collect::ModelArtifact,
+        k: &str,
+        def: &'a str,
+    ) -> String {
         a.opts
             .iter()
             .find(|(kk, _)| kk == k)
@@ -150,7 +154,10 @@ impl App {
         }
     }
 
-    pub(super) fn placement_mount(m: &crate::catalog::CatModel, p: &crate::catalog::CatPlacement) -> String {
+    pub(super) fn placement_mount(
+        m: &crate::catalog::CatModel,
+        p: &crate::catalog::CatPlacement,
+    ) -> String {
         let uri = p.uri.trim();
         if let Some(path) = uri.strip_prefix("pvc://") {
             format!("/mnt/store/{}", path.trim_start_matches('/'))

@@ -7,6 +7,8 @@ use ratatui::widgets::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+pub(crate) use crate::measurement::{percent, Metric};
+
 // ── helpers ────────────────────────────────────────────
 pub(crate) fn dwidth(s: &str) -> usize {
     UnicodeWidthStr::width(s)
@@ -69,6 +71,12 @@ pub(crate) fn padw(s: &str, n: usize) -> String {
 
 /// Dot gauge — filled = colored dots (●), empty = dim dots (·). Each dot is a discrete tick. Font-safe.
 pub(crate) fn dot_bar(pct: f64, cells: usize, color: Color) -> Line<'static> {
+    if !pct.is_finite() {
+        return Line::from(Span::styled(
+            "—".repeat(cells),
+            Style::default().fg(C_DIM()),
+        ));
+    }
     let filled = ((pct.clamp(0.0, 100.0) / 100.0) * cells as f64).round() as usize;
     let tick_step = ((cells as f64) * 0.10).round() as usize; // 10% ticks (only on wide bars)
     let mut sp: Vec<Span> = Vec::with_capacity(cells);
@@ -91,6 +99,9 @@ pub(crate) fn dot_bar(pct: f64, cells: usize, color: Color) -> Line<'static> {
 }
 
 pub(crate) fn bar_line(pct: f64, width: usize, color: Color) -> Line<'static> {
+    if !pct.is_finite() {
+        return dot_bar(pct, width, C_DIM());
+    }
     let p = pct.clamp(0.0, 100.0) / 100.0;
     let frac = p * width as f64;
     let full = (frac.floor() as usize).min(width);
@@ -120,6 +131,9 @@ pub(crate) fn stacked_bar(
     // Per-cell segment bar + 5% tick edges (┊). Ticks visible every 5% (roughly at width≥20).
     if width == 0 {
         return Vec::new();
+    }
+    if !total.is_finite() || total <= 0.0 || segments.iter().any(|(v, _)| !v.is_finite()) {
+        return dot_bar(f64::NAN, width, C_DIM()).spans;
     }
     let used: f64 = segments.iter().map(|(v, _)| *v).sum();
     let tick_step = ((width as f64) * 0.10).round() as usize; // 10% ticks
@@ -258,12 +272,12 @@ pub(crate) fn sparkstr(data: &[u64], width: usize, max: u64) -> String {
 
 pub(crate) fn fmt_opt(v: Option<f64>) -> String {
     match v {
-        Some(x) if !x.is_nan() => format!("{:.0}", x),
+        Some(x) if x.is_finite() => format!("{:.0}", x),
         _ => "–".into(),
     }
 }
 pub(crate) fn fmt_nan(v: f64, dec: usize) -> String {
-    if v.is_nan() {
+    if !v.is_finite() {
         "–".into()
     } else {
         format!("{:.*}", dec, v)
@@ -443,11 +457,11 @@ mod width_tests {
     fn padw_pads_and_truncates_by_display_width() {
         for (s, n) in [
             ("ascii", 20),
-            ("모델-서버", 20),   // 5 char / 9 columns
+            ("모델-서버", 20), // 5 char / 9 columns
             ("한글이름아주긴것", 10),
             ("mixed-한글-name", 16),
             ("", 8),
-            ("정확히열폭", 10),  // exactly n columns → unchanged, no padding
+            ("정확히열폭", 10), // exactly n columns → unchanged, no padding
         ] {
             assert_eq!(
                 dwidth(&padw(s, n)),
@@ -472,4 +486,3 @@ mod width_tests {
         assert_eq!(dwidth(&padw(cjk, 20)), 20);
     }
 }
-

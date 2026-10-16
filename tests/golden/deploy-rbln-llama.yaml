@@ -103,7 +103,7 @@ spec:
         - containerPort: 8000
         env:
         - name: MOUNT
-          value: /mnt/store/compiled/meta-llama--Llama-3.1-8B-Instruct/rbln/rbln-ca22-tp4-s8192
+          value: /mnt/store/compiled/meta-llama--Llama-3.1-8B-Instruct/rbln/rbln-ca22-tp4-s8192-dd8450890d3f
         - name: SERVED
           value: meta-llama/Llama-3.1-8B-Instruct
         - name: PORT

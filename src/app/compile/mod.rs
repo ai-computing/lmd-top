@@ -134,11 +134,11 @@ impl App {
         let dev_default = if rbln {
             tp_v
         } else {
-            ((tp_v as f64 / 8.0).ceil() as i64).max(1) * pp_v
+            ((tp_v as f64 / 8.0).ceil() as i64)
+                .max(1)
+                .saturating_mul(pp_v)
         };
-        let dev_choices: Vec<String> = (1..=max_dev.max(dev_default))
-            .map(|i| i.to_string())
-            .collect();
+        let dev_choices: Vec<String> = (1..=max_dev).map(|i| i.to_string()).collect();
         form_fields.push(CompileField {
             key: "devices".into(),
             label: "devices".into(),
@@ -174,7 +174,12 @@ impl App {
             &self.snap.nodes,
         ) {
             CompileManifestOutcome::Ready { title, yaml } => {
-                self.confirm = Some(Pending::Apply { title, yaml });
+                self.confirm = Some(Pending::Apply {
+                    reviewed: None,
+                    title,
+                    yaml,
+                    required: crate::app::Mode::Admin,
+                });
                 self.confirm_yes = false;
             }
             CompileManifestOutcome::Blocked { issue } => {
@@ -203,8 +208,8 @@ impl App {
                 // Two distinct situations, and the operator needs to know which: this
                 // accelerator serves weights directly, or it compiles but nobody has written
                 // its recipe yet.
-                let compiles = crate::accel::by_id(&vendor)
-                    .is_some_and(|p| p.caps.compiles_ahead_of_time);
+                let compiles =
+                    crate::accel::by_id(&vendor).is_some_and(|p| p.caps.compiles_ahead_of_time);
                 self.notify(if compiles {
                     format!(
                         "no compile recipe registered for '{}' — add one in app/compile/fields.rs",
@@ -391,7 +396,9 @@ mod compile_tests {
     }
 
     fn ov(kvs: &[(&str, &str)]) -> Vec<(String, String)> {
-        kvs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        kvs.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -436,6 +443,183 @@ mod compile_tests {
             &ov(&[("max-len", "2048"), ("attn", "eager")]),
         );
         assert!(r.is_ok(), "eager path doesn't require kvpart divisibility");
+    }
+
+    #[test]
+    fn malformed_numeric_options_never_produce_compile_jobs() {
+        let mut app = App::new();
+        for vendor in ["rbln", "furiosa"] {
+            for key in ["tp", "max-len", "batch"] {
+                for value in ["", "garbage", "0", "-1", "4294967296"] {
+                    let result = app.plan_compile_for_model(
+                        "meta-llama/Llama-3.1-8B-Instruct",
+                        vendor,
+                        &ov(&[(key, value)]),
+                    );
+                    assert!(
+                        result.is_err(),
+                        "{vendor}: {key}={value:?} must be rejected"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_checks_do_not_cross_vendor_boundaries() {
+        for vendor in ["rbln", "furiosa"] {
+            let app = App::new();
+            let form = app.build_compile_form(
+                &App::synthetic_artifact_for(
+                    "meta-llama/Llama-3.1-8B-Instruct",
+                    vendor,
+                    String::new(),
+                    &[],
+                ),
+                vendor,
+            );
+            let checks = preflight::compile_preflight(&[], &[], Some("compiler:test"), &form);
+            let has_rbln_runtime = checks
+                .iter()
+                .any(|(_, text)| text.contains("rbln_create_runtimes"));
+            let has_rbln_registry = checks
+                .iter()
+                .any(|(_, text)| text.contains("registry: RBLN"));
+            assert_eq!(has_rbln_runtime, vendor == "rbln");
+            assert_eq!(has_rbln_registry, vendor == "rbln");
+            assert!(preflight::compile_param_issue(&form).is_none());
+        }
+    }
+
+    #[test]
+    fn compile_override_typos_and_duplicate_aliases_are_rejected() {
+        let mut app = App::new();
+        for options in [
+            ov(&[("bacth", "2")]),
+            ov(&[("tp", "2"), ("tensor-parallel", "4")]),
+            ov(&[("mount", "/unused")]),
+        ] {
+            let error = app
+                .plan_compile_for_model("org/model", "rbln", &options)
+                .unwrap_err();
+            assert!(error.contains("compile option"), "{error}");
+            assert!(app.confirm.is_none());
+        }
+        assert!(app
+            .plan_compile_for_model("org/model", "rbln", &ov(&[("tensor-parallel", "2")]))
+            .is_ok());
+    }
+
+    #[test]
+    fn invalid_discrete_compile_choices_are_rejected() {
+        let mut app = App::new();
+        for (vendor, key, value) in [
+            ("rbln", "attn", "flahs_attn"),
+            ("rbln", "quant", "int42"),
+            ("furiosa", "optim", "O9"),
+            ("furiosa", "quant", "yes"),
+        ] {
+            let error = app
+                .plan_compile_for_model("org/model", vendor, &ov(&[(key, value)]))
+                .unwrap_err();
+            assert!(error.contains("must be one of"), "{error}");
+            assert!(app.confirm.is_none());
+        }
+    }
+
+    #[test]
+    fn deploy_rejects_bad_values_and_unknown_overrides() {
+        for (key, value) in [
+            ("repilcas", "2"),
+            ("replicas", "-1"),
+            ("replicas", "huge"),
+            ("replicas", "2147483648"),
+            ("devices", "0"),
+            ("port", "65536"),
+            ("port", "0"),
+            ("routing", "typo"),
+        ] {
+            let mut app = App::new();
+            let result = app.plan_deploy_for_model("org/model", "gpu", &ov(&[(key, value)]));
+            assert!(result.is_err(), "{key}={value} must fail");
+            assert!(app.confirm.is_none());
+            assert!(
+                app.snap.artifacts.is_empty(),
+                "synthetic artifact must be removed"
+            );
+        }
+        let mut app = App::new();
+        assert!(app
+            .plan_deploy_for_model(
+                "org/model",
+                "gpu",
+                &ov(&[("devices", "1"), ("devices/replica", "2")])
+            )
+            .is_err());
+        assert!(app
+            .plan_deploy_for_model(
+                "org/model",
+                "gpu",
+                &ov(&[("replicas", "0"), ("routing", "direct"), ("port", "65535")])
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn furiosa_unimplemented_overrides_never_produce_a_build() {
+        for (key, value) in [
+            ("batch", "2"),
+            ("chunk", "512"),
+            ("block", "32"),
+            ("quant", "on"),
+        ] {
+            let mut app = App::new();
+            let error = app
+                .plan_compile_for_model("furiosa-ai/Qwen3-4B-FP8", "furiosa", &ov(&[(key, value)]))
+                .unwrap_err();
+            assert!(error.contains("does not support overriding"), "{error}");
+            assert!(app.confirm.is_none());
+        }
+    }
+
+    #[test]
+    fn furiosa_preset_fields_are_not_editable_but_can_reset_old_values() {
+        let app = App::new();
+        let mut form = app.build_compile_form(
+            &App::synthetic_artifact_for("org/model", "furiosa", String::new(), &[]),
+            "furiosa",
+        );
+        for key in ["batch", "chunk", "block", "quant"] {
+            form.cursor = form.fields.iter().position(|f| f.key == key).unwrap();
+            let original = form.get(key);
+            form.editing = true;
+            form.type_digit('9');
+            form.type_char('x');
+            form.backspace();
+            form.cycle(1);
+            assert_eq!(form.get(key), original);
+            form.fields[form.cursor].value = "unsupported-old-value".into();
+            form.cycle(-1);
+            assert_eq!(form.get(key), original);
+        }
+    }
+
+    #[test]
+    fn compile_fit_does_not_certify_unobserved_memory_or_fxb_buckets() {
+        let app = App::new();
+        for vendor in ["furiosa", "rbln"] {
+            let form = app.build_compile_form(
+                &App::synthetic_artifact_for("org/Llama-8B", vendor, String::new(), &[]),
+                vendor,
+            );
+            let fit = app.compile_fit(&form);
+            assert_eq!(fit.verdict, crate::ops::FitVerdict::Unknown);
+            assert!(fit.tips.iter().any(|t| t.contains("관측 없음")));
+            if vendor == "furiosa" {
+                assert!(fit.tips.iter().any(|t| t.contains("버킷 계획 미확인")));
+                assert!(!fit.tips.iter().any(|t| t.contains("batch↑")));
+            }
+        }
     }
 
     #[test]

@@ -182,6 +182,7 @@ fn evolve(base: &Snapshot, i: u64) -> Snapshot {
         r.decode_p95 = 0.02 + w * 0.05;
     }
     s.ts = base.ts.wrapping_add(i).wrapping_add(1);
+    s.sources.clear(); // Synthetic animation uses its own timeline, never live freshness metadata.
     s
 }
 

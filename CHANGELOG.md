@@ -2,6 +2,31 @@
 
 [Semantic Versioning](https://semver.org). 0.x = 실험적(인터페이스 변경 가능).
 
+## [Unreleased]
+
+### Operation correctness (2026-09-28)
+- Compile history keys include namespace/name/Job UID; recreated Jobs are recorded separately and log Pods are matched by owner UID.
+- HTTPRoute edits preserve sibling matches, filters and backend weights, resolve Service ports, reject ambiguous edits, and use resourceVersion conflicts instead of forced ownership changes.
+- Endpoint exclusion derives label changes from live Service/InferencePool selectors, verifies Service EndpointSlice convergence, records original labels and attempts rollback on verification failure. EPP cache convergence and active-stream completion remain explicitly unverified.
+- kubectl execution shares bounded stdin/stdout/stderr handling with child termination/reaping; server dry-run runs outside the UI loop. Real manifest application validates before replacement, refuses to replace nonterminal Jobs and reports deletion failures.
+- Compile form options contribute to artifact fingerprints. Completed builds publish through hidden staging directories and same-filesystem rename; existing builds are never merged/overwritten. Old store paths remain usable by explicit selection/mount.
+- Added regression coverage for recreated Job identities, route edits, selector-based exclusion, subprocess timeouts, build fingerprints and publication failures. Real-cluster/NPU validation is still required before deployment.
+
+### Routing policy development
+- `heterogeneous-capacity` EPP filter/scorer plus independent complete-load extractor, pinned router adapter, configuration-load tests and offline decision replay.
+- `--policy init/validate/render/plan/test/replay/build`: bundled developer workspace, schema validation, existing-config merge and immutable ConfigMap rollout planning.
+- TUI `:Routing policy`: load policy, edit image/profile/weight/freshness/capacity, asynchronously preview, then existing admin confirmation/audit applies the plan. Old config retained for rollout undo.
+- `:EPP capabilities`, version-scoped feature guide and source-derived inventory of 72 upstream registered plugin types (includes aliases/test types).
+- Plugin CI checks Rust-generated config against the pinned EPP loader and builds the Go binary. Live routing rollout/benchmark not performed.
+
+### Setup and maintenance
+- Guided `--init` writes namespace/Prometheus/Grafana settings without overwriting existing configuration. `LMD_CONFIG` selects a separate file; malformed config now produces a warning.
+- Read-only `--check-setup` exposes the TUI prerequisite checks to the shell (exit 1 on required missing checks); `--version` identifies the binary.
+- Installer fixes Bash invocation and argument parsing, honors source-build destination, requires SHA-256 verification, and stages replacement in the destination directory.
+- PR CI runs formatting, strict Clippy, Rust tests and offline installer regression tests. Existing Rust formatting normalized to establish the formatting gate.
+- Release builds validate tag/version identity, use locked dependencies, test all four platforms, and publish only after all builds succeed. Intel macOS runner moved to macos-15-intel.
+- Added quick-start/update/recovery guide and a prioritized heterogeneous GPU/NPU analysis proposal (planned, not implemented).
+
 ## [0.36.0]
 ### Added — Track A 마무리(drain·rollback) + Track B 착수(EPP decision debugger)
 - **endpoint drain** (killer #5): Pods▸Enter▸Drain. 파드를 라우팅 selector(`app`/`llm-d.ai/model`)에서 relabel(`<key>=<val>-drained`)로 이탈 → **신규 요청 차단·in-flight stream 유지**, ReplicaSet 이 대체본 생성. 되돌리려면 라벨 원복, 스트림 종료 후 Pods▸Delete. 실기 검증: 대체본 생성·drained 파드 Running 유지·Service 엔드포인트에서 제거 확인.

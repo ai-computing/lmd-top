@@ -1,5 +1,7 @@
 # lmd-top — ROADMAP
 
+> **2026-09-18 업데이트**: 설치·유지보수 개선은 [CHANGELOG](CHANGELOG.md)의 Unreleased, 신규 이종/NPU 분석 우선순위는 [설계안](docs/HETEROGENEOUS-ANALYSIS.md)을 기준으로 한다. 아래 Phase/Track 항목에는 과거 기획 상태가 포함되어 있다.
+
 > **명제**: lmd-top 은 "Kubernetes 리소스 뷰어"가 아니라 **LLM inference 운영 콘솔**이다 —
 > TTFT/TPOT/SLO · KV-cache/prefix routing · Prefill/Decode disaggregation · EPP routing decision 을
 > 한 화면에서 보고 **조정**한다. (k9s/btop/nvtop/kubectl 과의 차별점은 전부 여기서 나온다.)

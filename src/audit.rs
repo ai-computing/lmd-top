@@ -2,7 +2,7 @@
 //! One line per: "who (mode) · when (ts) · what (action) · where (target) · result (ok/FAIL · reason)".
 //! Since an observability tool performs real mutations, this is essential for after-the-fact tracing/accountability.
 //!
-//! Path: $LMD_AUDIT > ~/.config/lmd-top/audit.log. Failures don't block app flow (best-effort).
+//! Path: $LMD_AUDIT > ~/.config/lmd-top/audit.log. Write failures are reported separately from operation results.
 //! Pure Rust only (no external time crate) — converts epoch seconds to human-readable UTC via its own civil-date computation.
 
 use crate::app::Mode;
@@ -41,39 +41,65 @@ fn sanitize(s: &str) -> String {
     s.lines()
         .next()
         .unwrap_or("")
-        .replace('\t', " ")
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
         .trim()
         .to_string()
 }
 
-/// Record one mutation. result: Ok(summary) | Err(reason). best-effort (silently ignored on failure).
-pub fn record(mode: Mode, action: &str, target: &str, result: Result<&str, &str>) {
-    let Some(path) = log_path() else { return };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+#[derive(Clone, Default)]
+pub struct Scope {
+    pub context: String,
+    pub namespace: String,
+    pub uid: String,
+    pub resource_version: String,
+    pub elapsed_ms: u128,
+    pub manifest_targets: Vec<serde_json::Value>,
+}
+
+/// Preserve the original six TSV columns; append execution scope for newer records.
+/// Failures are returned so the caller can report an incomplete audit without rerunning the mutation.
+pub fn record(
+    mode: Mode,
+    action: &str,
+    target: &str,
+    result: Result<&str, &str>,
+    scope: &Scope,
+) -> std::io::Result<()> {
+    let path = log_path().ok_or_else(|| {
+        std::io::Error::other("cannot locate audit log: HOME/LMD_AUDIT unavailable")
+    })?;
+    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
     }
-    let ts = iso_utc(crate::collect::now_secs());
     let (status, detail) = match result {
-        Ok(msg) => ("ok", sanitize(msg)),
-        Err(e) => ("FAIL", sanitize(e)),
+        Ok(msg) => ("ok", msg),
+        Err(e) => ("FAIL", e),
     };
-    // TSV: ts \t mode \t action \t target \t status \t detail
     let line = format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\n",
-        ts,
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        iso_utc(crate::collect::now_secs()),
         mode.name(),
-        action,
+        sanitize(action),
         sanitize(target),
         status,
-        detail
+        sanitize(detail),
+        sanitize(&scope.context),
+        sanitize(&scope.namespace),
+        sanitize(&scope.uid),
+        sanitize(&scope.resource_version),
+        scope.elapsed_ms,
+        serde_json::to_string(&scope.manifest_targets).unwrap_or_else(|_| "[]".into())
     );
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
     {
-        let _ = f.write_all(line.as_bytes());
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    options.open(path)?.write_all(line.as_bytes())
 }
 
 /// `--audit` — print the audit log file path and contents to stdout. If absent, just a notice.
@@ -85,7 +111,8 @@ pub fn print_log() {
     match std::fs::read_to_string(&path) {
         Ok(body) if !body.trim().is_empty() => {
             println!("# audit log: {}", path.display());
-            println!("# ts\tmode\taction\ttarget\tstatus\tdetail");
+            println!("# ts\tmode\taction\ttarget\tstatus\tdetail\tcontext\tnamespace\tuid\tresourceVersion\telapsed_ms\tmanifest_targets_json");
+            println!("# Older records may omit trailing scope columns.");
             print!("{}", body);
         }
         _ => println!("# audit log empty (no mutations): {}", path.display()),
@@ -96,6 +123,34 @@ pub fn print_log() {
 /// race by overwriting each other's value when run in parallel. Related tests serialize on this lock.
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct TestSink {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+}
+#[cfg(test)]
+impl TestSink {
+    pub fn new() -> Self {
+        let lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("LMD_AUDIT");
+        std::env::set_var("LMD_AUDIT", "/dev/null");
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+#[cfg(test)]
+impl Drop for TestSink {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            std::env::set_var("LMD_AUDIT", previous);
+        } else {
+            std::env::remove_var("LMD_AUDIT");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -117,22 +172,73 @@ mod tests {
     }
 
     #[test]
+    fn audit_write_failure_is_returned_and_control_characters_are_removed() {
+        let _sink = TestSink::new();
+        std::env::set_var("LMD_AUDIT", std::env::temp_dir()); // a directory, not an appendable file
+        assert!(record(
+            Mode::Admin,
+            "apply",
+            "target",
+            Ok("done"),
+            &Scope::default()
+        )
+        .is_err());
+        assert!(!sanitize("action\u{1b}[31m\ttext")
+            .chars()
+            .any(char::is_control));
+    }
+
+    #[test]
     fn record_writes_tsv_line() {
         let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let path = std::env::temp_dir().join("lmd-audit-test.log");
         let _ = std::fs::remove_file(&path);
         std::env::set_var("LMD_AUDIT", &path);
-        record(Mode::Admin, "scale→2", "ds4", Ok("scaled"));
-        record(Mode::Admin, "delete-pod", "p1", Err("boom\nsecond line"));
+        record(
+            Mode::Admin,
+            "scale→2",
+            "ds4",
+            Ok("scaled"),
+            &Scope::default(),
+        )
+        .unwrap();
+        record(
+            Mode::Admin,
+            "delete-pod",
+            "p1",
+            Err("boom\nsecond line"),
+            &Scope::default(),
+        )
+        .unwrap();
+        let reviewed = crate::manifest_plan::Reviewed::new("ns", "original source", vec![("replace", r#"{"apiVersion":"v1","kind":"Secret","metadata":{"name":"token","uid":"original-uid","resourceVersion":"42"},"data":{"token":"DO-NOT-LOG"}}"#.into())]);
+        record(
+            Mode::Admin,
+            "apply",
+            "reviewed",
+            Err("Conflict"),
+            &Scope {
+                manifest_targets: reviewed.targets(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         std::env::remove_var("LMD_AUDIT");
         let body = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = body.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
+        assert!(!body.contains("DO-NOT-LOG"));
+        let fields: Vec<&str> = lines[2].split('\t').collect();
+        let targets: serde_json::Value = serde_json::from_str(fields[11]).unwrap();
+        assert_eq!(targets[0]["uid"], "original-uid");
+        assert_eq!(targets[0]["resource_version"], "42");
+        assert_eq!(targets[0]["default_namespace"], "ns");
+        assert!(targets[0]["namespace"].is_null());
         let f0: Vec<&str> = lines[0].split('\t').collect();
-        assert_eq!(f0.len(), 6);
-        assert_eq!(&f0[1..], ["admin", "scale→2", "ds4", "ok", "scaled"]);
+        assert_eq!(f0.len(), 12);
+        assert_eq!(f0[11], "[]");
+        assert_eq!(&f0[1..6], ["admin", "scale→2", "ds4", "ok", "scaled"]);
         let f1: Vec<&str> = lines[1].split('\t').collect();
-        assert_eq!(&f1[3..], ["p1", "FAIL", "boom"]); // multiline reason keeps only the first line
+        assert_eq!(&f1[3..6], ["p1", "FAIL", "boom"]); // multiline reason keeps only the first line
         let _ = std::fs::remove_file(&path);
     }
 }

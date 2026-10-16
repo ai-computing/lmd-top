@@ -6,6 +6,8 @@
 #   PREFETCHED_DIR  HF cache copy in the store, if present  (optional)
 #   TP, PP          tensor / pipeline parallel size
 #   MAX_LEN         max model length
+#   FXB_CONCURRENCY host-side parallel compiler workers (default 8)
+#   FXB_OPTIM_LEVEL bucket filtering level O0/O1/O2/O3 (default O3)
 set -eu
 
 # Report the toolchain first — lmd-top parses this out of the log into its history, so a
@@ -36,10 +38,8 @@ fi
 
 mkdir -p /work/out
 fxb build "$MODEL_ID" /work/out/model \
-  -tp "$TP" -pp "$PP" --max-model-len "$MAX_LEN" --concurrency 8
+  -tp "$TP" -pp "$PP" --max-model-len "$MAX_LEN" --concurrency "${FXB_CONCURRENCY:-8}" \
+  --optim-level "${FXB_OPTIM_LEVEL:-O3}"
 
-# Only the finished artifact goes back to the store.
-mkdir -p "$OUTPUT"
-cp -r /work/out/. "$OUTPUT"/
-echo COMPILE_DONE
-ls -la "$OUTPUT"
+# Publish atomically on the store filesystem, without merging an existing build.
+python3 /scripts/publish-artifact.py /work/out "$OUTPUT"

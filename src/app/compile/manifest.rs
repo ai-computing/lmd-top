@@ -18,8 +18,7 @@ use crate::ymap;
 const RECIPE_RBLN: &str = include_str!("../../../assets/recipes/rbln-compile.py");
 const RECIPE_FURIOSA: &str = include_str!("../../../assets/recipes/furiosa-compile.sh");
 /// Bootstrap for the RBLN host-stack fallback: prepares a bare image, then execs the recipe.
-const RECIPE_RBLN_BOOTSTRAP: &str =
-    include_str!("../../../assets/recipes/rbln-host-bootstrap.sh");
+const RECIPE_RBLN_BOOTSTRAP: &str = include_str!("../../../assets/recipes/rbln-host-bootstrap.sh");
 /// Bootstrap that installs a matched toolchain from the store instead of borrowing the host's.
 const RECIPE_RBLN_STORE_BOOTSTRAP: &str =
     include_str!("../../../assets/recipes/rbln-store-bootstrap.sh");
@@ -85,16 +84,17 @@ pub fn build_compile_manifest(
         };
     }
 
-    if vendor == "rbln" {
-        if let Some(issue) = super::preflight::rbln_param_issue(form) {
-            return CompileManifestOutcome::Blocked { issue };
-        }
+    if let Some(issue) = super::preflight::compile_param_issue(form) {
+        return CompileManifestOutcome::Blocked { issue };
     }
 
     let target = form.target();
     let repo_dir = model_id.replace('/', "--");
     let name = compile_job_name(&repo_dir, &target);
-    let outdir = format!("{}/compiled/{}/{}/{}", STORE_MOUNT, repo_dir, vendor, target);
+    let outdir = format!(
+        "{}/compiled/{}/{}/{}",
+        STORE_MOUNT, repo_dir, vendor, target
+    );
 
     // Destination node: explicit picker selection takes precedence over any auto-selection.
     let node_pick = if form.dest.is_empty() {
@@ -161,6 +161,21 @@ pub fn build_compile_manifest(
         env_val("MODEL_ID", model_id.clone()),
         env_val("OUTPUT", outdir.clone()),
     ];
+    env.push(ymap! {
+        "name" => s("LMD_BUILD_UID"),
+        "valueFrom" => ymap! { "fieldRef" => ymap! { "fieldPath" => s("metadata.uid") } },
+    });
+    let recorded_options: std::collections::BTreeMap<_, _> = form
+        .fields
+        .iter()
+        .map(|f| (f.key.as_str(), f.value.as_str()))
+        .collect();
+    env.push(env_val("LMD_BUILD_VENDOR", vendor));
+    env.push(env_val("LMD_BUILD_IMAGE", image.clone()));
+    env.push(env_val(
+        "LMD_BUILD_OPTIONS",
+        serde_json::to_string(&recorded_options).expect("string options serialize"),
+    ));
     env.extend(plan.extra_env.clone());
     // Vendor debug/tuning flags, passed straight through: `LMD_COMPILE_ENV=K=V,K=V`.
     //
@@ -231,6 +246,10 @@ pub fn build_compile_manifest(
 
     let mut data = serde_yaml::Mapping::new();
     data.insert(recipe_key.into(), s(recipe_body));
+    data.insert(
+        "publish-artifact.py".into(),
+        s(include_str!("../../../assets/recipes/publish-artifact.py")),
+    );
     if let Some((body, key)) = plan.extra_file {
         data.insert(key.into(), s(body));
     }
@@ -255,10 +274,10 @@ pub fn build_compile_manifest(
             model_id, vendor, repo_dir, vendor, target
         ))
         .note(format!("Compile-time fixed options: {}", opts_summary))
-        .push(
-            Doc::new(config_map)
-                .note(format!("Compile recipe ({}), mounted at /scripts.", recipe_key)),
-        )
+        .push(Doc::new(config_map).note(format!(
+            "Compile recipe ({}), mounted at /scripts.",
+            recipe_key
+        )))
         .push(Doc::new(job).note(plan.note))
         .to_yaml();
 
@@ -293,10 +312,12 @@ fn furiosa_plan(form: &CompileForm, repo_dir: &str) -> ContainerPlan {
             env_val("TP", or("tp", "1")),
             env_val("PP", or("pp", "1")),
             env_val("MAX_LEN", or("max-len", "8192")),
+            env_val("FXB_CONCURRENCY", or("concurrency", "8")),
+            env_val("FXB_OPTIM_LEVEL", or("optim", "O3")),
         ],
         extra_volumes: Vec::new(),
         extra_mounts: Vec::new(),
-        note: "Furiosa: fxb build for furiosa-ai quantized checkpoints. Installs the aarch64 \
+        note: "Furiosa: fxb build for SDK-supported model architectures and checkpoints. Installs the aarch64 \
                cross-compiler, builds in local scratch, then copies to the model store.",
     }
 }
@@ -336,8 +357,11 @@ fn rbln_plan(host_stack: bool, form: &CompileForm) -> ContainerPlan {
             recipe: (RECIPE_RBLN, "compile.py"),
             extra_file: None,
             command: vec!["python3".into(), "/scripts/compile.py".into()],
-            extra_env: [vec![env_val("HF_HOME", format!("{}/hub", STORE_MOUNT))], params]
-                .concat(),
+            extra_env: [
+                vec![env_val("HF_HOME", format!("{}/hub", STORE_MOUNT))],
+                params,
+            ]
+            .concat(),
             extra_volumes: Vec::new(),
             extra_mounts: Vec::new(),
             note: "RBLN: runs the optimum-rbln recipe inside LMD_COMPILE_IMAGE_RBLN \
@@ -347,8 +371,16 @@ fn rbln_plan(host_stack: bool, form: &CompileForm) -> ContainerPlan {
     // hostPath fallback: a bare ubuntu image plus the node's python/rebel-compiler install.
     // tzdata is needed because pandas→pytz reads /usr/share/zoneinfo, which minimal images lack.
     let host = [
-        ("hp-local", "/home/user/.local/lib/python3.10/site-packages", "/home/user/.local/lib/python3.10/site-packages"),
-        ("hp-sys", "/usr/local/lib/python3.10/dist-packages", "/host-sys"),
+        (
+            "hp-local",
+            "/home/user/.local/lib/python3.10/site-packages",
+            "/home/user/.local/lib/python3.10/site-packages",
+        ),
+        (
+            "hp-sys",
+            "/usr/local/lib/python3.10/dist-packages",
+            "/host-sys",
+        ),
         ("hp-lib", "/usr/lib", "/host-lib"),
         ("hp-bin", "/usr/bin", "/host-bin"),
     ];
@@ -404,6 +436,7 @@ fn passthrough_env() -> Vec<serde_yaml::Value> {
         .map(|(k, v)| (k.trim(), v.trim()))
         .filter(|(k, _)| {
             !k.is_empty()
+                && !k.starts_with("LMD_BUILD_")
                 && k.chars()
                     .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
         })
@@ -497,7 +530,10 @@ mod attn_default_tests {
         };
         // Fresh form: attn defaults to "default".
         assert_eq!(
-            form.fields.iter().find(|f| f.key == "attn").map(|f| f.value.as_str()),
+            form.fields
+                .iter()
+                .find(|f| f.key == "attn")
+                .map(|f| f.value.as_str()),
             Some("default"),
             "the default must be the unset sentinel"
         );
@@ -550,7 +586,10 @@ mod passthrough_tests {
 
     #[test]
     fn parses_pairs_and_trims() {
-        let got = with_env(Some("RBLN_VERBOSE=debug, RBLN_DEBUG_LEVEL=1"), passthrough_env);
+        let got = with_env(
+            Some("RBLN_VERBOSE=debug, RBLN_DEBUG_LEVEL=1"),
+            passthrough_env,
+        );
         assert_eq!(
             names(&got),
             vec![
@@ -575,6 +614,15 @@ mod passthrough_tests {
         );
     }
 
+    #[test]
+    fn build_identity_environment_cannot_be_overridden_by_debug_flags() {
+        let got = with_env(
+            Some("LMD_BUILD_UID=spoof,LMD_BUILD_IMAGE=wrong,RBLN_VERBOSE=debug"),
+            passthrough_env,
+        );
+        assert_eq!(names(&got), vec![("RBLN_VERBOSE".into(), "debug".into())]);
+    }
+
     /// The flags reach the generated Job, which is the point.
     #[test]
     fn reaches_the_generated_manifest() {
@@ -586,15 +634,30 @@ mod passthrough_tests {
                 .1
         });
         let job: serde_yaml::Value = serde_yaml::Deserializer::from_str(&yaml)
-            .map(|d| {
-                <serde_yaml::Value as serde::Deserialize>::deserialize(d).expect("valid YAML")
-            })
+            .map(|d| <serde_yaml::Value as serde::Deserialize>::deserialize(d).expect("valid YAML"))
             .find(|v: &serde_yaml::Value| v["kind"].as_str() == Some("Job"))
             .expect("a Job");
         let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
             .as_sequence()
             .expect("env")
             .clone();
+        let recorded = names(&env);
+        assert!(recorded.contains(&("LMD_BUILD_VENDOR".into(), "rbln".into())));
+        assert!(recorded.contains(&(
+            "LMD_BUILD_IMAGE".into(),
+            job["spec"]["template"]["spec"]["containers"][0]["image"]
+                .as_str()
+                .unwrap()
+                .into()
+        )));
+        let options = recorded
+            .iter()
+            .find(|(key, _)| key == "LMD_BUILD_OPTIONS")
+            .unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&options.1)
+            .unwrap()
+            .get("tp")
+            .is_some());
         assert!(
             names(&env).contains(&("RBLN_VERBOSE".to_string(), "debug".to_string())),
             "passthrough env missing from the Job: {:?}",

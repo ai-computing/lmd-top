@@ -37,7 +37,7 @@ pub fn est_params_b(name: &str) -> Option<f64> {
 /// Calculate estimated memory fit and provide optimization tips for a compile form.
 pub fn estimate_compile_fit(
     accel: &[Accel],
-    nodes: &[NodeInfo],
+    _nodes: &[NodeInfo],
     form: &CompileForm,
 ) -> FitEstimate {
     let rbln = form.vendor == "rbln";
@@ -106,7 +106,7 @@ pub fn estimate_compile_fit(
     let per_chip_gb = (weight_gb + kv_gb) / chips + overhead_gb;
     let ratio = per_chip_gb / avail_gb;
 
-    let verdict = if params_b.is_none() {
+    let verdict = if params_b.is_none() || !rbln || mems.is_empty() {
         FitVerdict::Unknown
     } else if ratio > 1.0 {
         FitVerdict::Oom
@@ -116,7 +116,14 @@ pub fn estimate_compile_fit(
         FitVerdict::Fits
     };
 
-    let mut tips: Vec<String> = Vec::new();
+    let mut tips: Vec<String> =
+        vec!["메모리 수치는 모델명 기반 근사치이며 컴파일·실행 성공을 보장하지 않습니다.".into()];
+    if !rbln {
+        tips.push("FXB 실제 배치·버킷 계획 미확인 — 표시된 KV 계산은 batch=1 가정이며 적합성 판정은 보류합니다.".into());
+    }
+    if mems.is_empty() {
+        tips.push("장치 메모리 관측 없음 — 벤더 기본 용량으로 계산한 참고값입니다.".into());
+    }
     let max_chips = if rbln { 4.0 } else { 8.0 };
     if matches!(verdict, FitVerdict::Oom | FitVerdict::Tight) {
         if tp < max_chips {
@@ -134,7 +141,7 @@ pub fn estimate_compile_fit(
                 kv_gb / 2.0
             ));
         }
-        if batch > 1.0 {
+        if rbln && batch > 1.0 {
             tips.push(format!(
                 "batch↓ {}→{} (KV 절반)",
                 batch as i64,
@@ -143,13 +150,14 @@ pub fn estimate_compile_fit(
         }
         if dtype_bytes >= 2.0 {
             tips.push(if rbln {
-                "양자화 w4a16/w8a8 로 가중치↓".into()
+                "호환되는 w4a16/w8a8 양자화 체크포인트 검토(옵션만으로 원본을 양자화하지 않음)"
+                    .into()
             } else {
                 "FP8 체크포인트 사용 시 가중치 절반".into()
             });
         }
     } else if matches!(verdict, FitVerdict::Fits) && ratio < 0.4 {
-        if batch < 8.0 {
+        if rbln && batch < 8.0 {
             tips.push(format!(
                 "여유 있음 — batch↑ {}→{} 로 처리량 확보 여지",
                 batch as i64,
@@ -169,7 +177,7 @@ pub fn estimate_compile_fit(
     if let Ok(dev) = form.get("devices").parse::<f64>() {
         if dev > 0.0 && dev < chips {
             tips.push(format!(
-                "⚠ devices {} < 필요 {} 칩 — 이 TP/PP 로는 컴파일 불가",
+                "⚠ devices {} < 추정 {} 칩 — 서빙 시 장치 요청과 TP/PP 일치 여부 확인",
                 dev as i64, chips as i64
             ));
         }
@@ -184,22 +192,8 @@ pub fn estimate_compile_fit(
         }
     }
 
-    // Verify driver on explicitly picked target node
-    let node_host = if form.dest.is_empty() { "any" } else { &form.dest };
-    let node_host = node_host.split('(').next().unwrap_or("any").trim();
-    if node_host != "any" && !node_host.is_empty() {
-        if let Some(nd) = nodes.iter().find(|n| n.name == node_host) {
-            let want = if rbln { "RBLN" } else { "RNGD" };
-            if !nd.npu.to_uppercase().contains(want) {
-                tips.push(format!(
-                    "⚠ 노드 {} 에 {} 드라이버 없음(accel: {}) — 컴파일 실패",
-                    node_host,
-                    want,
-                    if nd.npu.is_empty() { "none" } else { &nd.npu }
-                ));
-            }
-        }
-    }
+    // AOT compilation can run on a CPU host with a compiler image; driver labels
+    // on the selected host are not evidence that compilation will fail.
 
     FitEstimate {
         params_b,

@@ -19,7 +19,14 @@ impl App {
         let node = self.selected_node().map(|n| n.name.clone());
         let perf_model = self.selected_perf_model();
         let route_backend = self.selected_route_backend();
+        if self.view == View::Routing && "pim".contains(key) && route_backend.is_none() {
+            self.notify("route has no unique verified backend → Deployment link; use e for routing configuration".into());
+            return;
+        }
         let target: Option<(View, String)> = match self.view {
+            View::Routing if key == 'e' && self.selected_route().is_some() => {
+                Some((View::Epp, String::new()))
+            }
             View::Routing => route_backend.and_then(|b| match key {
                 'p' => Some((View::Pods, b)),
                 'i' => Some((View::Accel, b)),
@@ -51,13 +58,13 @@ impl App {
                 .filter(|(b, _)| !b.is_empty())
                 .and_then(|(bm, nd)| match key {
                     'p' => Some((View::Pods, bm)),
-                    'm' => Some((View::Serving, self.model_of_pod(&bm))),
+                    'm' => self.model_of_pod(&bm).map(|model| (View::Serving, model)),
                     'n' => Some((View::Nodes, nd)),
                     _ => None,
                 }),
             View::Pods => pod.and_then(|pn| match key {
                 'i' => Some((View::Accel, pn.clone())),
-                'm' => Some((View::Serving, self.model_of_pod(&pn))),
+                'm' => self.model_of_pod(&pn).map(|model| (View::Serving, model)),
                 _ => None,
             }),
             View::Nodes => node.and_then(|nn| match key {
@@ -68,6 +75,7 @@ impl App {
         };
         match target {
             Some((v, filter)) => {
+                let model_target = (v == View::Serving).then(|| filter.clone());
                 self.nav_stack.push(NavState {
                     view: self.view,
                     selected: self.selected,
@@ -80,6 +88,19 @@ impl App {
                 self.reset_sort();
                 self.detail = false;
                 self.epp_weights.clear();
+                if let Some(model) = model_target {
+                    if let Some(position) = self
+                        .order()
+                        .iter()
+                        .position(|&i| self.snap.artifacts[i].model == model)
+                    {
+                        self.selected = position;
+                    } else {
+                        self.nav_back();
+                        self.notify("verified Deployment has no collected serving artifact".into());
+                        return;
+                    }
+                }
                 // Avoid landing on an empty screen: if 0 matches, retrace and notify (avoid a dead-end screen).
                 if self.list_len() == 0 {
                     self.nav_back();
@@ -153,6 +174,7 @@ impl App {
     }
 
     pub fn toggle_help(&mut self) {
+        self.help_scroll = 0;
         self.help = !self.help;
     }
     pub fn toggle_alerts(&mut self) {
@@ -282,31 +304,36 @@ impl App {
 
     /// Perf per-model 리스트(서빙 중=active 만 + 정렬). 패널 포커스와 무관 — 뷰/order 공용.
     pub fn perf_rows_order(&self) -> Vec<usize> {
-        use crate::collect::PerfRow;
-        use std::cmp::Ordering::Equal;
+        use crate::measurement::compare;
         let v = &self.snap.perf_rows;
-        let active = |r: &PerfRow| {
-            (!r.req.is_nan() && r.req > 0.0)
-                || (!r.tps.is_nan() && r.tps > 0.0)
-                || !r.e2e_p95.is_nan()
-                || !r.ttft_p95.is_nan()
-                || !r.queue_p95.is_nan()
-        };
-        let mut idx: Vec<usize> = (0..v.len()).filter(|&i| active(&v[i])).collect();
-        let key = |x: f64| if x.is_nan() { f64::MIN } else { x };
+        let filter = self.filter.to_lowercase();
+        let mut idx: Vec<usize> = (0..v.len())
+            .filter(|&i| {
+                let r = &v[i];
+                ((r.req.is_finite() && r.req > 0.0)
+                    || (r.tps.is_finite() && r.tps > 0.0)
+                    || r.e2e_p95.is_finite()
+                    || r.ttft_p95.is_finite()
+                    || r.queue_p95.is_finite())
+                    && r.model.to_lowercase().contains(&filter)
+            })
+            .collect();
         idx.sort_by(|&a, &b| {
-            let (x, y): (&PerfRow, &PerfRow) = (&v[a], &v[b]);
-            match self.sort {
-                1 => key(y.e2e_p95).partial_cmp(&key(x.e2e_p95)).unwrap_or(Equal),
-                2 => key(y.ttft_p95)
-                    .partial_cmp(&key(x.ttft_p95))
-                    .unwrap_or(Equal),
-                3 => key(y.queue_p95)
-                    .partial_cmp(&key(x.queue_p95))
-                    .unwrap_or(Equal),
-                4 => x.model.cmp(&y.model),
-                _ => key(y.tps).partial_cmp(&key(x.tps)).unwrap_or(Equal),
-            }
+            let (x, y) = (&v[a], &v[b]);
+            let order = match self.sort {
+                1 => compare(Some(x.e2e_p95), Some(y.e2e_p95), self.sort_desc),
+                2 => compare(Some(x.ttft_p95), Some(y.ttft_p95), self.sort_desc),
+                3 => compare(Some(x.queue_p95), Some(y.queue_p95), self.sort_desc),
+                4 => {
+                    if self.sort_desc {
+                        x.model.cmp(&y.model)
+                    } else {
+                        y.model.cmp(&x.model)
+                    }
+                }
+                _ => compare(Some(x.tps), Some(y.tps), self.sort_desc),
+            };
+            order.then_with(|| x.model.cmp(&y.model))
         });
         idx
     }
@@ -341,7 +368,11 @@ impl App {
         // `j` stops at the last line rather than scrolling into blank space (BUG-15).
         let max = self.detail_lines.get().saturating_sub(1) as i64;
         let next = (self.detail_scroll as i64 + delta).max(0);
-        self.detail_scroll = if max > 0 { next.min(max) as u16 } else { next as u16 };
+        self.detail_scroll = if max > 0 {
+            next.min(max) as u16
+        } else {
+            next as u16
+        };
     }
     /// 현재 선택 노드가 가진 가속기 수(Node 상세 device 커서 범위).
     pub fn node_dev_count(&self) -> usize {

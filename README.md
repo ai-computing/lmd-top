@@ -1,7 +1,7 @@
 # lmd-top
 
 > **A terminal observability & operations tool for [llm-d](https://llm-d.ai) clusters.**
-> See the whole serving stack — Gateway, EPP routing, model servers, and heterogeneous accelerators — on one screen, from a single static binary.
+> See the whole serving stack — Gateway, EPP routing, model servers, and heterogeneous accelerators — on one screen, from a single binary.
 
 **English** · [한국어](README.ko.md)
 
@@ -28,6 +28,10 @@ Kubernetes; it stores no data of its own.
 - **Lifecycle split — provision vs. run.** **Serving** (section 2) is the running side: every deployment in a sortable table with a live phase (serving / starting / degraded / failed, cross-referenced from pods) plus scale/restart/stop, so you can tell whether a model *is serving, still trying, or has failed*. **Deploy** (section 4) is the provision side: a **Model List** of what you can deploy (catalog feasibility + store builds) and an **Activity** feed that unifies compile Jobs and deploy rollouts with status and progress.
 - **A rich terminal UI.** An LED device grid, a stacked VRAM bar, braille timelines, active alerting, log tailing, and a `scale` action — with four themes and understated animations, all in a single static Rust binary that has no C dependencies.
 
+Policy development (unreleased): [workspace and EPP feature guide](docs/EPP-CAPABILITIES.md).
+Use `lmd-top --policy init --workspace ./my-policy` to scaffold a pinned Go project;
+`:Routing policy` opens the configuration and rollout preview form.
+
 ## Views
 
 Navigation has two axes that mirror the request path (Gateway → EPP → Model → Infra):
@@ -47,9 +51,12 @@ mode (then `h`/`j`/`k`/`l` or arrows move focus, `Esc` exits) — the vi/tmux wi
 
 List headers show a `Σ` aggregate of the shown rows (all rows, or just the filtered ones). `y` shows any selected resource's live YAML (read-only).
 
+
+Setup and maintenance: [quick start](docs/QUICKSTART.md). New local onboarding commands (`--init`, `--check-setup`) are available from source and pending release.
+
 ## Install
 
-It's a single static binary (glibc only) that drives your `kubectl` — so installing is just "put the binary on PATH." Pick whichever fits; **all features (incl. compile/deploy) are identical** across them.
+It's a single binary (glibc on Linux) that drives your `kubectl` — so installing is just "put the binary on PATH." Pick whichever fits; **all features (incl. compile/deploy) are identical** across them.
 
 **kubectl plugin** (recommended for cluster operators) — run the full TUI as `kubectl lmd-top`:
 
@@ -64,9 +71,9 @@ Running under `kubectl` guarantees `kubectl` is present, so scale/stop/restart a
 **One-line installer** (prebuilt binary → `~/.local/bin`, no Rust toolchain):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gspark-etri/lmd-top/main/install.sh | sh
-#   ... | sh -s -- --version v0.34.0            # pin a version
-#   ... | sh -s -- --bin-dir /usr/local/bin     # system-wide (needs write perms)
+curl -fsSL https://raw.githubusercontent.com/gspark-etri/lmd-top/main/install.sh | bash
+#   ... | bash -s -- --version v0.34.0            # pin a version
+#   ... | bash -s -- --bin-dir /usr/local/bin     # system-wide (needs write perms)
 ```
 
 Auto-detects OS/arch (Linux/macOS · x86_64/aarch64), downloads the release tarball, verifies its `.sha256`, and installs it. Manual equivalent:
@@ -119,6 +126,18 @@ action, target, and result — view it with `lmd-top --audit`.
 | Navigate | `0-6`/`Tab` section · `←`/`→` (`[ ]`) sub-tab · `Ctrl+w` then `hjkl`/arrows panel focus · `↑↓`/`kj` select · `g`/`G` top/bottom · `Ctrl+u`/`Ctrl+d` half-page · `Esc` back |
 | Act | `⏎`/`a` action menu (drill when none) · `p i r e m` cross-layer pivot (also in the menu as **Go: …**) · `/` filter · `:` command palette (jump to any view / run any display action) · `o`/`O` sort column / direction · `y` live YAML · `l` logs · menu → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (mode-gated `⊘`, default-No confirm) · on a store row: `V` move · `M` remove · `r` rescan |
 | Display | `t` theme · `f` animations · `z` zoom · `Space` pause · `A` alerts · `?` help · `q` quit · `:graf` Grafana · `R` reset session energy |
+
+Collection quality: press `:` and select **Data sources** to inspect source status, last successful collection, and errors. Failed refreshes retain previous values with their original timestamps. `–` means unavailable, not zero; a dashed gauge has no valid measurement. JSON includes `sources`, `source_states`, and `warnings`. The report is a snapshot; reopen it to refresh.
+
+Workload identity: `:` → **Workload classification** shows model, prefill, decode, gateway, EPP, and unknown deployments with runtime evidence. Names alone do not establish model identity. For a custom inference runtime, annotate its Deployment with `lmd-top.io/workload-role: model` (or `prefill` / `decode`). Runtime classification and Kubernetes Ready counts do not prove successful inference. JSON `workloads` also includes non-model deployments.
+
+Performance objectives: `:` → **Performance assessment** lists each session-local SLO target as met, violated, or unknown. Missing/stale measurements and absent observed request traffic do not pass a target. Unknown metrics are shown in the Perf panel. Ambiguous model-name matches require a more specific target. Stage p95 values are independent percentiles; the report does not treat them as additive contributions or prove accelerator capacity.
+
+Mutation modes are enforced again by the operation executor. Store deletion retains its `danger` requirement through preview and manifest editing. Headless `--plan … --apply` now requires `--mode admin` or `--mode danger`; planning and server dry-run do not require an apply mode. These modes prevent accidental actions; Kubernetes RBAC remains the authorization boundary.
+
+Audit records now include the pinned context, default/request namespace, reviewed UID/resourceVersion where available, and elapsed time. CLI plan/apply is audited too. If logging fails after a successful operation, the UI reports that separately: do not rerun the operation to retry logging. Older audit rows remain readable.
+
+Kubernetes target: the first cluster access snapshots the current kubeconfig for the session. All subsequent kubectl reads and writes use that snapshot, so switching your shell’s current context does not retarget a running lmd-top. Restart lmd-top to select another context or recover from initial configuration failure. The confirmation and JSON `kubernetes_context` show the selected context. The private snapshot is removed on normal exit.
 
 **Environment.**
 

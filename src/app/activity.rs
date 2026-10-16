@@ -26,10 +26,10 @@ pub fn fmt_age(secs: u64) -> String {
 /// A running/serving deployment's lifecycle phase, inferred from replicas + pods.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DeployPhase {
-    Serving,   // ready == desired, no failing pods
-    Starting,  // desired > 0, ready < desired, pods scheduling/pulling
-    Degraded,  // some ready, but a pod is crashing/failed
-    Failed,    // desired > 0, ready == 0, pods crashing/failed
+    Serving,    // ready == desired, no failing pods
+    Starting,   // desired > 0, ready < desired, pods scheduling/pulling
+    Degraded,   // some ready, but a pod is crashing/failed
+    Failed,     // desired > 0, ready == 0, pods crashing/failed
     ScaledZero, // desired == 0
 }
 
@@ -103,9 +103,7 @@ impl App {
             .filter(|p| p.name.starts_with(model))
             .collect();
         // CrashLoopBackOff shows up as a Failed phase or a rapidly-restarting pod.
-        let failing = pods
-            .iter()
-            .any(|p| p.phase == "Failed" || p.restarts >= 3);
+        let failing = pods.iter().any(|p| p.phase == "Failed" || p.restarts >= 3);
         if failing {
             return if ready > 0 {
                 DeployPhase::Degraded
@@ -162,7 +160,17 @@ impl App {
                 format!("{} → {}", c.model, vt)
             };
             // 상태 텍스트에 진행률(%)을 항상 함께 — 진행바와 별개로 숫자로도 보이게.
-            let status = format!("{}{}", c.status, pct);
+            let stale = self.snap.sources.get("jobs").is_some_and(|source| {
+                source.state(
+                    crate::collect::now_secs(),
+                    self.snap.stale_after_secs.max(10),
+                ) != crate::quality::Quality::Fresh
+            });
+            let status = if stale {
+                format!("stale · {}{}", c.status, pct)
+            } else {
+                format!("{}{}", c.status, pct)
+            };
             let sev = match c.status.as_str() {
                 "Failed" => 2,
                 "Complete" => 0,
@@ -177,8 +185,8 @@ impl App {
                 age_secs: c.age_secs,
                 pod: self.pod_for(&c.name),
                 job: Some(c.name.clone()),
-                running_compile: running,
-                progress: c.progress,
+                running_compile: running && !stale,
+                progress: if stale { None } else { c.progress },
                 // A finished job's phase used to be dropped, which threw away exactly the
                 // thing worth showing: why a failed compile failed. The Job is deleted an
                 // hour later (ttlSecondsAfterFinished), so this row is the last chance to
@@ -209,7 +217,13 @@ impl App {
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| "?".into());
             let target = format!("{} ×{} @{}", m.name, m.desired, node);
-            let status = format!("{} {} {}/{}", phase.glyph(), phase.label(), m.ready, m.desired);
+            let status = format!(
+                "{} {} {}/{}",
+                phase.glyph(),
+                phase.label(),
+                m.ready,
+                m.desired
+            );
             let sev = match phase {
                 DeployPhase::Failed => 2,
                 DeployPhase::Serving => 0,
@@ -326,4 +340,3 @@ mod tests {
         assert!(row.phase.is_empty());
     }
 }
-

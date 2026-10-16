@@ -70,13 +70,14 @@ pub struct Accel {
 }
 impl Accel {
     /// Is this device throttling? `None` when the hardware reports no throttling signal at
-    /// all, which is not the same as "not throttling" — the field carries 0.0 either way, so
-    /// callers that want to say "unknown" rather than "fine" need this distinction.
+    /// all or when its current sample is unavailable. Neither means "not throttling".
     pub fn throttling(&self) -> Option<bool> {
         crate::accel::by_kind(self.kind)
             .caps
             .throttle
-            .then_some(self.throttle > 0.0)
+            .then_some(self.throttle)
+            .filter(|value| value.is_finite())
+            .map(|value| value > 0.0)
     }
 
     /// Does this accelerator report cumulative energy (so session Wh is meaningful)?
@@ -92,7 +93,6 @@ impl Accel {
             self.model.as_str()
         }
     }
-
 }
 
 /// 통합 메모리(Grace 계열 superchip: GB10/GH200/GB200/GB300) 여부 — 별도 VRAM 없이 호스트와 공유.
@@ -106,6 +106,7 @@ fn is_unified(model: &str) -> bool {
 
 #[derive(Clone, Default)]
 pub struct NodeInfo {
+    pub identity: Option<crate::resource_guard::Identity>,
     pub name: String,
     pub load1: f64,
     pub mem_used_gb: f64,
@@ -135,6 +136,11 @@ pub struct Pool {
 
 #[derive(Clone)]
 pub struct Route {
+    pub configuration: Option<crate::routing::Configuration>,
+    pub match_summary: String,
+    pub backend_summary: String,
+    pub single_local_backend: bool,
+    pub identity: Option<crate::resource_guard::Identity>,
     pub path: String,
     pub backend: String,
     pub kind: String,  // Service | InferencePool
@@ -211,6 +217,9 @@ impl StoreCapacity {
 /// 컴파일 Job 진행 상태(Deploy 뷰 '진행 중 컴파일' 패널). `compile-*` Job 을 요약.
 #[derive(Clone, Default)]
 pub struct CompileJob {
+    pub identity: Option<crate::resource_guard::Identity>,
+    /// Namespace/name/UID identifies an execution, including retries under the same name.
+    pub execution_id: String,
     pub name: String,               // Job 이름(compile-{모델}-{타깃})
     pub model: String,              // 사람이 읽는 모델(이름에서 추출)
     pub vendor: String,             // RBLN | RNGD | -
@@ -235,13 +244,13 @@ pub struct CompileJob {
 /// deploy 컨테이너 spec(command/args/env/volumeMounts)에서 추출(휴리스틱).
 #[derive(Clone, Default)]
 pub struct ModelArtifact {
-    pub model: String,               // deploy 이름(=변형 이름)
-    pub family: String,              // 트리 그룹 키(모델 계열, source/name 에서 정규화)
-    pub engine: String,              // 추론 엔진
-    pub node: String,                // 저장/구동 노드(파드 스케줄 노드)
-    pub image: String,               // 컨테이너 이미지
-    pub source: String,              // 모델 소스: HF id / --model 경로 / MODEL_ID
-    pub mount: String,               // 저장 위치: "mountPath ← PVC/hostPath/emptyDir"
+    pub model: String,  // deploy 이름(=변형 이름)
+    pub family: String, // 트리 그룹 키(모델 계열, source/name 에서 정규화)
+    pub engine: String, // 추론 엔진
+    pub node: String,   // 저장/구동 노드(파드 스케줄 노드)
+    pub image: String,  // 컨테이너 이미지
+    pub source: String, // 모델 소스: HF id / --model 경로 / MODEL_ID
+    pub mount: String,  // 저장 위치: "mountPath ← PVC/hostPath/emptyDir"
     /// Node-local directory backing the model volume, when it is a `hostPath`.
     ///
     /// Structured rather than scraped back out of `mount`, which is a display string. The
@@ -262,6 +271,7 @@ pub struct EventRow {
 
 #[derive(Clone)]
 pub struct PodRow {
+    pub identity: Option<crate::resource_guard::Identity>,
     pub name: String,
     pub phase: String,
     pub ready: String,
@@ -270,42 +280,55 @@ pub struct PodRow {
     pub age_secs: u64, // 생성 후 경과(초) — 배포 시작 시각 표시용. 0=미상.
 }
 
-#[derive(Clone)]
-pub struct EppCfg {
-    pub profile: String,
-    pub scorers: Vec<(String, f64)>,
-    pub picker: String,
+pub use crate::epp_config::EppCfg;
+
+pub use crate::setup_probe::SetupProbe;
+
+/// LoRA training run (npu-lora Job, `app.kubernetes.io/part-of=npu-lora`), joined with the
+/// trainer's own `npu_lora_*` metrics. Metric fields are None until the first step is scraped.
+#[derive(Clone, Default, Debug)]
+pub struct TrainRun {
+    pub job: String,
+    pub run: String,
+    pub model: String,
+    pub status: String, // Running | Complete | Failed | Pending
+    pub age_secs: u64,
+    pub step: Option<f64>,
+    pub steps_planned: Option<f64>,
+    pub loss: Option<f64>,
+    pub tokens_per_s: Option<f64>,
+    pub out: String,
 }
 
-/// 플랫폼 부트스트랩 전제조건 프로브 — 새 llm-d 환경 셋업 시 "무엇이 이미 있고 무엇이 없나".
-/// Setup 뷰(Doctor)가 이걸 읽어 present/missing + 가이드된 조치를 렌더한다. 전부 read-only kubectl.
-#[derive(Clone, Default)]
-pub struct SetupProbe {
-    pub probed: bool,       // kubectl 도달 가능 → 프로브 수행됨(false 면 클러스터 미연결)
-    pub ns_exists: bool,    // 대상 namespace 존재
-    pub crd_gateway: bool,  // gateways.gateway.networking.k8s.io CRD
-    pub crd_httproute: bool, // httproutes.gateway.networking.k8s.io CRD
-    pub crd_infpool: bool,  // inferencepools.inference.networking.k8s.io CRD (GIE GA)
-    pub gatewayclasses: Vec<String>, // 사용 가능한 GatewayClass 이름들(Gateway 생성 시 선택)
-    pub gateway: bool,      // llm-d-gateway (대상 ns)
-    pub epp_role_sa: bool,  // 공유 Role llmd-router-epp-sa (helm 생성)
-    pub epp_role_non_sa: bool, // 공유 Role llmd-router-epp-non-sa
-    pub secret_hf: bool,    // hf-token secret (gated 모델 가중치 다운로드용)
-    pub pvc_model_store: Option<String>, // model-store PVC phase(Bound/Pending) 또는 None(없음)
+impl TrainRun {
+    /// 0.0..=1.0 once both the step and the plan are known.
+    pub fn progress(&self) -> Option<f64> {
+        match (self.step, self.steps_planned) {
+            (Some(s), Some(p)) if p > 0.0 => Some((s / p).clamp(0.0, 1.0)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
 pub struct Snapshot {
+    /// Completion time of the full collection; fast updates do not modify it.
     pub ts: u64,
+    pub sources: crate::quality::Sources,
+    pub stale_after_secs: u64,
     pub nodes: Vec<NodeInfo>,
     pub accel: Vec<Accel>,
     pub pools: Vec<Pool>,
+    pub deployment_versions: BTreeMap<String, crate::resource_guard::Identity>,
     pub models: Vec<ModelRow>,
+    pub workloads: Vec<crate::workload::Identity>,
     pub artifacts: Vec<ModelArtifact>, // Store 뷰: 모델 저장 위치 + 컴파일/서빙 옵션
     pub stored: Vec<StoredModel>, // 공유 스토어 인벤토리(model-inventory ConfigMap) — 배포 무관
     /// 공유 스토어 여유 용량(디스커버리 스캔이 df 로 실측). None=미관측(구버전 스캔 등).
     pub store_capacity: Option<StoreCapacity>,
+    pub store_scanned_at: Option<u64>,
     pub compiles: Vec<CompileJob>, // 진행/최근 컴파일 Job(compile-*) — Deploy 뷰 모니터 패널
+    pub trainings: Vec<TrainRun>,  // LoRA 학습 Job(npu-lora) + npu_lora_* 지표
     pub pods: Vec<PodRow>,
     pub events: Vec<EventRow>,
     pub routes: Vec<Route>,
@@ -314,15 +337,21 @@ pub struct Snapshot {
     pub pod_queues: Vec<(String, f64)>, // per-pod 큐 깊이(요청 분배)
     pub endpoint_scores: Vec<(String, f64)>, // per-pod EPP composite score(epp-score-observer 플러그인). 없으면 빈 값.
     pub perf: Perf,
+    pub service_bindings: BTreeMap<String, Vec<String>>,
+    pub deployment_pods: BTreeMap<String, Vec<String>>,
+    pub service_names: Vec<String>,
+    pub pool_bindings: BTreeMap<String, Vec<String>>,
+    pub perf_targets: BTreeMap<String, PerformanceTarget>,
     pub perf_rows: Vec<PerfRow>, // 모델(=하드웨어)별 성능
 
     pub autoscalers: Vec<Autoscale>,
     pub epp: Option<EppCfg>,
-    pub epp_in_path: bool, // HTTPRoute backend 중 InferencePool 이 있는가(없으면 EPP 우회)
+    pub epp_in_path: bool, // observed InferencePool backend configuration; not runtime traversal
     pub prefix_idx: f64,   // inference_extension_prefix_indexer_size
     pub gw_addr: String,
     pub gw_ok: bool,
     pub inventory: Vec<(String, i64, i64)>, // (가속기 resource, allocatable total, 사용중 requests)
+    pub node_capacity: BTreeMap<String, BTreeMap<String, i64>>, // observed Kubernetes allocatable
     pub node_alloc: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>>, // node → resource → 할당(파드 requests)
     pub warnings: Vec<String>,
     pub prom_ok: bool, // Prometheus 도달 가능 여부(false 면 "가속기 없음"이 아니라 연결 문제)
@@ -411,11 +440,7 @@ pub struct Autoscale {
 
 /// 메모리 바이트 → GB. RBLN/Furiosa/node DRAM 모두 bytes 단위(실측 확인).
 fn to_gb(v: f64) -> f64 {
-    if v.is_nan() {
-        0.0
-    } else {
-        v / 1.0e9
-    }
+    v / 1.0e9
 }
 
 fn short(s: &str) -> String {
@@ -428,7 +453,8 @@ fn short(s: &str) -> String {
 /// and a permission error otherwise look identical (REG-08 / BUG-09).
 fn kube_warn(label: &str, e: &anyhow::Error, warn: &mut Vec<String>) {
     let m = e.to_string();
-    if m.contains("doesn't have a resource type") || m.contains("could not find the requested resource")
+    if m.contains("doesn't have a resource type")
+        || m.contains("could not find the requested resource")
     {
         return;
     }
@@ -451,117 +477,12 @@ fn resolve(
     }
 }
 
-/// 단일 스칼라 결과(첫 값) — 없으면 NaN. (join! 병렬용, warn 없음)
-async fn qs1(prom_base: &str, promql: &str) -> f64 {
-    prom::query(prom_base, promql)
-        .await
-        .ok()
-        .and_then(|v| v.first().map(|s| s.value))
-        .unwrap_or(f64::NAN)
-}
+use crate::latency::{
+    merge_engine_metrics, performance_query, performance_query_text, record_metric_family,
+    single_engine_percentile, unique_performance_value,
+};
+pub use crate::latency::{perf_detail, LatencyFamily, PerfDetail, PerformanceTarget};
 
-/// Perf 드릴다운(선택 모델) 온디맨드 상세 — 구간별 p50/p95/p99 + E2E 지연 버킷 분포(히스토그램).
-#[derive(Clone, Default)]
-pub struct PerfDetail {
-    pub model: String,
-    pub e2e: [f64; 3], // p50/p95/p99 (s)
-    pub ttft: [f64; 3],
-    pub tpot: [f64; 3],
-    pub buckets: Vec<(f64, f64)>, // (le 상한 s, 해당 구간 rate) — 누적차 분포
-}
-
-/// 선택 모델의 지연 분포를 프로메테우스에서 즉석 조회(Enter 시). vLLM/ds4-proxy 엔진 구분.
-pub async fn perf_detail(prom: &str, model: &str) -> PerfDetail {
-    // (E2E metric, TTFT metric, TPOT metric, selector)
-    let (e2e_m, ttft_m, tpot_m, sel) = if model == "ds4-proxy" {
-        (
-            "ds4_proxy_request_duration_seconds",
-            "ds4_proxy_ttft_seconds",
-            "",
-            String::new(),
-        )
-    } else {
-        (
-            "vllm:e2e_request_latency_seconds",
-            "vllm:time_to_first_token_seconds",
-            "vllm:request_time_per_output_token_seconds",
-            format!("{{service=\"{}\"}}", model),
-        )
-    };
-    let q = |base: &str, quant: f64| {
-        format!(
-            "histogram_quantile({}, sum by (le)(rate({}_bucket{}[5m])))",
-            quant, base, sel
-        )
-    };
-    let has_tpot = !tpot_m.is_empty();
-    // 쿼리 문자열을 먼저 바인딩(참조가 join 전체에서 살아있도록).
-    let (qe50, qe95, qe99) = (q(e2e_m, 0.5), q(e2e_m, 0.95), q(e2e_m, 0.99));
-    let (qt50, qt95, qt99) = (q(ttft_m, 0.5), q(ttft_m, 0.95), q(ttft_m, 0.99));
-    let (qp50, qp95, qp99) = (q(tpot_m, 0.5), q(tpot_m, 0.95), q(tpot_m, 0.99));
-    let qbuckets = format!("sum by (le)(rate({}_bucket{}[5m]))", e2e_m, sel);
-    let (e50, e95, e99, t50, t95, t99, p50, p95, p99, buckets) = tokio::join!(
-        qs1(prom, &qe50),
-        qs1(prom, &qe95),
-        qs1(prom, &qe99),
-        qs1(prom, &qt50),
-        qs1(prom, &qt95),
-        qs1(prom, &qt99),
-        async {
-            if has_tpot {
-                qs1(prom, &qp50).await
-            } else {
-                f64::NAN
-            }
-        },
-        async {
-            if has_tpot {
-                qs1(prom, &qp95).await
-            } else {
-                f64::NAN
-            }
-        },
-        async {
-            if has_tpot {
-                qs1(prom, &qp99).await
-            } else {
-                f64::NAN
-            }
-        },
-        prom::query(prom, &qbuckets),
-    );
-    // 누적 버킷 → 구간별 분포(le 오름차순, 인접 차분).
-    let mut cum: Vec<(f64, f64)> = buckets
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|s| {
-            let le = s.l("le");
-            let up = if le == "+Inf" {
-                f64::INFINITY
-            } else {
-                le.parse::<f64>().ok()?
-            };
-            Some((up, s.value))
-        })
-        .collect();
-    cum.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    let mut dist = Vec::new();
-    let mut prev = 0.0;
-    for (le, c) in &cum {
-        let cnt = (c - prev).max(0.0);
-        dist.push((*le, cnt));
-        prev = *c;
-    }
-    PerfDetail {
-        model: model.to_string(),
-        e2e: [e50, e95, e99],
-        ttft: [t50, t95, t99],
-        tpot: [p50, p95, p99],
-        buckets: dist,
-    }
-}
-
-/// vLLM 모델 메트릭 묶음 (model_name 키).
 struct Vllm {
     run: BTreeMap<String, Series>,
     wait: BTreeMap<String, Series>,
@@ -578,6 +499,12 @@ fn model_container(spec: &serde_json::Value) -> &serde_json::Value {
         Some(a) if !a.is_empty() => a,
         _ => return &spec["containers"][0],
     };
+    if let Some(c) = arr
+        .iter()
+        .find(|c| crate::workload::container(c).0.is_model())
+    {
+        return c;
+    }
     let is_sidecar = |c: &serde_json::Value| {
         let n = c["name"].as_str().unwrap_or("").to_lowercase();
         let img = c["image"].as_str().unwrap_or("").to_lowercase();
@@ -623,37 +550,11 @@ fn model_container(spec: &serde_json::Value) -> &serde_json::Value {
 }
 
 fn detect_engine(d: &serde_json::Value, accel: &str) -> String {
-    let c = model_container(&d["spec"]["template"]["spec"]);
-    let mut t = String::new();
-    for key in ["command", "args"] {
-        if let Some(arr) = c[key].as_array() {
-            for x in arr {
-                if let Some(s) = x.as_str() {
-                    t.push_str(s);
-                    t.push(' ');
-                }
-            }
-        }
-    }
-    let t = t.to_lowercase();
-    let img = c["image"].as_str().unwrap_or("").to_lowercase();
-    let rbln = accel.contains("RBLN") || t.contains("rbln");
-    if t.contains("sglang") {
-        "SGLang".into()
-    } else if t.contains("vllm") {
-        if rbln {
-            "vLLM-RBLN".into()
-        } else {
-            "vLLM".into()
-        }
-    } else if t.contains("ollama") || img.contains("ollama") {
-        "Ollama".into()
-    } else if t.contains("furiosa") {
-        "Furiosa-LLM".into()
-    } else if rbln {
-        "custom(RBLN)".into()
+    let identity = crate::workload::classify(d);
+    if identity.engine == "vLLM" && accel.contains("RBLN") {
+        "vLLM-RBLN".into()
     } else {
-        "custom".into()
+        identity.engine
     }
 }
 
@@ -698,7 +599,13 @@ fn pick_model_mount<'a>(
     // Strong: names a model or its artifacts. Medium: a vendor build directory. Weak: a cache
     // that may or may not be the model's.
     const STRONG: [&str; 7] = [
-        "model", "artifact", "ckpt", "checkpoint", "weight", "gguf", "safetensor",
+        "model",
+        "artifact",
+        "ckpt",
+        "checkpoint",
+        "weight",
+        "gguf",
+        "safetensor",
     ];
     const MEDIUM: [&str; 4] = ["rbln", "furiosa", "fxb", "compiled"];
     const WEAK: [&str; 5] = ["hf", "cache", "data", "npu", "store"];
@@ -710,7 +617,12 @@ fn pick_model_mount<'a>(
         if is_system_mount(&mp, backing) {
             return -1;
         }
-        let hay = format!("{} {} {}", mp, vn.to_lowercase(), backing.unwrap_or("").to_lowercase());
+        let hay = format!(
+            "{} {} {}",
+            mp,
+            vn.to_lowercase(),
+            backing.unwrap_or("").to_lowercase()
+        );
         let hits = |set: &[&str]| set.iter().filter(|h| hay.contains(**h)).count() as i32;
         hits(&STRONG) * 3 + hits(&MEDIUM) * 2 + hits(&WEAK)
     };
@@ -1045,7 +957,7 @@ fn map_by(series: Vec<Series>, key: &str) -> BTreeMap<String, Series> {
 /// read its own label spelling, and normalised its own units — which is where the unit-guessing
 /// bug lived (BUG-04) and where a fourth accelerator would have meant a fourth copy. The pack
 /// declares metric, unit, aggregation, label spelling and capabilities; this walks them.
-async fn collect_pack(prom: &str, pack: &'static crate::accel::Pack) -> Vec<Accel> {
+async fn collect_pack(prom: &str, pack: &'static crate::accel::Pack) -> (Vec<Accel>, Vec<String>) {
     use crate::accel::{Agg, Field, Health};
 
     // One query per declared series, all in parallel. Aggregation is pushed into PromQL so a
@@ -1079,13 +991,14 @@ async fn collect_pack(prom: &str, pack: &'static crate::accel::Pack) -> Vec<Acce
         .iter()
         .position(|sp| sp.field == Field::Util)
         .expect("every pack declares a Util series");
+    let mut errors = Vec::new();
     let mut by_field: BTreeMap<Field, BTreeMap<String, Series>> = BTreeMap::new();
     for (sp, r) in pack.series.iter().zip(results) {
-        let rows = r.unwrap_or_default();
+        let rows = resolve(r, sp.metric, &mut errors);
         by_field.insert(sp.field, map_by(rows, pack.labels.key));
     }
     let Some(util) = by_field.get(&Field::Util) else {
-        return Vec::new();
+        return (Vec::new(), errors);
     };
 
     // Read a field for one device, already normalised to the UI's unit.
@@ -1127,17 +1040,17 @@ async fn collect_pack(prom: &str, pack: &'static crate::accel::Pack) -> Vec<Acce
             id,
             node: sample.l(pack.labels.node).to_string(),
             util: pack.series[util_idx].unit.normalise(sample.value),
-            mem_used_gb: read(Field::MemUsed, key).unwrap_or(0.0),
-            mem_total_gb: read(Field::MemTotal, key).unwrap_or(0.0),
-            temp: read(Field::Temp, key).unwrap_or(0.0),
-            power: read(Field::Power, key).unwrap_or(0.0),
+            mem_used_gb: read_or_nan(Field::MemUsed, key),
+            mem_total_gb: read_or_nan(Field::MemTotal, key),
+            temp: read_or_nan(Field::Temp, key),
+            power: read_or_nan(Field::Power, key),
             busy_model: pack
                 .labels
                 .busy
                 .map(|l| sample.l(l).to_string())
                 .unwrap_or_default(),
             alive,
-            throttle: read(Field::Throttle, key).unwrap_or(0.0),
+            throttle: read_or_nan(Field::Throttle, key),
             unified_mem: unified,
             mem_bw: read_or_nan(Field::MemBandwidth, key),
             clock_mhz: read_or_nan(Field::ClockMhz, key),
@@ -1145,10 +1058,10 @@ async fn collect_pack(prom: &str, pack: &'static crate::accel::Pack) -> Vec<Acce
             energy_mj: read_or_nan(Field::Energy, key),
         });
     }
-    out
+    (out, errors)
 }
 
-async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
+async fn collect_nodes(p: &str) -> (Vec<NodeInfo>, Vec<String>) {
     let fs_size_q = format!("{}{{mountpoint=\"/\"}}", metrics::NODE_FS_SIZE);
     let fs_avail_q = format!("{}{{mountpoint=\"/\"}}", metrics::NODE_FS_AVAIL);
     let (load, mt, ma, cpu, ds, da, node_res) = tokio::join!(
@@ -1163,13 +1076,32 @@ async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
         prom::query(p, &fs_avail_q),
         node_kube(),
     );
-    let (node_ip, node_meta) = node_res;
-    let load = load.unwrap_or_default();
-    let n_mt = map_by(mt.unwrap_or_default(), "instance");
-    let n_ma = map_by(ma.unwrap_or_default(), "instance");
-    let n_cpu = map_by(cpu.unwrap_or_default(), "instance");
-    let n_ds = map_by(ds.unwrap_or_default(), "instance");
-    let n_da = map_by(da.unwrap_or_default(), "instance");
+    let mut errors = Vec::new();
+    let (node_ip, node_meta) = node_res.unwrap_or_else(|e| {
+        errors.push(format!("kube nodes: {e}"));
+        Default::default()
+    });
+    let load = resolve(load, metrics::NODE_LOAD1, &mut errors);
+    let n_mt = map_by(
+        resolve(mt, "node_memory_MemTotal_bytes", &mut errors),
+        "instance",
+    );
+    let n_ma = map_by(
+        resolve(ma, "node_memory_MemAvailable_bytes", &mut errors),
+        "instance",
+    );
+    let n_cpu = map_by(
+        resolve(cpu, "node_cpu_seconds_total", &mut errors),
+        "instance",
+    );
+    let n_ds = map_by(
+        resolve(ds, "node_filesystem_size_bytes", &mut errors),
+        "instance",
+    );
+    let n_da = map_by(
+        resolve(da, "node_filesystem_avail_bytes", &mut errors),
+        "instance",
+    );
     let resolve = |inst: &str| -> String {
         let ip = inst.split(':').next().unwrap_or(inst);
         node_ip.get(ip).cloned().unwrap_or_else(|| ip.to_string())
@@ -1188,12 +1120,13 @@ async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
     let mut nodes: Vec<NodeInfo> = Vec::new();
     for name in names {
         let inst = inst_by.get(&name).cloned().unwrap_or_default();
-        let mt = n_mt.get(inst.as_str()).map(|x| x.value).unwrap_or(0.0);
-        let ma = n_ma.get(inst.as_str()).map(|x| x.value).unwrap_or(0.0);
-        let dsz = n_ds.get(inst.as_str()).map(|x| x.value).unwrap_or(0.0);
-        let dav = n_da.get(inst.as_str()).map(|x| x.value).unwrap_or(0.0);
+        let mt = n_mt.get(inst.as_str()).map(|x| x.value).unwrap_or(f64::NAN);
+        let ma = n_ma.get(inst.as_str()).map(|x| x.value).unwrap_or(f64::NAN);
+        let dsz = n_ds.get(inst.as_str()).map(|x| x.value).unwrap_or(f64::NAN);
+        let dav = n_da.get(inst.as_str()).map(|x| x.value).unwrap_or(f64::NAN);
         let meta = node_meta.get(&name).cloned().unwrap_or_default();
         nodes.push(NodeInfo {
+            identity: meta.4,
             load1: load_by.get(&name).copied().unwrap_or(f64::NAN),
             mem_used_gb: to_gb(mt - ma),
             mem_total_gb: to_gb(mt),
@@ -1212,47 +1145,151 @@ async fn collect_nodes(p: &str) -> Vec<NodeInfo> {
         });
     }
     nodes.sort_by(|a, b| a.name.cmp(&b.name));
-    nodes
+    (nodes, errors)
 }
 
 /// fast tier: 소스별 수집기 4개를 병렬 실행 후 합침. util/mem 반응성을 위해 collect()에서 분리.
-pub async fn collect_fast(cfg: &Config) -> (Vec<Accel>, Vec<NodeInfo>) {
-    let p = &cfg.prom;
-    // Every registered accelerator plus the host metrics, all concurrently. Adding an
-    // accelerator changes nothing here — it appears in `accel::PACKS`.
-    let devices = async {
-        let mut set = tokio::task::JoinSet::new();
-        for pack in crate::accel::packs().iter().copied() {
-            let prom = p.clone();
-            set.spawn(async move { collect_pack(&prom, pack).await });
-        }
-        let mut all = Vec::new();
-        while let Some(joined) = set.join_next().await {
-            if let Ok(devs) = joined {
-                all.extend(devs);
-            }
-        }
-        all
-    };
-    let (mut accel, nodes) = tokio::join!(devices, collect_nodes(p));
-    accel.sort_by(|a, b| (a.kind.rank(), &a.node, &a.id).cmp(&(b.kind.rank(), &b.node, &b.id)));
-    // 통합 메모리(GB10 등): 별도 VRAM 없음 → 노드(호스트) 메모리 풀로 backfill.
-    for a in accel
+pub async fn collect_fast(cfg: &Config) -> crate::snapshot::FastSnapshot {
+    let mut result = crate::snapshot::FastSnapshot::default();
+    let handles: Vec<_> = crate::accel::packs()
+        .iter()
+        .copied()
+        .map(|pack| {
+            let prom = cfg.prom.clone();
+            (
+                format!("accel/{}", pack.id),
+                tokio::spawn(async move {
+                    let result = collect_pack(&prom, pack).await;
+                    (now_secs(), result)
+                }),
+            )
+        })
+        .collect();
+    let node_prom = cfg.prom.clone();
+    let node_handle = tokio::spawn(async move {
+        let result = collect_nodes(&node_prom).await;
+        (now_secs(), result)
+    });
+    for (key, handle) in handles {
+        let (at, (devices, errors)) = handle.await.unwrap_or_else(|e| {
+            (
+                now_secs(),
+                (vec![], vec![format!("collector task failed: {e}")]),
+            )
+        });
+        result.sources.insert(
+            key,
+            crate::quality::SourceStatus::observed(at, devices.len(), &errors),
+        );
+        result.accel.extend(devices);
+    }
+    let (at, (nodes, errors)) = node_handle.await.unwrap_or_else(|e| {
+        (
+            now_secs(),
+            (vec![], vec![format!("node collector task failed: {e}")]),
+        )
+    });
+    result.sources.insert(
+        "nodes".into(),
+        crate::quality::SourceStatus::observed(at, nodes.len(), &errors),
+    );
+    result.nodes = nodes;
+    result
+        .accel
+        .sort_by(|a, b| (a.kind.rank(), &a.node, &a.id).cmp(&(b.kind.rank(), &b.node, &b.id)));
+    for a in result
+        .accel
         .iter_mut()
-        .filter(|a| a.unified_mem && a.mem_total_gb <= 0.0)
+        .filter(|a| a.unified_mem && (!a.mem_total_gb.is_finite() || a.mem_total_gb <= 0.0))
     {
-        if let Some(n) = nodes.iter().find(|n| n.name == a.node) {
+        if let Some(n) = result.nodes.iter().find(|n| n.name == a.node) {
             a.mem_used_gb = n.mem_used_gb;
             a.mem_total_gb = n.mem_total_gb;
         }
     }
-    (accel, nodes)
+    result
+}
+
+/// Pod-only views cannot safely choose among multiple series for one pod.
+fn unique_endpoint_metrics(
+    series: &[Series],
+    label: &str,
+    metric: &str,
+    nonnegative: bool,
+    warnings: &mut Vec<String>,
+) -> Vec<(String, f64)> {
+    let mut values: BTreeMap<String, Option<f64>> = BTreeMap::new();
+    for sample in series {
+        let pod = sample.l(label);
+        if pod.is_empty() {
+            continue;
+        }
+        let value = (sample.value.is_finite() && (!nonnegative || sample.value >= 0.0))
+            .then_some(sample.value);
+        match values.entry(pod.to_string()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(value);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.insert(None);
+            }
+        }
+    }
+    values
+        .into_iter()
+        .filter_map(|(pod, value)| match value {
+            Some(value) => Some((pod, value)),
+            None => {
+                warnings.push(format!(
+                    "{metric}: ambiguous or invalid series for {pod}; observation omitted"
+                ));
+                None
+            }
+        })
+        .collect()
+}
+
+fn endpoint_observation(
+    result: anyhow::Result<Vec<Series>>,
+    label: &str,
+    metric: &str,
+    nonnegative: bool,
+) -> (Vec<(String, f64)>, crate::quality::SourceStatus) {
+    let mut errors = Vec::new();
+    let series = resolve(result, metric, &mut errors);
+    let values = unique_endpoint_metrics(&series, label, metric, nonnegative, &mut errors);
+    let status = crate::quality::SourceStatus::observed(now_secs(), values.len(), &errors);
+    (values, status)
+}
+
+/// Exporter-owned namespace labels may be renamed by Prometheus on collision
+/// with scrape labels. Prefer that endpoint identity over the EPP scrape target.
+fn epp_endpoint_selector(metric: &str, namespace: &str) -> String {
+    let ns = serde_json::to_string(namespace).unwrap();
+    format!("({metric}{{exported_namespace={ns}}} or {metric}{{exported_namespace=\"\",namespace={ns}}})")
+}
+
+fn epp_scrape_selector(metric: &str, namespace: &str) -> String {
+    format!(
+        "{metric}{{namespace={}}}",
+        serde_json::to_string(namespace).unwrap()
+    )
+}
+
+fn normalize_score_identity(mut series: Vec<Series>) -> Vec<Series> {
+    for sample in &mut series {
+        if let Some(pod) = sample.labels.get("exported_pod").cloned() {
+            sample.labels.insert("pod".into(), pod);
+        }
+    }
+    series
 }
 
 pub async fn collect(cfg: &Config) -> Snapshot {
     let mut snap = Snapshot::default();
     let mut warn = Vec::new();
     snap.ts = now_secs();
+    snap.stale_after_secs = cfg.interval_full.saturating_mul(3).max(10);
 
     // Prometheus 도달성 프로브 — 실패 시 빈 테이블을 "장비 없음"이 아니라 연결 문제로 구분.
     // 프로브는 2초·무재시도이며, 실패 시 서킷을 열어 이후 쿼리들이 네트워크를 건드리지 않게 한다.
@@ -1266,74 +1303,116 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     }
 
     // 가속기 + 노드는 fast tier(collect_fast) 재사용 — 중복 제거
-    let (accel, nodes) = collect_fast(cfg).await;
-    snap.accel = accel;
-    snap.nodes = nodes;
+    snap.merge_fast(collect_fast(cfg).await);
     collect_node_npu(&mut snap.nodes).await; // 노드 라벨에서 NPU 드라이버/SDK 요약 채움
 
     // ---------- EPP pools (독립 쿼리 — 병렬 배칭으로 순차 라운드트립 제거) ----------
-    let dec_q = "sum by (pod_name) (inference_extension_scheduler_attempts_total)";
-    let pidx_q = "max(inference_extension_prefix_indexer_size)";
+    let dec_q = format!(
+        "sum by (pod_name) {}",
+        epp_endpoint_selector("inference_extension_scheduler_attempts_total", &cfg.ns)
+    );
+    let pidx_q = format!(
+        "max({})",
+        epp_scrape_selector("inference_extension_prefix_indexer_size", &cfg.ns)
+    );
+    let ready_q = epp_scrape_selector(metrics::POOL_READY, &cfg.ns);
+    let queue_q = epp_scrape_selector(metrics::POOL_QUEUE, &cfg.ns);
+    let kv_q = epp_scrape_selector(metrics::POOL_KV, &cfg.ns);
+    let sat_q = epp_scrape_selector(metrics::POOL_SAT, &cfg.ns);
+    let ppq_q = epp_scrape_selector(metrics::POOL_PER_POD_QUEUE, &cfg.ns);
+    let score_q = epp_endpoint_selector(metrics::EPP_ENDPOINT_SCORE, &cfg.ns);
     let (r_ready, r_q, r_kv, r_sat, r_dec, r_pidx, r_ppq, r_score) = tokio::join!(
-        prom::query(&cfg.prom, metrics::POOL_READY),
-        prom::query(&cfg.prom, metrics::POOL_QUEUE),
-        prom::query(&cfg.prom, metrics::POOL_KV),
-        prom::query(&cfg.prom, metrics::POOL_SAT),
-        prom::query(&cfg.prom, dec_q),
-        prom::query(&cfg.prom, pidx_q),
-        prom::query(&cfg.prom, metrics::POOL_PER_POD_QUEUE),
-        prom::query(&cfg.prom, metrics::EPP_ENDPOINT_SCORE),
+        prom::query(&cfg.prom, &ready_q),
+        prom::query(&cfg.prom, &queue_q),
+        prom::query(&cfg.prom, &kv_q),
+        prom::query(&cfg.prom, &sat_q),
+        prom::query(&cfg.prom, &dec_q),
+        prom::query(&cfg.prom, &pidx_q),
+        prom::query(&cfg.prom, &ppq_q),
+        prom::query(&cfg.prom, &score_q),
     );
     let p_ready = resolve(r_ready, metrics::POOL_READY, &mut warn);
     let p_q = map_by(resolve(r_q, metrics::POOL_QUEUE, &mut warn), "name");
     let p_kv = map_by(resolve(r_kv, metrics::POOL_KV, &mut warn), "name");
     let p_sat = map_by(resolve(r_sat, metrics::POOL_SAT, &mut warn), "name");
     // 라우팅 결정 분배 (트래픽이 EPP 경유 시 채워짐)
-    let dec = resolve(r_dec, dec_q, &mut warn);
-    for s in &dec {
-        let pod = s.l("pod_name");
-        if !pod.is_empty() {
-            snap.decisions.push((pod.to_string(), s.value));
-        }
+    let (decisions, status) = endpoint_observation(r_dec, "pod_name", &dec_q, true);
+    snap.decisions = decisions;
+    if let Some(error) = &status.error {
+        warn.push(error.clone());
     }
+    snap.sources.insert("epp_decisions".into(), status);
     snap.decisions
         .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let pidx = resolve(r_pidx, pidx_q, &mut warn);
+    let pidx = resolve(r_pidx, &pidx_q, &mut warn);
     snap.prefix_idx = pidx.first().map(|s| s.value).unwrap_or(f64::NAN);
 
     // per-pod 큐 깊이(요청 분배)
-    for s in &resolve(r_ppq, metrics::POOL_PER_POD_QUEUE, &mut warn) {
-        let pod = s.l("model_server_pod");
-        if !pod.is_empty() {
-            snap.pod_queues.push((pod.to_string(), s.value));
-        }
+    let (queues, status) =
+        endpoint_observation(r_ppq, "model_server_pod", metrics::POOL_PER_POD_QUEUE, true);
+    snap.pod_queues = queues;
+    if let Some(error) = &status.error {
+        warn.push(error.clone());
     }
+    snap.sources.insert("epp_queues".into(), status);
     snap.pod_queues
         .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // per-pod EPP composite score (epp-score-observer 플러그인 배포 시 채워짐; 없으면 빈 값 → '–')
-    for s in &resolve(r_score, metrics::EPP_ENDPOINT_SCORE, &mut warn) {
-        let pod = s.l("pod");
-        if !pod.is_empty() {
-            snap.endpoint_scores.push((pod.to_string(), s.value));
-        }
+    let (scores, status) = endpoint_observation(
+        r_score.map(normalize_score_identity),
+        "pod",
+        metrics::EPP_ENDPOINT_SCORE,
+        false,
+    );
+    snap.endpoint_scores = scores;
+    if let Some(error) = &status.error {
+        warn.push(error.clone());
     }
+    snap.sources.insert("epp_scores".into(), status);
 
     // Perf: 구간별 지연 percentile·토큰분포·처리량 (EPP 정책용). 전부 graceful(NaN).
     let pp = &cfg.prom;
-    // vLLM 네이티브 + Furiosa-LLM(K-EXAONE) 을 클러스터 전역으로 합산(엔진 무관 서빙 건강).
+    // vLLM 네이티브 + Furiosa-LLM(K-EXAONE) 을 선택 namespace 안에서 합산(엔진 무관 서빙 건강).
     let (req_v, err_rate, tps_v, prefix_hit, ttft_v, e2e_p95, req_f, tps_f, ttft_f) = tokio::join!(
-        qs1(pp, "sum(rate(vllm:request_success_total[1m]))"),
-        qs1(pp, "sum(rate(vllm:request_success_total{finished_reason=\"abort\"}[1m]))"),
-        qs1(pp, "sum(rate(vllm:generation_tokens_total[1m]))"),
-        qs1(pp, "sum(rate(vllm:prefix_cache_hits_total[5m])) / sum(rate(vllm:prefix_cache_queries_total[5m]))"),
-        qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(vllm:time_to_first_token_seconds_bucket[1m])))"),
-        qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(vllm:e2e_request_latency_seconds_bucket[1m])))"),
-        qs1(pp, "sum(rate(furiosa_llm_request_success_total[1m]))"),
-        qs1(pp, "sum(rate(furiosa_llm_generation_tokens_total[1m]))"),
-        qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(furiosa_llm_time_to_first_token_seconds_bucket[1m])))"),
+        performance_query(pp, &cfg.ns, "sum(rate(vllm:request_success_total{namespace=__LMD_NAMESPACE__}[1m]))"),
+        performance_query(pp, &cfg.ns, "sum(rate(vllm:request_success_total{namespace=__LMD_NAMESPACE__,finished_reason=\"abort\"}[1m]))"),
+        performance_query(pp, &cfg.ns, "sum(rate(vllm:generation_tokens_total{namespace=__LMD_NAMESPACE__}[1m]))"),
+        performance_query(pp, &cfg.ns, "sum(rate(vllm:prefix_cache_hits_total{namespace=__LMD_NAMESPACE__}[5m])) / sum(rate(vllm:prefix_cache_queries_total{namespace=__LMD_NAMESPACE__}[5m]))"),
+        performance_query(pp, &cfg.ns, "histogram_quantile(0.95, sum by (le)(rate(vllm:time_to_first_token_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))"),
+        performance_query(pp, &cfg.ns, "histogram_quantile(0.95, sum by (le)(rate(vllm:e2e_request_latency_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))"),
+        performance_query(pp, &cfg.ns, "sum(rate(furiosa_llm_request_success_total{namespace=__LMD_NAMESPACE__}[1m]))"),
+        performance_query(pp, &cfg.ns, "sum(rate(furiosa_llm_generation_tokens_total{namespace=__LMD_NAMESPACE__}[1m]))"),
+        performance_query(pp, &cfg.ns, "histogram_quantile(0.95, sum by (le)(rate(furiosa_llm_time_to_first_token_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))"),
     );
-    // throughput 는 가산(NaN=0 취급, 둘 다 NaN 이면 NaN); TTFT 는 존재하는 값 우선(엔진 혼합 p95 는 근사).
+    let req_v = resolve(req_v, "req_v", &mut warn)
+        .first()
+        .map_or(f64::NAN, |s| s.value);
+    let err_rate = resolve(err_rate, "err_rate", &mut warn)
+        .first()
+        .map_or(f64::NAN, |s| s.value);
+    let tps_v = resolve(tps_v, "tps_v", &mut warn)
+        .first()
+        .map_or(f64::NAN, |s| s.value);
+    let prefix_hit = resolve(prefix_hit, "prefix_hit", &mut warn)
+        .first()
+        .map_or(f64::NAN, |s| s.value);
+    let ttft_v = resolve(ttft_v, "ttft_v", &mut warn)
+        .first()
+        .map_or(f64::NAN, |s| s.value);
+    let e2e_p95 = resolve(e2e_p95, "e2e_p95", &mut warn)
+        .first()
+        .map_or(f64::NAN, |s| s.value);
+    let req_f = resolve(req_f, "req_f", &mut warn)
+        .first()
+        .map_or(f64::NAN, |s| s.value);
+    let tps_f = resolve(tps_f, "tps_f", &mut warn)
+        .first()
+        .map_or(f64::NAN, |s| s.value);
+    let ttft_f = resolve(ttft_f, "ttft_f", &mut warn)
+        .first()
+        .map_or(f64::NAN, |s| s.value);
+    // throughput 는 가산(NaN=0 취급, 둘 다 NaN 이면 NaN); TTFT 는 단일 엔진 근거일 때만 표시(혼합 p95 합성 불가).
     let nadd = |a: f64, b: f64| {
         if a.is_nan() && b.is_nan() {
             f64::NAN
@@ -1341,51 +1420,71 @@ pub async fn collect(cfg: &Config) -> Snapshot {
             (if a.is_nan() { 0.0 } else { a }) + (if b.is_nan() { 0.0 } else { b })
         }
     };
-    let nor = |a: f64, b: f64| if a.is_nan() { b } else { a };
     snap.perf = Perf {
         req_rate: nadd(req_v, req_f),
         err_rate,
         tps: nadd(tps_v, tps_f),
         prefix_hit,
-        ttft_p95: nor(ttft_v, ttft_f),
+        ttft_p95: single_engine_percentile(ttft_v, ttft_f, &mut warn),
         e2e_p95,
     };
 
     // per-model 성능 — service(=Deployment 이름) 기준 병합. Models 뷰와 동일 키.
     // 여기선 pm 만 채우고, 런칭된 모델 seed 는 collect_kube(모델 목록) 이후에 좌조인(아래).
     let mut pm: BTreeMap<String, PerfRow> = BTreeMap::new();
-    // per-model 지연/토큰/처리량 — 17개 독립 쿼리를 병렬 배칭(순차 라운드트립 제거).
+    // per-Service latency/token/throughput queries run concurrently across engine families.
     // (promql, 필드 setter). setter 는 캡처 없는 클로저라 fn 포인터로 강제.
     type Set = fn(&mut PerfRow, f64);
-    let specs: &[(&str, Set)] = &[
-        ("sum by (service)(rate(vllm:request_success_total[1m]))", |r, v| r.req = v),
-        ("sum by (service)(rate(vllm:generation_tokens_total[1m]))", |r, v| r.tps = v),
-        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:time_to_first_token_seconds_bucket[1m])))", |r, v| r.ttft_p95 = v),
-        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_time_per_output_token_seconds_bucket[1m])))", |r, v| r.tpot_p95 = v),
-        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:e2e_request_latency_seconds_bucket[1m])))", |r, v| r.e2e_p95 = v),
-        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_prompt_tokens_bucket[1m])))", |r, v| r.in_tok_p95 = v),
-        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_generation_tokens_bucket[1m])))", |r, v| r.out_tok_p95 = v),
-        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_queue_time_seconds_bucket[1m])))", |r, v| r.queue_p95 = v),
-        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_prefill_time_seconds_bucket[1m])))", |r, v| r.prefill_p95 = v),
-        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_decode_time_seconds_bucket[1m])))", |r, v| r.decode_p95 = v),
-        ("sum by (service)(rate(vllm:num_preemptions_total[1m]))", |r, v| r.preempt = v),
+    let specs: &[(&str, &str, Set)] = &[
+        ("sum by (service)(rate(vllm:request_success_total{namespace=__LMD_NAMESPACE__}[1m]))", "req", |r, v| r.req = v),
+        ("sum by (service)(rate(vllm:generation_tokens_total{namespace=__LMD_NAMESPACE__}[1m]))", "tps", |r, v| r.tps = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:time_to_first_token_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))", "ttft_p95", |r, v| r.ttft_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_time_per_output_token_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))", "tpot_p95", |r, v| r.tpot_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:e2e_request_latency_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))", "e2e_p95", |r, v| r.e2e_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_prompt_tokens_bucket{namespace=__LMD_NAMESPACE__}[1m])))", "in_tok_p95", |r, v| r.in_tok_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_generation_tokens_bucket{namespace=__LMD_NAMESPACE__}[1m])))", "out_tok_p95", |r, v| r.out_tok_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_queue_time_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))", "queue_p95", |r, v| r.queue_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_prefill_time_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))", "prefill_p95", |r, v| r.prefill_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(vllm:request_decode_time_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))", "decode_p95", |r, v| r.decode_p95 = v),
+        ("sum by (service)(rate(vllm:num_preemptions_total{namespace=__LMD_NAMESPACE__}[1m]))", "preempt", |r, v| r.preempt = v),
         // Furiosa-LLM (K-EXAONE 등): furiosa_llm_* 로 노출, 같은 service 조인키. TPOT≈inter-token-latency.
-        ("sum by (service)(rate(furiosa_llm_request_success_total[1m]))", |r, v| r.req = v),
-        ("sum by (service)(rate(furiosa_llm_generation_tokens_total[1m]))", |r, v| r.tps = v),
-        ("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_time_to_first_token_seconds_bucket[1m])))", |r, v| r.ttft_p95 = v),
-        ("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_inter_token_latency_seconds_bucket[1m])))", |r, v| r.tpot_p95 = v),
-        ("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_request_prompt_tokens_bucket[1m])))", |r, v| r.in_tok_p95 = v),
-        ("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_request_generation_tokens_bucket[1m])))", |r, v| r.out_tok_p95 = v),
+        ("sum by (service)(rate(furiosa_llm_request_success_total{namespace=__LMD_NAMESPACE__}[1m]))", "req", |r, v| r.req = v),
+        ("sum by (service)(rate(furiosa_llm_generation_tokens_total{namespace=__LMD_NAMESPACE__}[1m]))", "tps", |r, v| r.tps = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_time_to_first_token_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))", "ttft_p95", |r, v| r.ttft_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_inter_token_latency_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))", "tpot_p95", |r, v| r.tpot_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_request_prompt_tokens_bucket{namespace=__LMD_NAMESPACE__}[1m])))", "in_tok_p95", |r, v| r.in_tok_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(furiosa_llm_request_generation_tokens_bucket{namespace=__LMD_NAMESPACE__}[1m])))", "out_tok_p95", |r, v| r.out_tok_p95 = v),
+        // Proxy metrics are per Service, never a fixed synthetic model name.
+        ("sum by (service)(rate(ds4_proxy_requests_total{namespace=__LMD_NAMESPACE__}[5m]))", "req", |r, v| r.req = v),
+        ("sum by (service)(rate(ds4_proxy_output_tokens_total{namespace=__LMD_NAMESPACE__}[5m]))", "tps", |r, v| r.tps = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(ds4_proxy_ttft_seconds_bucket{namespace=__LMD_NAMESPACE__}[5m])))", "ttft_p95", |r, v| r.ttft_p95 = v),
+        ("histogram_quantile(0.95, sum by (service,le)(rate(ds4_proxy_request_duration_seconds_bucket{namespace=__LMD_NAMESPACE__}[5m])))", "e2e_p95", |r, v| r.e2e_p95 = v),
     ];
-    let qs: Vec<&str> = specs.iter().map(|(q, _)| *q).collect();
+    let scoped: Vec<String> = specs
+        .iter()
+        .map(|(q, _, _)| performance_query_text(q, &cfg.ns))
+        .collect();
+    let qs: Vec<&str> = scoped.iter().map(String::as_str).collect();
     let results = prom::query_all(&cfg.prom, &qs).await;
-    for ((promql, set), r) in specs.iter().zip(results) {
+    let mut seen_values = std::collections::HashSet::new();
+    for ((promql, field, set), r) in specs.iter().zip(results) {
         for s in &resolve(r, promql, &mut warn) {
             let m = s.l("service");
             if !m.is_empty() {
+                record_metric_family(&mut snap.perf_targets, m, promql);
+                let value =
+                    unique_performance_value(&mut seen_values, m, field, s.value, &mut warn);
+                if !value.is_finite() {
+                    // A cross-engine total must not retain double-counted or invalid rows.
+                    match *field {
+                        "req" => snap.perf.req_rate = f64::NAN,
+                        "tps" => snap.perf.tps = f64::NAN,
+                        _ => {}
+                    }
+                }
                 set(
                     pm.entry(m.to_string()).or_insert_with(|| PerfRow::new(m)),
-                    s.value,
+                    value,
                 );
             }
         }
@@ -1404,25 +1503,34 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     }
 
     // vLLM model metrics (모델 서버에 vLLM ServiceMonitor + 트래픽 있을 때 채워짐)
-    // vLLM 네이티브와 Furiosa-LLM 을 같은 service 키로 병합(한 service 는 둘 중 하나만 노출 → 충돌 없음).
+    // vLLM 네이티브와 Furiosa-LLM 을 service 키로 병합하되 충돌 값은 제외.
     // 10개 쿼리는 반드시 병렬(query_all) — 직렬 .await 였을 때 Prometheus 장애 시 이 블록만
     // 120초 규모로 늘어나 collect 전체를 마비시켰다(BUG-01).
     let vllm_qs: [&str; 10] = [
-        "sum by (service) (vllm:num_requests_running)",
-        "sum by (service) (vllm:num_requests_waiting)",
-        "sum by (service) (rate(vllm:generation_tokens_total[1m]))",
-        "max by (service) (vllm:kv_cache_usage_perc)",
-        "histogram_quantile(0.95, sum by (service,le) (rate(vllm:time_to_first_token_seconds_bucket[1m])))",
-        "sum by (service) (furiosa_llm_num_requests_running)",
-        "sum by (service) (furiosa_llm_num_requests_waiting)",
-        "sum by (service) (rate(furiosa_llm_generation_tokens_total[1m]))",
-        "max by (service) (furiosa_llm_kv_cache_usage_percent)",
-        "histogram_quantile(0.95, sum by (service,le) (rate(furiosa_llm_time_to_first_token_seconds_bucket[1m])))",
+        "sum by (service) (vllm:num_requests_running{namespace=__LMD_NAMESPACE__})",
+        "sum by (service) (vllm:num_requests_waiting{namespace=__LMD_NAMESPACE__})",
+        "sum by (service) (rate(vllm:generation_tokens_total{namespace=__LMD_NAMESPACE__}[1m]))",
+        "max by (service) (vllm:kv_cache_usage_perc{namespace=__LMD_NAMESPACE__})",
+        "histogram_quantile(0.95, sum by (service,le) (rate(vllm:time_to_first_token_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))",
+        "sum by (service) (furiosa_llm_num_requests_running{namespace=__LMD_NAMESPACE__})",
+        "sum by (service) (furiosa_llm_num_requests_waiting{namespace=__LMD_NAMESPACE__})",
+        "sum by (service) (rate(furiosa_llm_generation_tokens_total{namespace=__LMD_NAMESPACE__}[1m]))",
+        "max by (service) (furiosa_llm_kv_cache_usage_percent{namespace=__LMD_NAMESPACE__})",
+        "histogram_quantile(0.95, sum by (service,le) (rate(furiosa_llm_time_to_first_token_seconds_bucket{namespace=__LMD_NAMESPACE__}[1m])))",
     ];
-    let mut vres = prom::query_all(&cfg.prom, &vllm_qs).await.into_iter();
+    let scoped: Vec<String> = vllm_qs
+        .iter()
+        .map(|q| performance_query_text(q, &cfg.ns))
+        .collect();
+    let refs: Vec<&str> = scoped.iter().map(String::as_str).collect();
+    let mut vres = prom::query_all(&cfg.prom, &refs).await.into_iter();
     let mut next = |warn: &mut Vec<String>, i: usize| {
         map_by(
-            resolve(vres.next().unwrap_or_else(|| Ok(Vec::new())), vllm_qs[i], warn),
+            resolve(
+                vres.next().unwrap_or_else(|| Ok(Vec::new())),
+                vllm_qs[i],
+                warn,
+            ),
             "service",
         )
     };
@@ -1434,57 +1542,86 @@ pub async fn collect(cfg: &Config) -> Snapshot {
         kv: next(&mut warn, 3),
         ttft: next(&mut warn, 4),
     };
-    vllm.run.extend(next(&mut warn, 5));
-    vllm.wait.extend(next(&mut warn, 6));
-    vllm.tps.extend(next(&mut warn, 7));
-    vllm.kv.extend(next(&mut warn, 8));
-    vllm.ttft.extend(next(&mut warn, 9));
+    let other = next(&mut warn, 5);
+    merge_engine_metrics(&mut vllm.run, other, "run", &mut warn);
+    let other = next(&mut warn, 6);
+    merge_engine_metrics(&mut vllm.wait, other, "wait", &mut warn);
+    let other = next(&mut warn, 7);
+    merge_engine_metrics(&mut vllm.tps, other, "tps", &mut warn);
+    let other = next(&mut warn, 8);
+    merge_engine_metrics(&mut vllm.kv, other, "kv", &mut warn);
+    let other = next(&mut warn, 9);
+    merge_engine_metrics(&mut vllm.ttft, other, "ttft", &mut warn);
 
     // ---------- kube: deployments / pods / routes / gateway / epp ----------
     collect_kube(cfg, &mut snap, &vllm, &mut warn).await;
 
     // per-model perf: 런칭된 모든 모델(snap.models)을 seed 로 → 트래픽 없어도 표(–)에 표시.
-    // 배포명↔service 는 Models 뷰와 동일한 match_model 로 해석, pm(메트릭)을 좌조인.
+    // Join deployment rows only through declared Service selector relationships.
     {
         let mut rows: Vec<PerfRow> = Vec::new();
         for m in &snap.models {
-            let key = match_model(&m.name, &vllm.run);
+            let key = crate::service_binding::metric_service(&m.name, &snap.service_bindings, &pm);
+            if let Some(target) = key.as_ref().and_then(|k| snap.perf_targets.get(k)).cloned() {
+                snap.perf_targets.insert(m.name.clone(), target);
+            }
             let mut row = key
                 .and_then(|k| pm.remove(&k))
                 .unwrap_or_else(|| PerfRow::new(&m.name));
             row.model = m.name.clone(); // 표시명을 배포명으로 통일(Models 와 일관)
             rows.push(row);
         }
-        rows.extend(pm.into_values()); // 모델 목록엔 없지만 메트릭만 있는 잔여
+        for mut row in pm.into_values() {
+            // Keep unbound Service observations distinct from Deployment identities.
+            let label = format!("service/{}", row.model);
+            if let Some(target) = snap.perf_targets.get(&row.model).cloned() {
+                snap.perf_targets.insert(label.clone(), target);
+            }
+            row.model = label;
+            rows.push(row);
+        }
         snap.perf_rows = rows;
     }
 
-    // 커스텀 엔진 어댑터: ds4-inject-proxy 는 vLLM 이 아니라 `ds4_proxy_*` 로 노출 →
-    // vllm:* 쿼리로는 안 잡힘. 프록시가 백엔드 라벨 없이 집계하므로 집계 perf 행 1개로 반영.
-    // (저트래픽이라 5m 윈도로 안정화. 일반화는 로드맵의 선언적 collector.)
-    {
-        let pp = &cfg.prom;
-        let (req, tok, ttft, e2e) = tokio::join!(
-            qs1(pp, "sum(rate(ds4_proxy_requests_total[5m]))"),
-            qs1(pp, "sum(rate(ds4_proxy_output_tokens_total[5m]))"),
-            qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(ds4_proxy_ttft_seconds_bucket[5m])))"),
-            qs1(pp, "histogram_quantile(0.95, sum by (le)(rate(ds4_proxy_request_duration_seconds_bucket[5m])))"),
-        );
-        if !req.is_nan() || !ttft.is_nan() || !e2e.is_nan() {
-            let mut r = PerfRow::new("ds4-proxy");
-            r.req = req;
-            r.tps = tok;
-            r.ttft_p95 = ttft;
-            r.e2e_p95 = e2e;
-            snap.perf_rows.push(r);
-        }
-    }
+    let perf_errors: Vec<String> = warn
+        .iter()
+        .filter(|w| w.starts_with("prom["))
+        .cloned()
+        .collect();
+    snap.sources.insert(
+        "performance".into(),
+        crate::quality::SourceStatus::observed(
+            now_secs(),
+            snap.perf_rows
+                .iter()
+                .filter(|r| r.req.is_finite() || r.tps.is_finite() || r.ttft_p95.is_finite())
+                .count(),
+            &perf_errors,
+        ),
+    );
 
     // ---------- 가속기 재고(런처 솔버용) ----------
-    collect_inventory(&mut snap.inventory, &mut snap.node_alloc, &mut warn).await;
+    let mut inventory_errors = Vec::new();
+    collect_inventory(
+        &mut snap.inventory,
+        &mut snap.node_alloc,
+        &mut snap.node_capacity,
+        &mut inventory_errors,
+    )
+    .await;
+
+    snap.sources.insert(
+        "inventory".into(),
+        crate::quality::SourceStatus::observed(
+            now_secs(),
+            snap.node_capacity.len(),
+            &inventory_errors,
+        ),
+    );
+    warn.extend(inventory_errors);
 
     // ---------- 플랫폼 부트스트랩 전제조건(Setup 뷰) ----------
-    snap.setup = collect_setup(&cfg.ns).await;
+    snap.setup = crate::setup_probe::collect(&cfg.ns).await;
     // BUG-08: `kubectl get deploy -n <missing-ns>` returns success + an empty list, so no collector
     // can tell "nothing deployed" from "wrong namespace". The Setup probe already knows — say so,
     // rather than leaving the user with silently empty views (ENV-03).
@@ -1510,219 +1647,237 @@ pub async fn collect(cfg: &Config) -> Snapshot {
     // History: serving observations feed the compile-option advisor.
     record_serving(&snap);
 
+    snap.ts = now_secs();
+    let errors: Vec<String> = warn
+        .iter()
+        .cloned()
+        .chain(snap.sources.values().filter_map(|s| s.error.clone()))
+        .collect();
+    snap.sources.insert(
+        "full".into(),
+        crate::quality::SourceStatus::observed(
+            snap.ts,
+            snap.models.len() + snap.nodes.len(),
+            &errors,
+        ),
+    );
     snap.warnings = warn;
     snap
 }
-
-/// 플랫폼 전제조건 프로브 — read-only kubectl 몇 번으로 CRD/Gateway/Role/PVC/Secret 존재 확인.
-/// kubectl 미도달이면 probed=false 로 반환(Setup 뷰가 "클러스터 미연결" 표시).
-async fn collect_setup(ns: &str) -> SetupProbe {
-    let mut p = SetupProbe::default();
-    let ns_ref = format!("namespace/{}", ns);
-    // kubectl 도달성 겸 namespace 존재 확인 — None(에러)이면 클러스터 미연결로 조기 반환.
-    match kube::get_exists(&["get", &ns_ref]).await {
-        Some(exists) => {
-            p.probed = true;
-            p.ns_exists = exists;
-        }
-        None => return p,
-    }
-    // CRDs (get_exists: kind/이름 없으면 Some(false), kubectl 자체 에러면 None→false)
-    p.crd_gateway = kube::get_exists(&["get", "crd", "gateways.gateway.networking.k8s.io"])
-        .await
-        .unwrap_or(false);
-    p.crd_httproute = kube::get_exists(&["get", "crd", "httproutes.gateway.networking.k8s.io"])
-        .await
-        .unwrap_or(false);
-    p.crd_infpool = kube::get_exists(&["get", "crd", "inferencepools.inference.networking.k8s.io"])
-        .await
-        .unwrap_or(false);
-    // 사용 가능한 GatewayClass 이름(Gateway 생성 시 gatewayClassName 후보)
-    if p.crd_gateway {
-        if let Some(s) =
-            kube::get_jsonpath(&["get", "gatewayclass"], "{.items[*].metadata.name}").await
-        {
-            p.gatewayclasses = s.split_whitespace().map(|x| x.to_string()).collect();
-        }
-    }
-    // 네임스페이스 스코프 오브젝트(CRD 없으면 get 자체가 실패 → false 로 안전 처리)
-    if p.crd_gateway {
-        p.gateway = kube::get_exists(&["get", "gateway", "llm-d-gateway", "-n", ns])
-            .await
-            .unwrap_or(false);
-    }
-    p.epp_role_sa = kube::get_exists(&["get", "role", "llmd-router-epp-sa", "-n", ns])
-        .await
-        .unwrap_or(false);
-    p.epp_role_non_sa = kube::get_exists(&["get", "role", "llmd-router-epp-non-sa", "-n", ns])
-        .await
-        .unwrap_or(false);
-    p.secret_hf = kube::get_exists(&["get", "secret", "hf-token", "-n", ns])
-        .await
-        .unwrap_or(false);
-    p.pvc_model_store =
-        kube::get_jsonpath(&["get", "pvc", "model-store", "-n", ns], "{.status.phase}")
-            .await
-            .filter(|s| !s.is_empty());
-    p
-}
-
-const ACCEL_RESOURCES: [&str; 3] = ["nvidia.com/gpu", "rebellions.ai/ATOM", "furiosa.ai/rngd"];
 
 /// 노드 allocatable 합계 − 파드 requests 합계 = 여유. (가속기 resource별)
 async fn collect_inventory(
     inv: &mut Vec<(String, i64, i64)>,
     node_alloc: &mut BTreeMap<String, BTreeMap<String, i64>>,
+    node_capacity: &mut BTreeMap<String, BTreeMap<String, i64>>,
     warn: &mut Vec<String>,
 ) {
-    let mut total: BTreeMap<String, i64> = BTreeMap::new();
-    let mut used: BTreeMap<String, i64> = BTreeMap::new();
-    for r in ACCEL_RESOURCES {
-        total.insert(r.to_string(), 0);
-        used.insert(r.to_string(), 0);
-    }
-    // 노드 allocatable
-    match kube::get_json(&["get", "nodes", "-o", "json"]).await {
-        Ok(v) => {
-            if let Some(items) = v["items"].as_array() {
-                for n in items {
-                    if let Some(a) = n["status"]["allocatable"].as_object() {
-                        for r in ACCEL_RESOURCES {
-                            if let Some(q) = a
-                                .get(r)
-                                .and_then(|x| x.as_str())
-                                .and_then(|s| s.parse::<i64>().ok())
-                            {
-                                *total.get_mut(r).unwrap() += q;
-                            }
-                        }
-                    }
-                }
-            }
+    inv.clear();
+    node_alloc.clear();
+    node_capacity.clear();
+    let (nodes, pods) = tokio::join!(
+        kube::get_json(&["get", "nodes", "-o", "json"]),
+        kube::get_json(&["get", "pods", "-A", "-o", "json"]),
+    );
+    match nodes.and_then(|nodes| pods.and_then(|pods| crate::inventory::from_json(&nodes, &pods))) {
+        Ok((totals, allocations, capacity)) => {
+            *inv = totals;
+            *node_alloc = allocations;
+            *node_capacity = capacity;
         }
-        Err(e) => warn.push(format!("inv nodes: {}", e)),
-    }
-    // 파드 requests (비종료 파드, 전 네임스페이스)
-    if let Ok(v) = kube::get_json(&["get", "pods", "-A", "-o", "json"]).await {
-        if let Some(items) = v["items"].as_array() {
-            for p in items {
-                let phase = p["status"]["phase"].as_str().unwrap_or("");
-                if phase == "Succeeded" || phase == "Failed" {
-                    continue;
-                }
-                let node = p["spec"]["nodeName"].as_str().unwrap_or("").to_string();
-                if let Some(cs) = p["spec"]["containers"].as_array() {
-                    for c in cs {
-                        if let Some(req) = c["resources"]["requests"].as_object() {
-                            for r in ACCEL_RESOURCES {
-                                if let Some(q) = req
-                                    .get(r)
-                                    .and_then(|x| x.as_str())
-                                    .and_then(|s| s.parse::<i64>().ok())
-                                {
-                                    *used.get_mut(r).unwrap() += q;
-                                    if !node.is_empty() {
-                                        *node_alloc
-                                            .entry(node.clone())
-                                            .or_default()
-                                            .entry(r.to_string())
-                                            .or_insert(0) += q;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    for r in ACCEL_RESOURCES {
-        inv.push((r.to_string(), total[r], used[r]));
+        Err(error) => warn.push(format!("inventory unavailable: {error}")),
     }
 }
 
-type NodeMeta = (bool, bool, bool, String); // (ready, cordoned, pressure, version)
+type NodeMeta = (
+    bool,
+    bool,
+    bool,
+    String,
+    Option<crate::resource_guard::Identity>,
+);
 
-async fn node_kube() -> (BTreeMap<String, String>, BTreeMap<String, NodeMeta>) {
+async fn node_kube() -> anyhow::Result<(BTreeMap<String, String>, BTreeMap<String, NodeMeta>)> {
+    let value = kube::get_json(&["get", "nodes", "-o", "json"]).await?;
+    parse_node_list(&value)
+}
+
+fn parse_node_list(
+    v: &serde_json::Value,
+) -> anyhow::Result<(BTreeMap<String, String>, BTreeMap<String, NodeMeta>)> {
     let mut ip = BTreeMap::new();
     let mut meta = BTreeMap::new();
-    if let Ok(v) = kube::get_json(&["get", "nodes", "-o", "json"]).await {
-        if let Some(items) = v["items"].as_array() {
-            for it in items {
-                let name = it["metadata"]["name"].as_str().unwrap_or("").to_string();
-                if let Some(addrs) = it["status"]["addresses"].as_array() {
-                    for a in addrs {
-                        if a["type"] == "InternalIP" {
-                            if let Some(x) = a["address"].as_str() {
-                                ip.insert(x.to_string(), name.clone());
-                            }
-                        }
+    let items = v["items"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("node response has no items array"))?;
+    for it in items {
+        let name = it["metadata"]["name"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("node response contains an unnamed node"))?
+            .to_string();
+        if meta.contains_key(&name) {
+            anyhow::bail!("node response contains duplicate node {name}");
+        }
+        if let Some(addrs) = it["status"]["addresses"].as_array() {
+            for a in addrs {
+                if a["type"] == "InternalIP" {
+                    if let Some(x) = a["address"].as_str() {
+                        ip.insert(x.to_string(), name.clone());
                     }
                 }
-                let ver = it["status"]["nodeInfo"]["kubeletVersion"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                let cordoned = it["spec"]["unschedulable"].as_bool().unwrap_or(false);
-                let (mut ready, mut pressure) = (false, false);
-                if let Some(cs) = it["status"]["conditions"].as_array() {
-                    for c in cs {
-                        let t = c["type"].as_str().unwrap_or("");
-                        let st = c["status"] == "True";
-                        match t {
-                            "Ready" => ready = st,
-                            "MemoryPressure" | "DiskPressure" | "PIDPressure" if st => {
-                                pressure = true
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                meta.insert(name, (ready, cordoned, pressure, ver));
             }
         }
+        let ver = it["status"]["nodeInfo"]["kubeletVersion"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let cordoned = it["spec"]["unschedulable"].as_bool().unwrap_or(false);
+        let (mut ready, mut pressure) = (false, false);
+        if let Some(cs) = it["status"]["conditions"].as_array() {
+            for c in cs {
+                let t = c["type"].as_str().unwrap_or("");
+                let st = c["status"] == "True";
+                match t {
+                    "Ready" => ready = st,
+                    "MemoryPressure" | "DiskPressure" | "PIDPressure" if st => pressure = true,
+                    _ => {}
+                }
+            }
+        }
+        meta.insert(
+            name,
+            (
+                ready,
+                cordoned,
+                pressure,
+                ver,
+                crate::resource_guard::Identity::read(it),
+            ),
+        );
     }
-    (ip, meta)
+    Ok((ip, meta))
+}
+
+/// A malformed list is a failed observation, never an authoritative empty list.
+fn validate_resource_list(value: &serde_json::Value) -> anyhow::Result<()> {
+    let items = value["items"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("resource response has no items array"))?;
+    let mut names = std::collections::BTreeSet::new();
+    for item in items {
+        let name = item["metadata"]["name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("resource list contains an unnamed object"))?;
+        let namespace = item["metadata"]["namespace"].as_str().unwrap_or("");
+        if !names.insert((namespace, name)) {
+            anyhow::bail!("resource list contains a duplicate object identity");
+        }
+    }
+    Ok(())
+}
+
+async fn tracked_json(
+    snap: &mut Snapshot,
+    source: &str,
+    args: &[&str],
+) -> anyhow::Result<serde_json::Value> {
+    let result = kube::get_json(args).await.and_then(|value| {
+        validate_resource_list(&value)?;
+        Ok(value)
+    });
+    let mut status = match &result {
+        Ok(v) => crate::quality::SourceStatus::observed(
+            now_secs(),
+            v["items"].as_array().map_or(0, Vec::len),
+            &[],
+        ),
+        Err(e) => crate::quality::SourceStatus::observed(now_secs(), 0, &[e.to_string()]),
+    };
+    if let Err(e) = &result {
+        if e.to_string().contains("doesn't have a resource type") {
+            status = crate::quality::SourceStatus::observed(now_secs(), 0, &[]);
+            status.unsupported = true;
+        }
+    }
+    snap.sources.insert(source.into(), status);
+    result
 }
 
 async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut Vec<String>) {
     // routes: path -> backend (+ kind: Service|InferencePool)
-    let r = kube::get_json(&["get", "httproute", "-n", &cfg.ns, "-o", "json"]).await;
+    let r = tracked_json(
+        snap,
+        "routes",
+        &["get", "httproute", "-n", &cfg.ns, "-o", "json"],
+    )
+    .await;
     if let Err(e) = &r {
         kube_warn("httproute", e, warn);
     }
     if let Ok(v) = r {
-        if let Some(items) = v["items"].as_array() {
-            for r in items {
-                let route_name = r["metadata"]["name"].as_str().unwrap_or("").to_string();
-                if let Some(rules) = r["spec"]["rules"].as_array() {
-                    for rule in rules {
-                        let backend = rule["backendRefs"][0]["name"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        let kind = rule["backendRefs"][0]["kind"]
-                            .as_str()
-                            .unwrap_or("Service")
-                            .to_string();
-                        if kind == "InferencePool" {
-                            snap.epp_in_path = true;
-                        }
-                        if let Some(matches) = rule["matches"].as_array() {
-                            for m in matches {
-                                if let Some(p) = m["path"]["value"].as_str() {
-                                    snap.routes.push(Route {
-                                        path: p.to_string(),
-                                        backend: backend.clone(),
-                                        kind: kind.clone(),
-                                        route: route_name.clone(),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        (snap.routes, snap.epp_in_path) = crate::routing::rows(&v);
+    }
+    let deployments = tracked_json(
+        snap,
+        "workloads",
+        &["get", "deploy", "-n", &cfg.ns, "-o", "json"],
+    )
+    .await;
+    let services = tracked_json(
+        snap,
+        "services",
+        &["get", "services", "-n", &cfg.ns, "-o", "json"],
+    )
+    .await;
+    if let Ok(services) = &services {
+        snap.service_names = crate::service_binding::names_in_namespace(services, &cfg.ns);
+    }
+    let pods = tracked_json(snap, "pods", &["get", "pods", "-n", &cfg.ns, "-o", "json"]).await;
+    let replicasets = tracked_json(
+        snap,
+        "replicasets",
+        &["get", "replicasets", "-n", &cfg.ns, "-o", "json"],
+    )
+    .await;
+    let slices = tracked_json(
+        snap,
+        "endpointslices",
+        &[
+            "get",
+            "endpointslices.discovery.k8s.io",
+            "-n",
+            &cfg.ns,
+            "-o",
+            "json",
+        ],
+    )
+    .await;
+    if let (Ok(deployments), Ok(pods), Ok(replicasets)) = (&deployments, &pods, &replicasets) {
+        snap.deployment_pods =
+            crate::service_binding::deployment_pods(deployments, pods, replicasets);
+    }
+    if let (Ok(services), Ok(deployments), Ok(pods), Ok(replicasets), Ok(slices)) =
+        (&services, &deployments, &pods, &replicasets, &slices)
+    {
+        snap.service_bindings = crate::service_binding::verified_bindings(
+            services,
+            deployments,
+            pods,
+            replicasets,
+            slices,
+        );
+    }
+    for (name, result) in [
+        ("services", &services),
+        ("replicasets", &replicasets),
+        ("endpointslices", &slices),
+    ] {
+        if let Err(error) = result {
+            warn.push(format!(
+                "kube {name}: {error}; model metric bindings unavailable"
+            ));
         }
     }
     let route_for = |backend: &str| -> String {
@@ -1735,13 +1890,19 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     };
 
     // deployments → models
-    match kube::get_json(&["get", "deploy", "-n", &cfg.ns, "-o", "json"]).await {
+    match &deployments {
         Ok(v) => {
             if let Some(items) = v["items"].as_array() {
                 for d in items {
                     let name = d["metadata"]["name"].as_str().unwrap_or("").to_string();
-                    if name.contains("epp") || name.contains("router") {
-                        continue; // 라우터는 모델 아님
+                    if let Some(version) = crate::resource_guard::Identity::read(d) {
+                        snap.deployment_versions.insert(name.clone(), version);
+                    }
+                    let identity = crate::workload::classify(d);
+                    let is_model = identity.role.is_model();
+                    snap.workloads.push(identity);
+                    if !is_model {
+                        continue;
                     }
                     let desired = d["spec"]["replicas"].as_i64().unwrap_or(0);
                     let ready = d["status"]["readyReplicas"].as_i64().unwrap_or(0);
@@ -1752,8 +1913,12 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                     } else {
                         "◐ Pending".to_string()
                     };
-                    // vllm 메트릭 fuzzy 매칭 (model_name ⊃/⊂ deploy 토큰)
-                    let mn = match_model(name.as_str(), &vllm.run);
+                    // Match only a unique observed Service with a declared selector relationship.
+                    let mn = crate::service_binding::metric_service(
+                        &name,
+                        &snap.service_bindings,
+                        &vllm.run,
+                    );
                     let accel = accel_for(&snap.accel, &name);
                     let engine = detect_engine(d, &accel);
                     snap.artifacts.push(model_artifact(d, &name, &engine));
@@ -1779,7 +1944,7 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     snap.models.sort_by(|a, b| a.name.cmp(&b.name));
 
     // pods
-    match kube::get_json(&["get", "pods", "-n", &cfg.ns, "-o", "json"]).await {
+    match &pods {
         Ok(v) => {
             if let Some(items) = v["items"].as_array() {
                 for p in items {
@@ -1804,6 +1969,7 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
                         .map(|s| now_secs().saturating_sub(s))
                         .unwrap_or(0);
                     snap.pods.push(PodRow {
+                        identity: crate::resource_guard::Identity::read(p),
                         name,
                         phase,
                         ready: format!("{}/{}", readyc, total),
@@ -1818,24 +1984,48 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
     }
     snap.pods.sort_by(|a, b| a.name.cmp(&b.name));
 
-    collect_events(cfg, snap).await;
+    collect_events(cfg, snap, warn).await;
     collect_gateway(cfg, snap, warn).await;
 
-    // EPP config (ConfigMap)
-    if let Ok(v) =
-        kube::get_json(&["get", "cm", "llmd-router-epp", "-n", &cfg.ns, "-o", "json"]).await
-    {
-        if let Some(text) = kube::cm_data(&v, "default-plugins.yaml") {
-            snap.epp = parse_epp(text);
+    // Configuration presence and successful parsing are separate from runtime health.
+    let epp_result = kube::get_json(&["get", "cm", "llmd-router-epp", "-n", &cfg.ns, "-o", "json"])
+        .await
+        .and_then(|value| {
+            let text = kube::cm_data(&value, "default-plugins.yaml")
+                .ok_or_else(|| anyhow::anyhow!("EPP ConfigMap has no default-plugins.yaml"))?;
+            crate::epp_config::parse(text).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "EPP configuration has an invalid or unsupported scheduling profile"
+                )
+            })
+        });
+    let epp_status = match epp_result {
+        Ok(config) => {
+            snap.epp = Some(config);
+            crate::quality::SourceStatus::observed(now_secs(), 1, &[])
         }
-    }
+        Err(error) => {
+            warn.push(format!("EPP configuration: {error}"));
+            crate::quality::SourceStatus::observed(now_secs(), 0, &[error.to_string()])
+        }
+    };
+    snap.sources.insert("epp_config".into(), epp_status);
 
     // InferencePool 스펙(selector / EPP / endpoints) → prom Pool 과 병합
-    let r = kube::get_json(&["get", "inferencepool", "-n", &cfg.ns, "-o", "json"]).await;
+    let r = tracked_json(
+        snap,
+        "pools",
+        &["get", "inferencepool", "-n", &cfg.ns, "-o", "json"],
+    )
+    .await;
     if let Err(e) = &r {
         kube_warn("inferencepool", e, warn);
     }
     if let Ok(v) = r {
+        if let (Ok(deployments), Ok(pods), Ok(replicasets)) = (&deployments, &pods, &replicasets) {
+            snap.pool_bindings =
+                crate::service_binding::pool_bindings(&v, deployments, pods, replicasets);
+        }
         if let Some(items) = v["items"].as_array() {
             for ip in items {
                 let name = ip["metadata"]["name"].as_str().unwrap_or("").to_string();
@@ -1971,8 +2161,9 @@ async fn collect_kube(cfg: &Config, snap: &mut Snapshot, vllm: &Vllm, warn: &mut
         }
     }
 
-    collect_stored(cfg, snap).await;
-    collect_compiles(cfg, snap).await;
+    collect_stored(cfg, snap, warn).await;
+    collect_compiles(cfg, snap, warn).await;
+    collect_trainings(cfg, snap, warn).await;
 
     // artifact 저장/구동 노드 — 가속기 busy_model 우선, 없으면 파드 스케줄 노드(분리 차용으로 먼저 계산).
     let nodes: Vec<String> = snap
@@ -2037,18 +2228,25 @@ async fn collect_node_npu(nodes: &mut [NodeInfo]) {
 }
 
 /// k8s/llm-d 이벤트(최근 40) → snap.events. collect_kube 에서 분리된 leaf 파서.
-async fn collect_events(cfg: &Config, snap: &mut Snapshot) {
-    if let Ok(v) = kube::get_json(&[
-        "get",
+async fn collect_events(cfg: &Config, snap: &mut Snapshot, warn: &mut Vec<String>) {
+    let result = tracked_json(
+        snap,
         "events",
-        "-n",
-        &cfg.ns,
-        "--sort-by=.lastTimestamp",
-        "-o",
-        "json",
-    ])
-    .await
-    {
+        &[
+            "get",
+            "events",
+            "-n",
+            &cfg.ns,
+            "--sort-by=.lastTimestamp",
+            "-o",
+            "json",
+        ],
+    )
+    .await;
+    if let Err(error) = &result {
+        warn.push(format!("kube events: {error}"));
+    }
+    if let Ok(v) = result {
         if let Some(items) = v["items"].as_array() {
             for e in items.iter().rev().take(40) {
                 let obj = format!(
@@ -2070,7 +2268,12 @@ async fn collect_events(cfg: &Config, snap: &mut Snapshot) {
 
 /// Gateway 주소/상태(Programmed) → snap.gw_addr/gw_ok.
 async fn collect_gateway(cfg: &Config, snap: &mut Snapshot, warn: &mut Vec<String>) {
-    let r = kube::get_json(&["get", "gateway", "-n", &cfg.ns, "-o", "json"]).await;
+    let r = tracked_json(
+        snap,
+        "gateway",
+        &["get", "gateway", "-n", &cfg.ns, "-o", "json"],
+    )
+    .await;
     if let Err(e) = &r {
         kube_warn("gateway", e, warn);
     }
@@ -2089,18 +2292,59 @@ async fn collect_gateway(cfg: &Config, snap: &mut Snapshot, warn: &mut Vec<Strin
     }
 }
 
-/// 공유 스토어 인벤토리(model-inventory ConfigMap) → snap.stored. 없으면(미배포) 조용히 빈 값.
-async fn collect_stored(cfg: &Config, snap: &mut Snapshot) {
-    if let Ok(v) =
-        kube::get_json(&["get", "cm", "model-inventory", "-n", &cfg.ns, "-o", "json"]).await
-    {
-        if let Some(txt) = v["data"]["inventory"].as_str() {
-            snap.stored = parse_inventory(txt);
+/// Shared-store scan data has its own observation status; failed reads retain prior data.
+async fn collect_stored(cfg: &Config, snap: &mut Snapshot, warn: &mut Vec<String>) {
+    let result = kube::get_json(&["get", "cm", "model-inventory", "-n", &cfg.ns, "-o", "json"])
+        .await
+        .and_then(|value| {
+            let text = value["data"]["inventory"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("model-inventory has no inventory data"))?;
+            let rows = checked_inventory(text)?;
+            let capacity = value["data"]["capacity"]
+                .as_str()
+                .and_then(parse_store_capacity);
+            let scanned_at = value["data"]["scanned_at"]
+                .as_str()
+                .and_then(|text| parse_scan_time(text, now_secs()));
+            Ok((rows, capacity, scanned_at))
+        });
+    let status = match result {
+        Ok((rows, capacity, scanned_at)) => {
+            let status = crate::quality::SourceStatus::observed(now_secs(), rows.len(), &[]);
+            snap.stored = rows;
+            snap.store_capacity = capacity;
+            snap.store_scanned_at = scanned_at;
+            status
         }
-        snap.store_capacity = v["data"]["capacity"]
-            .as_str()
-            .and_then(parse_store_capacity);
+        Err(error) => {
+            warn.push(format!("model store: {error}"));
+            crate::quality::SourceStatus::observed(now_secs(), 0, &[error.to_string()])
+        }
+    };
+    snap.sources.insert("model_store".into(), status);
+}
+
+fn parse_scan_time(text: &str, now: u64) -> Option<u64> {
+    text.trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|at| *at > 0 && *at <= now)
+}
+
+fn checked_inventory(text: &str) -> anyhow::Result<Vec<StoredModel>> {
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<_> = line.split('|').map(str::trim).collect();
+        if fields.len() < 6 || fields[0].is_empty() || fields[2].is_empty() || fields[5].is_empty()
+        {
+            anyhow::bail!("invalid model inventory row {}", index + 1);
+        }
     }
+    Ok(parse_inventory(text))
 }
 
 /// Parse the scan's `"<total> <used> <avail>"` byte triple. None when absent or malformed —
@@ -2108,10 +2352,12 @@ async fn collect_stored(cfg: &Config, snap: &mut Snapshot) {
 fn parse_store_capacity(txt: &str) -> Option<StoreCapacity> {
     let mut it = txt.split_whitespace();
     let (t, u, a) = (it.next()?, it.next()?, it.next()?);
-    let (total_bytes, used_bytes, avail_bytes) =
+    let (total_bytes, used_bytes, avail_bytes): (u64, u64, u64) =
         (t.parse().ok()?, u.parse().ok()?, a.parse().ok()?);
-    // A filesystem reporting zero total is not a filesystem we can say anything useful about.
-    if total_bytes == 0 {
+    // Reserved blocks may make used + available smaller than total. Values larger
+    // than total, overflow or trailing fields cannot describe this scan format.
+    let accounted = used_bytes.checked_add(avail_bytes)?;
+    if total_bytes == 0 || accounted > total_bytes || it.next().is_some() {
         return None;
     }
     Some(StoreCapacity {
@@ -2194,28 +2440,123 @@ fn parse_k8s_ts(s: &str) -> Option<u64> {
     }
 }
 
+/// npu-lora training Jobs → snap.trainings, joined with the trainer's Prometheus metrics by
+/// the `run` label (the Job's `npu-lora/run` label carries the same value).
+async fn collect_trainings(cfg: &Config, snap: &mut Snapshot, warn: &mut Vec<String>) {
+    let jobs = match kube::get_json(&[
+        "get",
+        "jobs",
+        "-n",
+        &cfg.ns,
+        "-l",
+        "app.kubernetes.io/part-of=npu-lora",
+        "-o",
+        "json",
+    ])
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            warn.push(format!("kube npu-lora jobs: {e}"));
+            return;
+        }
+    };
+    let mut metric: BTreeMap<(&str, String), f64> = BTreeMap::new();
+    if snap.prom_ok {
+        const M: [&str; 4] = [
+            "npu_lora_step",
+            "npu_lora_steps_planned",
+            "npu_lora_loss",
+            "npu_lora_tokens_per_second",
+        ];
+        let rs = prom::query_all(&cfg.prom, &M).await;
+        for (m, r) in M.iter().zip(rs) {
+            for sr in r.unwrap_or_default() {
+                metric.insert((m, sr.l("run").to_string()), sr.value);
+            }
+        }
+    }
+    let now = now_secs();
+    for j in jobs["items"].as_array().into_iter().flatten() {
+        let md = &j["metadata"];
+        let st = &j["status"];
+        let run = md["labels"]["npu-lora/run"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let status = if st["succeeded"].as_u64().unwrap_or(0) > 0 {
+            "Complete"
+        } else if st["failed"].as_u64().unwrap_or(0) > 0 {
+            "Failed"
+        } else if st["active"].as_u64().unwrap_or(0) > 0 {
+            "Running"
+        } else {
+            "Pending"
+        };
+        let started = st["startTime"]
+            .as_str()
+            .or(md["creationTimestamp"].as_str())
+            .unwrap_or("");
+        let get = |m: &'static str| metric.get(&(m, run.clone())).copied();
+        snap.trainings.push(TrainRun {
+            job: md["name"].as_str().unwrap_or("").to_string(),
+            model: md["annotations"]["npu-lora/model"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            out: md["annotations"]["npu-lora/out"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            status: status.to_string(),
+            age_secs: parse_k8s_ts(started)
+                .map(|t| now.saturating_sub(t))
+                .unwrap_or(0),
+            step: get("npu_lora_step"),
+            steps_planned: get("npu_lora_steps_planned"),
+            loss: get("npu_lora_loss"),
+            tokens_per_s: get("npu_lora_tokens_per_second"),
+            run,
+        });
+    }
+    snap.trainings.sort_by_key(|t| t.age_secs);
+}
+
 /// 진행/최근 컴파일 Job(`compile-*`)과 프리페치 Job(`prefetch-*`) → snap.compiles. 없으면 빈 값.
 /// 상태·경과·(완료 시)소요 + 활성 Job 은 파드 로그 마지막 줄을 진행 힌트로.
-async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
-    let Ok(v) = kube::get_json(&["get", "jobs", "-n", &cfg.ns, "-o", "json"]).await else {
-        return;
+async fn collect_compiles(cfg: &Config, snap: &mut Snapshot, warn: &mut Vec<String>) {
+    let result = tracked_json(snap, "jobs", &["get", "jobs", "-n", &cfg.ns, "-o", "json"]).await;
+    let v = match result {
+        Ok(value) => value,
+        Err(error) => {
+            warn.push(format!("kube jobs: {error}"));
+            return;
+        }
     };
     let Some(items) = v["items"].as_array() else {
         return;
     };
     let now = now_secs();
     let recorded = crate::history::recorded_ids();
+    let pods = kube::get_json(&["get", "pods", "-n", &cfg.ns, "-o", "json"])
+        .await
+        .ok();
     for j in items {
         let name = j["metadata"]["name"].as_str().unwrap_or("");
         let is_prefetch = name.starts_with("prefetch-");
         if !name.starts_with("compile-") && !is_prefetch {
             continue;
         }
+        let execution_id = crate::history::job_execution_id(&cfg.ns, &j["metadata"]);
         // 이름 = compile-{model}-{target}(target 은 "-rbln-"/"-rngd-" 부터) 또는 prefetch-{model}-hf.
         let (model, target, vendor) = if is_prefetch {
             let rest = name.strip_prefix("prefetch-").unwrap_or(name);
             let rest = rest.strip_suffix("-hf").unwrap_or(rest);
-            (rest.to_string(), "download".to_string(), "prefetch".to_string())
+            (
+                rest.to_string(),
+                "download".to_string(),
+                "prefetch".to_string(),
+            )
         } else {
             let rest = &name["compile-".len()..];
             if let Some(i) = rest.find("-rbln-") {
@@ -2280,44 +2621,58 @@ async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
         // Compile options and source come off the Job's own environment, so history records
         // what was actually built rather than re-deriving it from the name.
         let (options, source) = job_options(j);
-        let pod = snap
-            .pods
-            .iter()
-            .find(|p| p.name.starts_with(name))
-            .map(|p| p.name.clone());
+        let pod = pods
+            .as_ref()
+            .and_then(|v| v["items"].as_array())
+            .and_then(|items| {
+                items.iter().find(|p| {
+                    p["metadata"]["ownerReferences"]
+                        .as_array()
+                        .is_some_and(|owners| {
+                            owners.iter().any(|o| {
+                                o["kind"] == "Job"
+                                    && o["uid"].as_str().is_some()
+                                    && o["uid"] == j["metadata"]["uid"]
+                            })
+                        })
+                })
+            })
+            .and_then(|p| p["metadata"]["name"].as_str())
+            .map(str::to_string);
 
         // Read the log once for any terminal job we have not recorded yet: a failure needs its
         // cause classified before `ttlSecondsAfterFinished` removes the Job, and a *success*
         // needs its toolchain captured — a version skew is only visible against a build that
         // worked. Already-recorded jobs are skipped, so this is not a per-tick cost.
         let terminal = status == "Complete" || status == "Failed";
-        let (failure, toolchain) = if terminal && !recorded.contains(name) {
-            let log = match &pod {
-                Some(p) => kube::log_tail(&cfg.ns, p, 120).await.unwrap_or_default(),
-                None => String::new(),
-            };
-            let tools = crate::diagnose::toolchain(&log);
-            let fail = if status == "Failed" {
-                let exit = match &pod {
-                    Some(p) => kube::pod_exit_code(&cfg.ns, p).await,
-                    None => None,
+        let (failure, toolchain) =
+            if terminal && !execution_id.is_empty() && !recorded.contains(&execution_id) {
+                let log = match &pod {
+                    Some(p) => kube::log_tail(&cfg.ns, p, 120).await.unwrap_or_default(),
+                    None => String::new(),
                 };
-                Some(crate::diagnose::classify(&log, exit))
+                let tools = crate::diagnose::toolchain(&log);
+                let fail = if status == "Failed" {
+                    let exit = match &pod {
+                        Some(p) => kube::pod_exit_code(&cfg.ns, p).await,
+                        None => None,
+                    };
+                    Some(crate::diagnose::classify(&log, exit))
+                } else {
+                    None
+                };
+                (fail, tools)
             } else {
-                None
+                (None, BTreeMap::new())
             };
-            (fail, tools)
-        } else {
-            (None, BTreeMap::new())
-        };
 
         // 진행 힌트: 활성 Job 은 파드 로그 마지막 비어있지 않은 줄. 완료/실패는 상태로 대체.
         let phase = if active {
             match &pod {
                 Some(p) => kube::last_log_line(&cfg.ns, p)
                     .await
-                    .unwrap_or_else(|| "starting…".to_string()),
-                None => "starting…".to_string(),
+                    .unwrap_or_else(|| "progress unavailable (no log observation)".to_string()),
+                None => "progress unavailable (no pod observation)".to_string(),
             }
         } else if status == "Complete" {
             "COMPILE_DONE".to_string()
@@ -2335,6 +2690,8 @@ async fn collect_compiles(cfg: &Config, snap: &mut Snapshot) {
             None
         };
         snap.compiles.push(CompileJob {
+            identity: crate::resource_guard::Identity::read(j),
+            execution_id,
             name: name.to_string(),
             model,
             vendor,
@@ -2462,7 +2819,7 @@ fn record_serving(snap: &Snapshot) {
 
 /// Write a history record for each newly-finished compile Job.
 ///
-/// Deduplicated by Job name, so a Job that stays visible across many ticks is recorded once,
+/// Deduplicated by Job execution identity, so a Job that stays visible across many ticks is recorded once,
 /// and the record outlives the Job itself — which is the whole point.
 fn record_finished_jobs(jobs: &[CompileJob]) {
     let terminal: Vec<&CompileJob> = jobs
@@ -2474,7 +2831,7 @@ fn record_finished_jobs(jobs: &[CompileJob]) {
     }
     let known = crate::history::recorded_ids();
     for j in terminal {
-        if known.contains(&j.name) {
+        if j.execution_id.is_empty() || known.contains(&j.execution_id) {
             continue;
         }
         let ok = j.status == "Complete";
@@ -2485,7 +2842,7 @@ fn record_finished_jobs(jobs: &[CompileJob]) {
             } else {
                 "compile".into()
             },
-            id: j.name.clone(),
+            id: j.execution_id.clone(),
             // Prefer the Job's own MODEL_ID. Falling back to the name means undoing the
             // DNS-safe encoding (`org--name`), or the family key would not match anything.
             model: if j.source.is_empty() {
@@ -2503,7 +2860,11 @@ fn record_finished_jobs(jobs: &[CompileJob]) {
                 crate::history::Outcome::Fail
             },
             duration_secs: j.duration_secs,
-            failure_kind: j.failure.as_ref().map(|f| f.kind.to_string()).unwrap_or_default(),
+            failure_kind: j
+                .failure
+                .as_ref()
+                .map(|f| f.kind.to_string())
+                .unwrap_or_default(),
             detail: j.failure.as_ref().map(|f| f.line()).unwrap_or_default(),
             tps: None,
             ttft_p95: None,
@@ -2588,52 +2949,6 @@ mod compile_progress_tests {
     }
 }
 
-fn match_model(deploy: &str, v_run: &BTreeMap<String, Series>) -> Option<String> {
-    let norm = |s: &str| {
-        s.to_lowercase()
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .collect::<String>()
-    };
-    let dn = norm(deploy);
-    // 가장 "구체적인" 일치를 고른다. 첫 부분일치를 반환하면 BTreeMap 알파벳 순 때문에
-    // 짧은 이름이 항상 이겨, 형제 변형(`x` vs `x-fp8`)의 메트릭이 서로 뒤바뀐다(BUG-05).
-    // 우선순위: 완전일치 > 일치한 키가 긴 것 > (동률이면) 키 이름 순으로 안정 정렬.
-    let mut best: Option<(u8, usize, &String)> = None;
-    for k in v_run.keys() {
-        let kn = norm(k);
-        if kn.is_empty() || !(dn.contains(&kn) || kn.contains(&dn)) {
-            continue;
-        }
-        let rank = (u8::from(kn == dn), kn.len(), k);
-        if best.map(|b| rank > b).unwrap_or(true) {
-            best = Some(rank);
-        }
-    }
-    best.map(|(_, _, k)| k.clone())
-}
-
-fn parse_epp(text: &str) -> Option<EppCfg> {
-    let v: serde_yaml::Value = serde_yaml::from_str(text).ok()?;
-    let prof = &v["schedulingProfiles"][0];
-    let profile = prof["name"].as_str().unwrap_or("default").to_string();
-    let mut scorers = Vec::new();
-    if let Some(plugins) = prof["plugins"].as_sequence() {
-        for p in plugins {
-            let name = p["pluginRef"].as_str().unwrap_or("").to_string();
-            let w = p["weight"].as_f64().unwrap_or(1.0);
-            if !name.is_empty() {
-                scorers.push((name, w));
-            }
-        }
-    }
-    Some(EppCfg {
-        profile,
-        scorers,
-        picker: "max-score-picker (default)".to_string(),
-    })
-}
-
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2692,13 +3007,29 @@ mod tests {
             (
                 "gemma4-rbln",
                 &[
-                    ("host-local-pkgs", "/home/user/.local/lib/python3.10/site-packages", "/home/user/.local/lib/python3.10/site-packages"),
-                    ("host-sys-local-pkgs", "/host-sys-local-pkgs", "/usr/local/lib/python3.10/dist-packages"),
-                    ("host-sys-pkgs", "/host-sys-pkgs", "/usr/lib/python3/dist-packages"),
+                    (
+                        "host-local-pkgs",
+                        "/home/user/.local/lib/python3.10/site-packages",
+                        "/home/user/.local/lib/python3.10/site-packages",
+                    ),
+                    (
+                        "host-sys-local-pkgs",
+                        "/host-sys-local-pkgs",
+                        "/usr/local/lib/python3.10/dist-packages",
+                    ),
+                    (
+                        "host-sys-pkgs",
+                        "/host-sys-pkgs",
+                        "/usr/lib/python3/dist-packages",
+                    ),
                     ("host-libs", "/host-libs", "/usr/lib/x86_64-linux-gnu"),
                     ("host-rbln-lib", "/host-rbln-lib", "/usr/lib"),
                     ("host-rbln-bin", "/host-rbln-bin", "/usr/bin"),
-                    ("model", "/model", "/home/user/rbln-gemma4-26b-a4b-tp4-s8192"),
+                    (
+                        "model",
+                        "/model",
+                        "/home/user/rbln-gemma4-26b-a4b-tp4-s8192",
+                    ),
                     ("shm", "/dev/shm", ""),
                 ],
                 "model",
@@ -2706,11 +3037,19 @@ mod tests {
             (
                 "sw-atom-decode-b1",
                 &[
-                    ("local-pkgs", "/home/user/.local/lib/python3.10/site-packages", "/home/user/.local/lib/python3.10/site-packages"),
+                    (
+                        "local-pkgs",
+                        "/home/user/.local/lib/python3.10/site-packages",
+                        "/home/user/.local/lib/python3.10/site-packages",
+                    ),
                     ("libs", "/host-libs", "/usr/lib/x86_64-linux-gnu"),
                     ("rbln-lib", "/host-rbln-lib", "/usr/lib"),
                     ("rbln-bin", "/host-rbln-bin", "/usr/bin"),
-                    ("app", "/app", "/home/user/workspace/01_pd_disag/rngd_llmd"),
+                    (
+                        "app",
+                        "/app",
+                        "/home/user/workspace/01_pd_disag/rngd_llmd",
+                    ),
                     ("hf", "/hf", "/home/user/.cache/huggingface"),
                     ("dshm", "/dev/shm", "/dev/shm"),
                     ("artifacts", "/artifacts", "/home/user/rbln-llama8b-pd"),
@@ -2722,7 +3061,11 @@ mod tests {
                 "hetero-pd-gateway",
                 &[
                     ("rbln-lib", "/host-rbln-lib", "/usr/lib"),
-                    ("app", "/app", "/home/user/workspace/01_pd_disag/rngd_llmd"),
+                    (
+                        "app",
+                        "/app",
+                        "/home/user/workspace/01_pd_disag/rngd_llmd",
+                    ),
                     ("hf", "/hf", "/home/user/.cache/huggingface"),
                     ("dshm", "/dev/shm", "/dev/shm"),
                     ("cfg", "/cfg", ""),
@@ -2792,7 +3135,10 @@ mod tests {
     #[test]
     fn system_mounts_are_judged_by_where_they_come_from() {
         assert!(is_system_mount("/host-rbln-lib", Some("/usr/lib")));
-        assert!(is_system_mount("/model", Some("/usr/lib/python3/dist-packages")));
+        assert!(is_system_mount(
+            "/model",
+            Some("/usr/lib/python3/dist-packages")
+        ));
         assert!(is_system_mount(
             "/home/user/.local/lib/python3.10/site-packages",
             None
@@ -2826,9 +3172,26 @@ mod tests {
         assert!(parse_store_capacity("").is_none());
         assert!(parse_store_capacity("   \n").is_none());
         // Malformed input must not become a misleading zero-capacity bar.
+        for invalid in [
+            "100 90 20",
+            "100 101 0",
+            "100 0 101",
+            "100 10 90 trailing",
+            "18446744073709551615 18446744073709551615 1",
+            "100 -1 10",
+        ] {
+            assert!(parse_store_capacity(invalid).is_none(), "{invalid}");
+        }
+        assert!(
+            parse_store_capacity("100 40 50").is_some(),
+            "reserved blocks are valid"
+        );
         assert!(parse_store_capacity("1 2").is_none(), "too few fields");
         assert!(parse_store_capacity("a b c").is_none(), "non-numeric");
-        assert!(parse_store_capacity("0 0 0").is_none(), "zero total says nothing");
+        assert!(
+            parse_store_capacity("0 0 0").is_none(),
+            "zero total says nothing"
+        );
     }
 
     /// A full store must not divide by zero, and a store with no reserved blocks must read 100%.
@@ -2898,58 +3261,7 @@ meta-llama/L | main | hf | - | 16G | hub/models--meta-llama--L/snapshots/abc/ | 
     #[test]
     fn to_gb_handles_missing() {
         assert_eq!(to_gb(2.0e9), 2.0);
-        assert_eq!(to_gb(f64::NAN), 0.0); // NaN → 0
-    }
-
-    #[test]
-    fn match_model_fuzzy() {
-        let mut m: BTreeMap<String, Series> = BTreeMap::new();
-        m.insert(
-            "koni-llama3.1-8b".into(),
-            Series {
-                labels: BTreeMap::new(),
-                value: 1.0,
-            },
-        );
-        // 비영숫자 무시 매칭: "koni-llama31-8b-rbln" ⊃ "konillama318b"
-        assert_eq!(
-            match_model("koni-llama31-8b-rbln", &m).as_deref(),
-            Some("koni-llama3.1-8b")
-        );
-        assert_eq!(match_model("totally-different", &m), None);
-    }
-
-    #[test]
-    fn match_model_prefers_most_specific_sibling() {
-        // BUG-05 회귀: `x` 와 `x-fp8` 을 동시 서빙할 때 각 배포가 자기 메트릭을 받아야 한다.
-        let mut m: BTreeMap<String, Series> = BTreeMap::new();
-        for k in ["qwen3-4b", "qwen3-4b-fp8"] {
-            m.insert(
-                k.into(),
-                Series {
-                    labels: BTreeMap::new(),
-                    value: 1.0,
-                },
-            );
-        }
-        assert_eq!(match_model("qwen3-4b-fp8", &m).as_deref(), Some("qwen3-4b-fp8"));
-        assert_eq!(match_model("qwen3-4b", &m).as_deref(), Some("qwen3-4b"));
-        // 접두 배포명(서빙 래퍼)도 자기 변형으로 붙어야 한다.
-        assert_eq!(
-            match_model("serve-qwen3-4b-fp8", &m).as_deref(),
-            Some("qwen3-4b-fp8")
-        );
-    }
-
-    #[test]
-    fn parse_epp_scorers() {
-        let yaml = "schedulingProfiles:\n  - name: default\n    plugins:\n      - pluginRef: kv-cache-scorer\n        weight: 2\n      - pluginRef: queue-scorer\n        weight: 1\n";
-        let cfg = parse_epp(yaml).expect("parses");
-        assert_eq!(cfg.profile, "default");
-        assert_eq!(cfg.scorers.len(), 2);
-        assert_eq!(cfg.scorers[0], ("kv-cache-scorer".to_string(), 2.0));
-        // 프로파일 없는 입력은 graceful — scorers 빈 EppCfg.
-        assert_eq!(parse_epp("42").map(|c| c.scorers.len()), Some(0));
+        assert!(to_gb(f64::NAN).is_nan()); // Missing must never become measured zero
     }
 
     #[test]
@@ -2963,5 +3275,158 @@ meta-llama/L | main | hf | - | 16G | hub/models--meta-llama--L/snapshots/abc/ | 
         });
         let c = model_container(&spec);
         assert_eq!(c["name"].as_str(), Some("server"));
+    }
+}
+
+#[cfg(test)]
+mod node_list_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn malformed_node_list_is_not_a_successful_empty_observation() {
+        for value in [
+            json!({}),
+            json!({"items":null}),
+            json!({"items":[{}]}),
+            json!({"items":[{"metadata":{"name":"a"}},{"metadata":{"name":"a"}}]}),
+        ] {
+            assert!(parse_node_list(&value).is_err());
+        }
+        let (addresses, nodes) = parse_node_list(&json!({"items":[]})).unwrap();
+        assert!(addresses.is_empty() && nodes.is_empty());
+    }
+    #[test]
+    fn node_observation_retains_identity_and_scheduling_conditions() {
+        let value = json!({"items":[{"metadata":{"name":"worker","uid":"uid-1","resourceVersion":"42"},
+            "spec":{"unschedulable":true},"status":{"conditions":[{"type":"Ready","status":"True"}],
+            "addresses":[{"type":"InternalIP","address":"192.0.2.2"}]}}]});
+        let (addresses, nodes) = parse_node_list(&value).unwrap();
+        assert_eq!(addresses["192.0.2.2"], "worker");
+        let node = &nodes["worker"];
+        assert!(node.0 && node.1);
+        assert_eq!(node.4.as_ref().unwrap().uid, "uid-1");
+        assert_eq!(node.4.as_ref().unwrap().version, "42");
+    }
+}
+
+#[cfg(test)]
+mod resource_list_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn endpoint_query_failure_and_successful_empty_have_different_quality() {
+        let (_, failed) =
+            endpoint_observation(Err(anyhow::anyhow!("offline")), "pod", "score", false);
+        let (_, empty) = endpoint_observation(Ok(vec![]), "pod", "score", false);
+        assert_eq!(failed.state(now_secs(), 30), crate::quality::Quality::Error);
+        assert_eq!(empty.state(now_secs(), 30), crate::quality::Quality::Empty);
+    }
+    #[test]
+    fn endpoint_metric_collisions_do_not_choose_arbitrary_series() {
+        let series = |pod: &str, value| Series {
+            labels: [("pod".into(), pod.into())].into(),
+            value,
+        };
+        let mut warnings = Vec::new();
+        let values = unique_endpoint_metrics(
+            &[
+                series("ambiguous", 1.0),
+                series("ambiguous", 2.0),
+                series("invalid", f64::NAN),
+                series("valid", 0.0),
+            ],
+            "pod",
+            "queue",
+            true,
+            &mut warnings,
+        );
+        assert_eq!(values, vec![("valid".into(), 0.0)]);
+        assert_eq!(warnings.len(), 2);
+    }
+    #[test]
+    fn scan_time_rejects_unknown_and_future_observations() {
+        for text in ["", "bad", "0", "101", "-1"] {
+            assert_eq!(parse_scan_time(text, 100), None);
+        }
+        assert_eq!(parse_scan_time(" 90\n", 100), Some(90));
+    }
+    #[test]
+    fn malformed_inventory_does_not_silently_drop_models() {
+        assert!(checked_inventory("").unwrap().is_empty());
+        assert!(checked_inventory("# scan header\n").unwrap().is_empty());
+        assert_eq!(
+            checked_inventory("org/model | rev | rbln | tp1 | 1G | compiled/model")
+                .unwrap()
+                .len(),
+            1
+        );
+        for bad in [
+            "partial row",
+            "org/model | rev | rbln | tp1 | 1G | ",
+            " | rev | rbln | tp1 | 1G | path",
+        ] {
+            assert!(checked_inventory(bad).is_err());
+        }
+    }
+    #[test]
+    fn resource_lists_distinguish_bad_payloads_from_empty_and_namespaced_lists() {
+        for value in [
+            json!({"kind":"Status","status":"Failure"}),
+            json!({"items":{}}),
+            json!({"items":[null]}),
+            json!({"items":[{"metadata":{"name":""}}]}),
+            json!({"items":[{"metadata":{"name":"same"}},{"metadata":{"name":"same"}}]}),
+        ] {
+            assert!(validate_resource_list(&value).is_err());
+        }
+        assert!(validate_resource_list(&json!({"items":[]})).is_ok());
+        assert!(validate_resource_list(&json!({"items":[
+            {"metadata":{"name":"same","namespace":"a"}},
+            {"metadata":{"name":"same","namespace":"b"}}
+        ]}))
+        .is_ok());
+    }
+}
+
+#[cfg(test)]
+mod epp_identity_tests {
+    use super::*;
+    #[test]
+    fn scrape_target_pod_does_not_replace_endpoint_identity() {
+        let samples = ["model-a", "model-b"]
+            .into_iter()
+            .map(|pod| Series {
+                labels: BTreeMap::from([
+                    ("pod".into(), "epp-worker".into()),
+                    ("exported_pod".into(), pod.into()),
+                ]),
+                value: 0.5,
+            })
+            .collect();
+        let (values, status) =
+            endpoint_observation(Ok(normalize_score_identity(samples)), "pod", "score", false);
+        assert_eq!(values, [("model-a".into(), 0.5), ("model-b".into(), 0.5)]);
+        assert!(status.error.is_none());
+        let original = Series {
+            labels: BTreeMap::from([("pod".into(), "native-model".into())]),
+            value: 0.0,
+        };
+        assert_eq!(
+            normalize_score_identity(vec![original])[0].l("pod"),
+            "native-model"
+        );
+    }
+    #[test]
+    fn endpoint_namespace_prefers_exported_identity_and_pool_uses_scrape_scope() {
+        assert_eq!(epp_endpoint_selector("metric", "tenant-a"), "(metric{exported_namespace=\"tenant-a\"} or metric{exported_namespace=\"\",namespace=\"tenant-a\"})");
+        assert_eq!(
+            epp_scrape_selector("pool", "tenant-a"),
+            "pool{namespace=\"tenant-a\"}"
+        );
+        assert_ne!(
+            epp_endpoint_selector("metric", "tenant-a"),
+            epp_endpoint_selector("metric", "tenant-b")
+        );
+        assert!(!epp_endpoint_selector("metric", "bad\"\n").contains('\n'));
     }
 }

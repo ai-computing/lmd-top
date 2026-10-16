@@ -7,6 +7,48 @@ use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 /// NPU 컴파일 옵션 편집 폼 오버레이 — ↑↓ 필드, ←→ 프리셋, e 커스텀 입력, Enter 매니페스트.
 /// 선택 인프라 대비 메모리 적합성(OOM/tight)과 조정 제안을 실시간 표시.
+fn render_form(
+    f: &mut Frame,
+    area: Rect,
+    lines: Vec<Line<'_>>,
+    title: &str,
+    active_line: usize,
+    app: &App,
+) {
+    let visible = area.height.saturating_sub(2) as usize;
+    let width = area.width.saturating_sub(2).max(1);
+    let wrap = Wrap { trim: false };
+    let active = active_line.min(lines.len());
+    let preceding_rows = if active == 0 {
+        0
+    } else {
+        Paragraph::new(lines[..active].to_vec())
+            .wrap(wrap)
+            .line_count(width)
+    };
+    let field_rows = lines.get(active).map_or(1, |line| {
+        Paragraph::new(line.clone()).wrap(wrap).line_count(width)
+    });
+    let automatic = preceding_rows.saturating_sub(visible.saturating_sub(field_rows.min(visible)));
+    let paragraph = Paragraph::new(lines).wrap(wrap);
+    let max_scroll = paragraph
+        .line_count(width)
+        .saturating_sub(visible)
+        .min(u16::MAX as usize) as u16;
+    let scroll = app
+        .form_scroll
+        .get()
+        .unwrap_or(automatic.min(u16::MAX as usize) as u16)
+        .min(max_scroll);
+    app.form_view_position.set(scroll);
+    // Viewport-only state: clamp after resize so PageUp immediately moves from End.
+    if app.form_scroll.get().is_some() {
+        app.form_scroll.set(Some(scroll));
+    }
+    let title = format!("{title} · PgUp/PgDn scroll");
+    f.render_widget(paragraph.scroll((scroll, 0)).block(block(&title)), area);
+}
+
 pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
     let Some(form) = &app.compile_form else {
         return;
@@ -68,6 +110,7 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
         lines.push(Line::from(Span::styled(txt, Style::default().fg(C_OK()))));
     }
     lines.push(Line::from(""));
+    let active_line = lines.len() + form.cursor;
     for (i, fld) in form.fields.iter().enumerate() {
         let active = i == form.cursor;
         lines.push(choice_row(fld, active, active && form.editing));
@@ -134,10 +177,7 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
                 best.options_line(),
                 Style::default().fg(C_OK()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("  ({})", best.reason),
-                Style::default().fg(C_DIM()),
-            ),
+            Span::styled(format!("  ({})", best.reason), Style::default().fg(C_DIM())),
         ]));
     }
     // A dependency skew known to break this vendor's compiler outranks any option advice —
@@ -183,7 +223,11 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
     lines.push(Line::from(Span::styled(
         format!(
             "  preflight {}",
-            if pf_ok { "● ready" } else { "✗ blocked" }
+            if pf_ok {
+                "configuration checks passed; runtime unverified"
+            } else {
+                "review failed checks below"
+            }
         ),
         Style::default()
             .fg(if pf_ok { C_OK() } else { C_BAD() })
@@ -215,7 +259,7 @@ pub(super) fn compile_form_overlay(f: &mut Frame, app: &App) {
             form.vendor
         )
     };
-    f.render_widget(Paragraph::new(lines).block(block(&title)), area);
+    render_form(f, area, lines, &title, active_line, app);
 }
 
 /// Prefetch(zoo 다운로드) 대상 저장소 선택 폼 오버레이.
@@ -248,9 +292,13 @@ pub(super) fn prefetch_form_overlay(f: &mut Frame, app: &App) {
     lines.push(Line::from(vec![
         Span::styled("  saves to ", Style::default().fg(C_DIM())),
         Span::styled(dest, Style::default().fg(C_ACC())),
-        Span::styled("  (HF cache; reused by compile/serve)", Style::default().fg(C_DIM())),
+        Span::styled(
+            "  (HF cache; reused by compile/serve)",
+            Style::default().fg(C_DIM()),
+        ),
     ]));
     lines.push(Line::from(""));
+    let active_line = lines.len() + form.cursor;
     for (i, fld) in form.fields.iter().enumerate() {
         let active = i == form.cursor;
         lines.push(choice_row(fld, active, active && form.editing));
@@ -267,7 +315,7 @@ pub(super) fn prefetch_form_overlay(f: &mut Frame, app: &App) {
     } else {
         "prefetch (download) · ↑↓ field · ←→ value · e edit · Enter→confirm · q cancel".to_string()
     };
-    f.render_widget(Paragraph::new(lines).block(block(&title)), area);
+    render_form(f, area, lines, &title, active_line, app);
 }
 
 /// Deploy options form overlay.
@@ -306,6 +354,7 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
     ]));
     lines.push(Line::from(""));
     lines.push(section("settings  (↑↓ field · ←→ value · e edit)"));
+    let active_line = lines.len() + form.cursor;
     for (i, fld) in form.fields.iter().enumerate() {
         let active = i == form.cursor;
         lines.push(choice_row(fld, active, active && form.editing));
@@ -337,18 +386,22 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
             Style::default().fg(vcol).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(
-                "   demand {} dev   free {}{} / {} over {} node",
-                fit.demand,
-                fit.free,
-                if fit.metric_free != fit.free {
-                    format!(" (idle {})", fit.metric_free)
-                } else {
-                    String::new()
-                },
-                fit.total,
-                fit.nodes
-            ),
+            if !fit.input_valid {
+                "   demand — (check replicas/devices)".to_string()
+            } else {
+                format!(
+                    "   demand {} dev   free {}{} / {} over {} node",
+                    fit.demand,
+                    fit.free,
+                    if fit.metric_free != fit.free {
+                        format!(" (idle {})", fit.metric_free)
+                    } else {
+                        String::new()
+                    },
+                    fit.total,
+                    fit.nodes
+                )
+            },
             Style::default().fg(C_DIM()),
         ),
     ]));
@@ -372,12 +425,12 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
             Style::default().fg(C_ACC()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "(checks likely apply failures) ",
+            "(configuration/resource checks) ",
             Style::default().fg(C_DIM()),
         ),
         Span::styled(
             if pf_ok {
-                "● passed — apply ready"
+                "configuration checks passed; runtime unverified"
             } else {
                 "✗ resolve failed checks below"
             },
@@ -408,9 +461,9 @@ pub(super) fn deploy_form_overlay(f: &mut Frame, app: &App) {
     } else if pf_ok {
         "deploy · ↑↓ field · ←→ value · e edit · Enter→placement · q cancel".to_string()
     } else {
-        "deploy · preflight has failures · Enter→placement anyway · q cancel".to_string()
+        "deploy · review preflight · Enter→placement · q cancel".to_string()
     };
-    f.render_widget(Paragraph::new(lines).block(block(&title)), area);
+    render_form(f, area, lines, &title, active_line, app);
 }
 
 /// Route edit form — rename path text or retarget backend.
@@ -767,6 +820,7 @@ pub(super) fn objective_form_overlay(f: &mut Frame, app: &App) {
         ),
     ]));
     lines.push(Line::from(""));
+    let active_line = lines.len() + form.cursor;
     for (i, fld) in form.fields.iter().enumerate() {
         let active = i == form.cursor;
         lines.push(choice_row(fld, active, active && form.editing));
@@ -783,7 +837,7 @@ pub(super) fn objective_form_overlay(f: &mut Frame, app: &App) {
     } else {
         "objective (SLO) · ↑↓ row · ←→ pick · e custom · Enter save · q cancel".to_string()
     };
-    f.render_widget(Paragraph::new(lines).block(block(&title)), area);
+    render_form(f, area, lines, &title, active_line, app);
 }
 
 /// 파라미터 수 표시 — 정수면 정수, 소수면 한 자리(예: 8, 1.5, 0.5).
@@ -858,7 +912,10 @@ pub(super) fn place_picker_overlay(f: &mut Frame, app: &App) {
         if info_picker {
             format!("  {:<24} {}", name_hdr, "DETAIL")
         } else {
-            format!("  {:<20} {:>7}  {:>5}  {:>13}  {}", name_hdr, "FREE", "UTIL", "MEM(GB)", "STATUS")
+            format!(
+                "  {:<20} {:>7}  {:>5}  {:>13}  {}",
+                name_hdr, "FREE", "UTIL", "MEM(GB)", "STATUS"
+            )
         },
         Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
     )));
@@ -925,7 +982,11 @@ pub(super) fn place_picker_overlay(f: &mut Frame, app: &App) {
                 } else {
                     format!("{:.0}%", r.util)
                 },
-                format!("{:.0}/{:.0}", r.mem_used, r.mem_total),
+                if r.mem_used.is_finite() && r.mem_total.is_finite() {
+                    format!("{:.0}/{:.0}", r.mem_used, r.mem_total)
+                } else {
+                    "–/–".into()
+                },
                 st,
                 sc,
             )
@@ -937,7 +998,11 @@ pub(super) fn place_picker_overlay(f: &mut Frame, app: &App) {
                 } else {
                     format!("{:.0}%", r.util)
                 },
-                format!("{:.0}/{:.0}", r.mem_used, r.mem_total),
+                if r.mem_used.is_finite() && r.mem_total.is_finite() {
+                    format!("{:.0}/{:.0}", r.mem_used, r.mem_total)
+                } else {
+                    "–/–".into()
+                },
                 format!("✗ {}", r.note),
                 C_BAD(),
             )
@@ -953,7 +1018,11 @@ pub(super) fn place_picker_overlay(f: &mut Frame, app: &App) {
             ),
             Span::styled(
                 format!("{:>7}  ", free_s),
-                Style::default().fg(if r.free > 0 { C_OK() } else { C_DIM() }),
+                Style::default().fg(if r.schedulable && r.free > 0 {
+                    C_OK()
+                } else {
+                    C_DIM()
+                }),
             ),
             Span::styled(format!("{:>5}  ", util_s), Style::default().fg(C_DIM())),
             Span::styled(format!("{:>13}  ", mem_s), Style::default().fg(C_DIM())),
@@ -1021,7 +1090,129 @@ pub(super) fn secret_form_overlay(f: &mut Frame, app: &App) {
         Style::default().fg(C_DIM()),
     )));
     f.render_widget(
-        Paragraph::new(lines).block(block("enter secret · type/paste · Enter store · Esc cancel")),
+        Paragraph::new(lines).block(block(
+            "enter secret · type/paste · Enter store · Esc cancel",
+        )),
         area,
     );
+}
+
+pub(super) fn policy_form_overlay(f: &mut Frame, app: &App) {
+    let Some(form) = &app.policy_form else { return };
+    let area = centered(
+        f.area(),
+        100,
+        (form.fields.len() as u16 + 11).min(f.area().height),
+    );
+    f.render_widget(Clear, area);
+    let mut lines = vec![
+        Line::from("  Routing policy · read-only plan, then admin review/apply"),
+        Line::from(""),
+    ];
+    for (i, field) in form.fields.iter().enumerate() {
+        lines.push(choice_row(
+            field,
+            i == form.cursor,
+            form.editing && i == form.cursor,
+        ));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        "  Starter: lmd-top --policy init --workspace ./my-policy",
+    ));
+    lines.push(Line::from(
+        "  Developer loop: --policy test / replay / build --workspace ./my-policy",
+    ));
+    lines.push(Line::from(
+        "  Edit policy.yaml targets, image and measured capacity before preview.",
+    ));
+    lines.push(Line::from(
+        "  Previous ConfigMap is retained for Deployment rollback.",
+    ));
+    let title = if form.editing {
+        "policy · TYPING · Enter finish"
+    } else {
+        "policy · ↑↓ field · e edit · Enter load/preview · q cancel"
+    };
+    f.render_widget(Paragraph::new(lines).block(block(title)), area);
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn wrapped_form_details_and_active_field_remain_reachable() {
+        let _guard = crate::ui::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let app = App::new();
+        let mut terminal = Terminal::new(TestBackend::new(24, 8)).unwrap();
+        let lines = || {
+            vec![
+            Line::from("A long diagnostic explaining missing capacity and unavailable metrics across several lines."),
+            Line::from("selected field"),
+            Line::from("사전 점검 결과를 모두 확인하고 마지막 안내도 읽습니다. FINAL"),
+        ]
+        };
+        terminal
+            .draw(|f| render_form(f, f.area(), lines(), "form", 1, &app))
+            .unwrap();
+        let text = |t: &Terminal<TestBackend>| {
+            t.backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        };
+        assert!(text(&terminal).contains("selected field"));
+        app.form_scroll.set(Some(u16::MAX));
+        terminal
+            .draw(|f| render_form(f, f.area(), lines(), "form", 1, &app))
+            .unwrap();
+        assert!(text(&terminal).contains("FINAL"));
+        assert!(app.form_view_position.get() > 0);
+    }
+
+    #[test]
+    fn form_details_reach_end_and_clamp_after_resize() {
+        let _guard = crate::ui::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let app = App::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        let lines = || (0..40).map(|n| Line::from(format!("check {n}"))).collect();
+        app.form_scroll.set(Some(u16::MAX));
+        terminal
+            .draw(|f| render_form(f, f.area(), lines(), "preflight", 3, &app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("check 39"));
+        assert_eq!(app.form_scroll.get(), Some(30));
+        app.form_scroll
+            .set(Some(app.form_view_position.get().saturating_sub(10)));
+        terminal
+            .draw(|f| render_form(f, f.area(), lines(), "preflight", 3, &app))
+            .unwrap();
+        assert_eq!(app.form_view_position.get(), 20);
+        app.form_scroll.set(None);
+        terminal
+            .draw(|f| render_form(f, f.area(), lines(), "preflight", 3, &app))
+            .unwrap();
+        assert_eq!(app.form_view_position.get(), 0);
+        app.form_scroll.set(Some(u16::MAX));
+        let mut taller = Terminal::new(TestBackend::new(80, 60)).unwrap();
+        taller
+            .draw(|f| render_form(f, f.area(), lines(), "preflight", 3, &app))
+            .unwrap();
+        assert_eq!(app.form_scroll.get(), Some(0));
+    }
 }

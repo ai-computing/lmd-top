@@ -76,13 +76,18 @@ fn job_name(deployment: &str) -> String {
 const PROBE_SCRIPT: &str = r#"set -u
 echo "path: $DIR"
 if [ ! -d "$DIR" ]; then echo "MISSING: not a directory on this node"; exit 0; fi
+if [ -f "$DIR/lmd-build.json" ]; then
+  echo "lmd-top build provenance (recorded facts; compatibility not established):"
+  head -c 65536 "$DIR/lmd-build.json"
+  echo
+fi
 echo "files:"
 ls -la "$DIR" 2>/dev/null | head -20
 echo
 
 read_rbln() {
   f=$1
-  v=$(grep -o '"optimum_rbln_version"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null       | head -1 | sed 's/.*"\([^"]*\)"$//')
+  v=$(grep -o '"optimum_rbln_version"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null       | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
   echo "built_with: optimum-rbln=${v:-unknown}   ($f)"
   grep -o '"cls_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null | head -1
   grep -o '"dtype"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null | head -1
@@ -189,6 +194,32 @@ pub fn provenance_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_reads_vendor_version_and_build_metadata() {
+        let root = std::env::temp_dir().join(format!("lmd-provenance-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("rbln_config.json"),
+            r#"{"optimum_rbln_version":"0.10.3"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("lmd-build.json"),
+            r#"{"schema":"lmd-top/build/v2","compatibility":"unknown"}"#,
+        )
+        .unwrap();
+        let output = std::process::Command::new("sh")
+            .args(["-c", PROBE_SCRIPT])
+            .env("DIR", &root)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("optimum-rbln=0.10.3"), "{text}");
+        assert!(text.contains("lmd-top/build/v2"), "{text}");
+        assert!(!text.contains('\u{1}'));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn job_of(m: &Manifest) -> serde_yaml::Value {
         let y = m.to_yaml();
@@ -302,7 +333,14 @@ mod tests {
             "the fxb manifest is at the end of the file"
         );
         assert!(
-            !PROBE_SCRIPT.contains("head -c"),
+            !PROBE_SCRIPT
+                .split("read_fxb() {")
+                .nth(1)
+                .unwrap()
+                .split("\n}")
+                .next()
+                .unwrap()
+                .contains("head -c"),
             "a bounded head read returns nothing for an fxb"
         );
         // Disaggregated builds keep the config one level down, so a top-level-only probe

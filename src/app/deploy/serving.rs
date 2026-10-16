@@ -269,10 +269,13 @@ fn rbln(form: &DeployForm, plan: &ServePlan, images: &Images) -> Vendor {
         ("host-rbln-bin", "/usr/bin", "/host-rbln-bin"),
     ];
     let cm_name = format!("{}-serve-script", plan.name);
-    let mut volumes = vec![store_volume(), ymap! {
-        "name" => s("script"),
-        "configMap" => ymap! { "name" => s(cm_name.clone()) },
-    }];
+    let mut volumes = vec![
+        store_volume(),
+        ymap! {
+            "name" => s("script"),
+            "configMap" => ymap! { "name" => s(cm_name.clone()) },
+        },
+    ];
     volumes.extend(host.iter().map(|(name, path, _)| {
         ymap! {
             "name" => s(*name),

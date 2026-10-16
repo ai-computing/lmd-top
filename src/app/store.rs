@@ -43,11 +43,15 @@ impl App {
         }
         let m = crate::store::delete_manifest(&self.ns, &self.store_pvc(), &path, &sel.size);
         self.preview = Some((
-            format!("delete {} [{}] · {} — review, then a", sel.repo, sel.compiled_for, sel.size),
+            format!(
+                "delete {} [{}] · {} — review, then a",
+                sel.repo, sel.compiled_for, sel.size
+            ),
             m.to_yaml(),
         ));
         self.preview_scroll = 0;
         self.preview_apply = true;
+        self.preview_required = crate::app::Mode::Danger;
     }
 
     /// Open the move form with the current path as the starting value.
@@ -96,6 +100,7 @@ impl App {
         ));
         self.preview_scroll = 0;
         self.preview_apply = true;
+        self.preview_required = crate::app::Mode::Admin;
     }
 }
 
@@ -208,7 +213,10 @@ mod tests {
         );
         a.detail = true;
         let d = screen(&a);
-        assert!(d.contains("built-with"), "detail panel needs a built-with row");
+        assert!(
+            d.contains("built-with"),
+            "detail panel needs a built-with row"
+        );
         assert!(d.contains("optimum-rbln=0.10.2"), "with the value");
     }
 
@@ -243,14 +251,20 @@ mod tests {
             s
         };
         let screen = render(&a);
-        assert!(screen.contains("46T free"), "free space missing from Library");
+        assert!(
+            screen.contains("46T free"),
+            "free space missing from Library"
+        );
         assert!(screen.contains("52T"), "total missing");
         assert!(screen.contains("12% used"), "used share missing");
 
         // An unmeasured store must simply omit the figures, not print zeros.
         a.snap.store_capacity = None;
         let bare = render(&a);
-        assert!(!bare.contains("free"), "must not invent a figure when unmeasured");
+        assert!(
+            !bare.contains("free"),
+            "must not invent a figure when unmeasured"
+        );
     }
 
     /// A build whose provenance the scan could not read must say so, not show a blank.
@@ -276,7 +290,11 @@ mod tests {
                 }
             }
         }
-        assert!(s.contains("unknown"), "must say unknown: {}", &s[..s.len().min(400)]);
+        assert!(
+            s.contains("unknown"),
+            "must say unknown: {}",
+            &s[..s.len().min(400)]
+        );
     }
 
     #[test]
@@ -290,9 +308,14 @@ mod tests {
         let (title, yaml) = a.preview.clone().expect("a preview");
         assert!(title.contains("delete"), "{}", title);
         assert!(yaml.contains("kind: Job"), "{}", yaml);
-        assert!(yaml.contains("/mnt/store/compiled/org--name/rbln/tp4"), "{}", yaml);
+        assert!(
+            yaml.contains("/mnt/store/compiled/org--name/rbln/tp4"),
+            "{}",
+            yaml
+        );
         // Applying is the operator's next keystroke, not something that already happened.
         assert!(a.preview_apply);
+        assert_eq!(a.preview_required, crate::app::Mode::Danger);
     }
 
     #[test]
@@ -322,10 +345,18 @@ mod tests {
     fn a_store_row_offers_rescan_alongside_the_destructive_actions() {
         let mut a = app_with_store();
         a.open_action_menu();
-        let menu = a.action_menu.as_ref().expect("an action menu on a store row");
+        let menu = a
+            .action_menu
+            .as_ref()
+            .expect("an action menu on a store row");
         let keys: Vec<char> = menu.items.iter().map(|i| i.key).collect();
         for want in ['V', 'M', 'r'] {
-            assert!(keys.contains(&want), "store row menu is missing {:?}: {:?}", want, keys);
+            assert!(
+                keys.contains(&want),
+                "store row menu is missing {:?}: {:?}",
+                want,
+                keys
+            );
         }
         // Removal is irreversible; a rescan only reads. They must not share a tier.
         let mode_of = |k: char| {
@@ -363,7 +394,14 @@ mod tests {
         a.submit_store_move();
         let (title, yaml) = a.preview.clone().expect("a preview");
         assert!(title.contains("move"), "{}", title);
-        assert!(yaml.contains("compiled/archive/org--name/rbln/tp4"), "{}", yaml);
-        assert!(a.store_form.is_none(), "form closes once the manifest is built");
+        assert!(
+            yaml.contains("compiled/archive/org--name/rbln/tp4"),
+            "{}",
+            yaml
+        );
+        assert!(
+            a.store_form.is_none(),
+            "form closes once the manifest is built"
+        );
     }
 }
