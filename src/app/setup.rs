@@ -20,6 +20,7 @@ pub const GIE_URL: &str =
 /// 전제조건 점검 상태.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CheckState {
+    Unknown, // query failed or prerequisite observation unavailable
     Ok,      // 충족
     Warn,    // 있으나 주의(예: PVC Pending) 또는 선택적 미충족
     Missing, // 필수인데 없음
@@ -27,6 +28,7 @@ pub enum CheckState {
 impl CheckState {
     pub fn glyph(&self) -> &'static str {
         match self {
+            CheckState::Unknown => "?",
             CheckState::Ok => "✓",
             CheckState::Warn => "!",
             CheckState::Missing => "✗",
@@ -45,10 +47,16 @@ impl CheckState {
 /// 각 점검 항목의 조치 종류.
 #[derive(Clone)]
 pub enum SetupFix {
-    None,                               // 조치 불필요(충족) 또는 정보성
-    Apply { title: String, yaml: String }, // lmd-top 생성 매니페스트 → 미리보기 후 a(apply)
-    ApplyUrl { title: String, url: String }, // 상류 릴리스 URL → 확인 후 kubectl apply -f <url>
-    Command(String),                    // 사이트 특화/helm 관리 → 명령만 안내(직접 실행)
+    None, // 조치 불필요(충족) 또는 정보성
+    Apply {
+        title: String,
+        yaml: String,
+    }, // lmd-top 생성 매니페스트 → 미리보기 후 a(apply)
+    ApplyUrl {
+        title: String,
+        url: String,
+    }, // 상류 릴리스 URL → 확인 후 kubectl apply -f <url>
+    Command(String), // 사이트 특화/helm 관리 → 명령만 안내(직접 실행)
     /// Enter a secret in the TUI, masked, and store it. The value never reaches a preview,
     /// the audit log, or kubectl's argv.
     Secret {
@@ -108,13 +116,12 @@ impl App {
             .to_yaml()
     }
 
-    /// 사용 가능한 GatewayClass 중 선택 — cilium 우선(이 클러스터 CNI), 없으면 첫 번째.
+    /// Only a single observed class can be offered without a separate choice.
     fn pick_gateway_class(&self) -> Option<String> {
-        let gcs = &self.snap.setup.gatewayclasses;
-        gcs.iter()
-            .find(|c| c.as_str() == "cilium")
-            .or_else(|| gcs.first())
-            .cloned()
+        match self.snap.setup.gatewayclasses.as_slice() {
+            [class] => Some(class.clone()),
+            _ => None,
+        }
     }
 
     fn gateway_manifest(&self, class: &str) -> String {
@@ -149,8 +156,8 @@ impl App {
             return vec![SetupCheck::new(
                 "Cluster",
                 "kubectl access",
-                CheckState::Missing,
-                "cannot reach the cluster — check your kubeconfig / current-context".into(),
+                CheckState::Unknown,
+                "namespace query unavailable — check connectivity, kubeconfig and read permissions".into(),
                 SetupFix::Command(
                     "kubectl config current-context\nkubectl cluster-info\n# ensure KUBECONFIG points at the target cluster".into(),
                 ),
@@ -249,7 +256,11 @@ impl App {
                 "Gateway",
                 "llm-d-gateway",
                 CheckState::Ok,
-                format!("present in {}", self.ns),
+                format!(
+                    "present in {}; gatewayClassName: {}; readiness and EPP routing not verified",
+                    self.ns,
+                    s.gateway_class.as_deref().unwrap_or("unknown"),
+                ),
                 SetupFix::None,
             )
         } else if !gw_crd {
@@ -271,6 +282,14 @@ impl App {
                     yaml: self.gateway_manifest(&class),
                 },
             )
+        } else if s.gatewayclasses.len() > 1 {
+            SetupCheck::new(
+                "Gateway",
+                "llm-d-gateway",
+                CheckState::Missing,
+                "absent — select a GatewayClass from the rows below, then review the manifest".into(),
+                SetupFix::None,
+            )
         } else {
             SetupCheck::new(
                 "Gateway",
@@ -282,27 +301,20 @@ impl App {
                 ),
             )
         });
-        // Cilium 게이트웨이는 InferencePool 을 HTTPRoute backendRef 로 인식 못함 → EPP 지능형
-        // 스케줄링이 데이터 경로에서 우회(round-robin). 진짜 GIE 라우팅엔 Istio 등 GIE 호환 GW 필요.
-        if s.gateway && s.gatewayclasses.iter().any(|c| c == "cilium") {
-            v.push(SetupCheck::new(
-                "Gateway",
-                "EPP routing (GIE)",
-                CheckState::Warn,
-                "Cilium can't use InferencePool as an HTTPRoute backend — EPP scheduling is bypassed (round-robin)".into(),
-                SetupFix::Command(
-                    "# lmd-top generates standard InferencePool+EPP, but Cilium's GatewayClass doesn't implement\n\
-                     # GIE ext_proc, so intelligent routing is bypassed. For true EPP scheduling use a\n\
-                     # GIE-compatible gateway (Istio) and point the Gateway at it:\n\
-                     #   helm install istio-base istio/base -n istio-system --set defaultRevision=default --create-namespace\n\
-                     #   helm install istiod istio/istiod -n istio-system \\\n\
-                     #     --set pilot.env.ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true --wait\n\
-                     #   then set the Gateway's gatewayClassName to istio.\n\
-                     # ref: https://developer.furiosa.ai/latest/en/cloud_native_toolkit/llm_d.html".into(),
-                ),
-            ));
+        if !s.gateway && gw_crd && s.gatewayclasses.len() > 1 {
+            for class in &s.gatewayclasses {
+                v.push(SetupCheck::new(
+                    "Gateway",
+                    &format!("class: {class}"),
+                    CheckState::Warn,
+                    "candidate for llm-d-gateway; verify controller and inference-extension support before applying".into(),
+                    SetupFix::Apply {
+                        title: format!("create Gateway llm-d-gateway (class {class})"),
+                        yaml: self.gateway_manifest(class),
+                    },
+                ));
+            }
         }
-
         // ── RBAC / EPP ──
         v.push(if s.epp_role_sa && s.epp_role_non_sa {
             SetupCheck::new(
@@ -367,7 +379,7 @@ impl App {
                 "Secrets",
                 "hf-token",
                 CheckState::Ok,
-                "present — gated-model downloads authorized".into(),
+                "present — credential validity and model access not verified".into(),
                 SetupFix::None,
             )
         } else {
@@ -400,7 +412,19 @@ impl App {
                 format!("{} {}/{}", short, used, total)
             })
             .collect();
-        v.push(if acc.is_empty() {
+        let inventory_known = self.snap.sources.get("inventory").is_some_and(|source| {
+            matches!(
+                source.state(
+                    crate::collect::now_secs(),
+                    self.snap.stale_after_secs.max(10)
+                ),
+                crate::quality::Quality::Fresh | crate::quality::Quality::Empty
+            )
+        });
+        v.push(if !inventory_known {
+            SetupCheck::new("Accelerators", "device plugins", CheckState::Unknown,
+                "accelerator inventory unavailable or stale — check data sources and refresh before assessing device plugins".into(), SetupFix::None)
+        } else if acc.is_empty() {
             SetupCheck::new(
                 "Accelerators",
                 "device plugins",
@@ -424,6 +448,23 @@ impl App {
             )
         });
 
+        let probe_fresh = s
+            .checked_at
+            .and_then(|at| crate::collect::now_secs().checked_sub(at))
+            .is_some_and(|age| age <= self.snap.stale_after_secs.max(10));
+        for check in &mut v {
+            if !probe_fresh && check.category != "Accelerators" && check.name != "Prometheus" {
+                check.state = CheckState::Unknown;
+                check.detail = "setup observation stale or time unknown — refresh before choosing a setup action".into();
+                check.fix = SetupFix::None;
+            } else if s.unknown.contains(check.name.as_str())
+                || (check.category == "Gateway" && s.unknown.contains("llm-d-gateway"))
+            {
+                check.state = CheckState::Unknown;
+                check.detail = "query failed or prerequisite unavailable — check API access/read permissions and refresh".into();
+                check.fix = SetupFix::None;
+            }
+        }
         v
     }
 
@@ -468,6 +509,7 @@ impl App {
                 self.preview = Some((title.clone(), yaml.clone()));
                 self.preview_scroll = 0;
                 self.preview_apply = true;
+                self.preview_required = crate::app::Mode::Admin;
             }
             SetupFix::ApplyUrl { title, url } => {
                 if !self.can(Mode::Admin) {
@@ -504,14 +546,116 @@ mod tests {
         let checks = a.setup_checks();
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].name, "kubectl access");
-        assert_eq!(checks[0].state, CheckState::Missing);
+        assert_eq!(checks[0].state, CheckState::Unknown);
         assert!(matches!(checks[0].fix, SetupFix::Command(_)));
+    }
+
+    #[test]
+    fn failed_queries_are_unknown_and_offer_no_install_or_secret_actions() {
+        let mut app = App::new();
+        app.snap.setup.probed = true;
+        app.snap.setup.checked_at = Some(crate::collect::now_secs());
+        let names = [
+            "Gateway API",
+            "Inference Extension",
+            "llm-d-gateway",
+            "EPP shared Roles",
+            "hf-token",
+            "model-store PVC",
+        ];
+        app.snap.setup.unknown.extend(names);
+        let checks = app.setup_checks();
+        for name in names {
+            let check = find(&checks, name);
+            assert_eq!(check.state, CheckState::Unknown, "{name}");
+            assert_eq!(check.state.glyph(), "?");
+            assert!(matches!(check.fix, SetupFix::None), "{name}");
+            assert!(check.detail.contains("query failed"));
+        }
+        app.snap.setup.unknown.clear();
+        assert!(matches!(
+            find(&app.setup_checks(), "Gateway API").fix,
+            SetupFix::ApplyUrl { .. }
+        ));
+    }
+
+    #[test]
+    fn accelerator_setup_requires_fresh_inventory_even_when_old_values_exist() {
+        use crate::quality::SourceStatus;
+        let mut app = App::new();
+        app.snap.setup.probed = true;
+        app.snap.setup.checked_at = Some(crate::collect::now_secs());
+        let now = crate::collect::now_secs();
+        assert_eq!(
+            find(&app.setup_checks(), "device plugins").state,
+            CheckState::Unknown
+        );
+        app.snap
+            .sources
+            .insert("inventory".into(), SourceStatus::observed(now, 0, &[]));
+        assert_eq!(
+            find(&app.setup_checks(), "device plugins").state,
+            CheckState::Warn
+        );
+        app.snap.inventory = vec![("nvidia.com/gpu".into(), 8, 0)];
+        app.snap
+            .sources
+            .insert("inventory".into(), SourceStatus::observed(now, 1, &[]));
+        assert_eq!(
+            find(&app.setup_checks(), "device plugins").state,
+            CheckState::Ok
+        );
+        let failed = SourceStatus::observed(now, 0, &["forbidden".into()])
+            .after(app.snap.sources.get("inventory"));
+        app.snap.sources.insert("inventory".into(), failed);
+        let checks = app.setup_checks();
+        let check = find(&checks, "device plugins");
+        assert_eq!(check.state, CheckState::Unknown);
+        assert!(matches!(check.fix, SetupFix::None));
+        app.snap.sources.insert(
+            "inventory".into(),
+            SourceStatus::observed(
+                now.saturating_sub(app.snap.stale_after_secs.max(10) + 1),
+                1,
+                &[],
+            ),
+        );
+        assert_eq!(
+            find(&app.setup_checks(), "device plugins").state,
+            CheckState::Unknown
+        );
+    }
+
+    #[test]
+    fn aged_or_untrusted_probe_times_cannot_offer_setup_writes() {
+        let mut app = App::new();
+        app.snap.setup.probed = true;
+        let now = crate::collect::now_secs();
+        for checked_at in [
+            None,
+            Some(now.saturating_sub(app.snap.stale_after_secs.max(10) + 1)),
+            Some(now + 60),
+        ] {
+            app.snap.setup.checked_at = checked_at;
+            let checks = app.setup_checks();
+            for name in ["namespace", "Gateway API", "hf-token", "model-store PVC"] {
+                let check = find(&checks, name);
+                assert_eq!(check.state, CheckState::Unknown);
+                assert!(matches!(check.fix, SetupFix::None));
+            }
+        }
+        app.snap.setup.checked_at = Some(now);
+        assert!(matches!(
+            find(&app.setup_checks(), "namespace").fix,
+            SetupFix::Apply { .. }
+        ));
     }
 
     #[test]
     fn bare_cluster_missing_prereqs_have_correct_fixes() {
         let mut a = App::new();
-        a.snap.setup.probed = true; // 클러스터엔 닿지만 아무것도 안 깔림
+        a.snap.setup.probed = true;
+        a.snap.setup.checked_at = Some(crate::collect::now_secs()); // 클러스터엔 닿지만 아무것도 안 깔림
         let v = a.setup_checks();
 
         // namespace 없음 → lmd-top 이 생성 가능(Apply)
@@ -535,25 +679,56 @@ mod tests {
         assert!(matches!(g.fix, SetupFix::None));
 
         // 사이트 특화·helm 관리 → 절대 합성 apply 하지 않고 명령만
-        assert!(matches!(find(&v, "EPP shared Roles").fix, SetupFix::Command(_)));
-        assert!(matches!(find(&v, "model-store PVC").fix, SetupFix::Command(_)));
+        assert!(matches!(
+            find(&v, "EPP shared Roles").fix,
+            SetupFix::Command(_)
+        ));
+        assert!(matches!(
+            find(&v, "model-store PVC").fix,
+            SetupFix::Command(_)
+        ));
         assert!(matches!(find(&v, "hf-token").fix, SetupFix::Secret { .. }));
     }
 
     #[test]
-    fn gateway_apply_prefers_cilium_class_when_crds_present() {
+    fn gateway_reports_its_configured_class_without_inferring_routing_from_installed_classes() {
         let mut a = App::new();
         a.snap.setup.probed = true;
+        a.snap.setup.checked_at = Some(crate::collect::now_secs());
+        a.snap.setup.gateway = true;
+        a.snap.setup.gatewayclasses = vec!["istio".into(), "cilium".into()];
+        for class in [Some("istio"), Some("cilium"), None] {
+            a.snap.setup.gateway_class = class.map(str::to_owned);
+            let checks = a.setup_checks();
+            let gateway = find(&checks, "llm-d-gateway");
+            assert_eq!(gateway.state, CheckState::Ok);
+            assert!(gateway
+                .detail
+                .contains(&format!("gatewayClassName: {}", class.unwrap_or("unknown"))));
+            assert!(gateway.detail.contains("EPP routing not verified"));
+            assert!(!checks.iter().any(|check| check.name == "EPP routing (GIE)"));
+            assert!(matches!(gateway.fix, SetupFix::None));
+        }
+    }
+
+    #[test]
+    fn gateway_apply_uses_the_only_observed_class() {
+        let mut a = App::new();
+        a.snap.setup.probed = true;
+        a.snap.setup.checked_at = Some(crate::collect::now_secs());
         a.snap.setup.crd_gateway = true;
         a.snap.setup.crd_httproute = true;
-        a.snap.setup.gatewayclasses = vec!["istio".into(), "cilium".into()];
+        a.snap.setup.gatewayclasses = vec!["custom-controller".into()];
         a.snap.setup.gateway = false; // Gateway 만 없음
         let v = a.setup_checks();
         let g = find(&v, "llm-d-gateway");
         assert_eq!(g.state, CheckState::Missing);
         match &g.fix {
             SetupFix::Apply { yaml, .. } => {
-                assert!(yaml.contains("gatewayClassName: cilium"), "cilium 우선 선택");
+                assert!(
+                    yaml.contains("gatewayClassName: custom-controller"),
+                    "use the observed class"
+                );
                 assert!(yaml.contains("kind: Gateway"));
             }
             _ => panic!("Gateway fix should be Apply when a GatewayClass exists"),
@@ -561,11 +736,57 @@ mod tests {
     }
 
     #[test]
+    fn multiple_gateway_classes_require_explicit_selection_and_fresh_evidence() {
+        let mut a = App::new();
+        a.snap.setup.probed = true;
+        a.snap.setup.checked_at = Some(crate::collect::now_secs());
+        a.snap.setup.crd_gateway = true;
+        a.snap.setup.crd_httproute = true;
+        a.snap.setup.gatewayclasses = vec!["istio".into(), "cilium".into()];
+        let checks = a.setup_checks();
+        assert!(matches!(find(&checks, "llm-d-gateway").fix, SetupFix::None));
+        for class in ["istio", "cilium"] {
+            a.selected = checks
+                .iter()
+                .position(|c| c.name == format!("class: {class}"))
+                .unwrap();
+            a.setup_enter();
+            let (title, yaml) = a.preview.as_ref().unwrap();
+            assert!(title.contains(class));
+            let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(value["spec"]["gatewayClassName"].as_str(), Some(class));
+            assert!(a.preview_apply);
+            assert_eq!(a.preview_required, Mode::Admin);
+            assert!(a.confirm.is_none());
+        }
+        a.snap.setup.unknown.insert("llm-d-gateway");
+        for check in a.setup_checks().iter().filter(|c| c.category == "Gateway") {
+            assert_eq!(check.state, CheckState::Unknown);
+            assert!(matches!(check.fix, SetupFix::None));
+        }
+        a.snap.setup.unknown.clear();
+        a.snap.setup.checked_at = None;
+        for check in a.setup_checks().iter().filter(|c| c.category == "Gateway") {
+            assert_eq!(check.state, CheckState::Unknown);
+            assert!(matches!(check.fix, SetupFix::None));
+        }
+        a.snap.setup.gateway = true;
+        assert!(!a
+            .setup_checks()
+            .iter()
+            .any(|c| c.name.starts_with("class: ")));
+    }
+
+    #[test]
     fn pvc_pending_is_warn_bound_is_ok() {
         let mut a = App::new();
         a.snap.setup.probed = true;
+        a.snap.setup.checked_at = Some(crate::collect::now_secs());
         a.snap.setup.pvc_model_store = Some("Pending".into());
-        assert_eq!(find(&a.setup_checks(), "model-store PVC").state, CheckState::Warn);
+        assert_eq!(
+            find(&a.setup_checks(), "model-store PVC").state,
+            CheckState::Warn
+        );
         a.snap.setup.pvc_model_store = Some("Bound".into());
         let bound = a.setup_checks();
         let ok = find(&bound, "model-store PVC");

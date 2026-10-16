@@ -6,10 +6,10 @@
 #   RBLN_TENSOR_PARALLEL_SIZE   chip count                      (default 1)
 #   RBLN_MAX_SEQ_LEN            compile-time context length     (default 4096)
 #   RBLN_BATCH_SIZE             static batch size               (default 1)
-#   RBLN_ATTN_IMPL              flash_attn | eager              (default flash_attn)
+#   RBLN_ATTN_IMPL              flash_attn | eager              (default SDK choice)
 #   RBLN_KVCACHE_PARTITION_LEN  flash_attn only                 (default 16384)
+#   RBLN_QUANTIZATION           none | w8a8 | w4a16            (prequantized checkpoint)
 import os
-import shutil
 
 # Report the toolchain before anything else. Compiles here failed for three different models
 # across three parameter sets with the same opaque codegen error, and nothing surfaced that the
@@ -79,6 +79,18 @@ cfg = dict(
     rbln_batch_size=int(get("RBLN_BATCH_SIZE", "1")),
 )
 
+# This describes an already quantized checkpoint; it does not run calibration or
+# quantize ordinary floating-point weights. The installed SDK validates this dict.
+quant = get("RBLN_QUANTIZATION", "none")
+quant_configs = {
+    "w8a8": {"format": "rbln", "weights": "int8", "activations": "int8"},
+    "w4a16": {"format": "rbln", "weights": "int4", "activations": "fp16"},
+}
+if quant != "none":
+    if quant not in quant_configs:
+        raise ValueError(f"Unsupported RBLN_QUANTIZATION {quant!r}; choose none/w8a8/w4a16")
+    cfg["rbln_quantization"] = quant_configs[quant]
+
 # The kwarg naming the chip count differs across optimum-rbln versions: 0.11 takes
 # `rbln_num_devices`, 0.10 takes `rbln_tensor_parallel_size`. Rather than keep a version
 # matrix — which is the thing that keeps going wrong — ask the library: it rejects an
@@ -97,17 +109,22 @@ if attn:
         cfg["rbln_kvcache_partition_len"] = int(get("RBLN_KVCACHE_PARTITION_LEN", "16384"))
 
 # create_runtimes=False: compile without claiming a device, so serving may hold the chips.
+accepted_config = None
+
 def _from_pretrained(config):
     """Compile, choosing the tensor-parallel kwarg this optimum-rbln actually accepts."""
+    global accepted_config
     last = None
     for name in TP_KWARGS:
         attempt = dict(config)
         attempt[name] = tp
         try:
             print(f"RBLN_CONFIG {attempt}", flush=True)
-            return M.from_pretrained(
+            compiled = M.from_pretrained(
                 os.environ["MODEL_ID"], export=True, rbln_create_runtimes=False, **attempt
             )
+            accepted_config = attempt
+            return compiled
         except ValueError as exc:
             # Only a rejection of *this* kwarg justifies trying the next name; any other
             # ValueError is a real problem and must not be masked by a retry.
@@ -141,12 +158,10 @@ except Exception as exc:
 # Build into local scratch first — the shared store is SMB and rejects the compiler's I/O.
 model.save_pretrained(local)
 
-os.makedirs(output, exist_ok=True)
-for entry in os.listdir(local):
-    src = os.path.join(local, entry)
-    dst = os.path.join(output, entry)
-    if os.path.isdir(src):
-        shutil.copytree(src, dst, dirs_exist_ok=True)
-    else:
-        shutil.copy2(src, dst)
-print("COMPILE_DONE", os.listdir(output))
+# Publish from a hidden sibling directory; never merge files into a serving build.
+from importlib.util import spec_from_file_location, module_from_spec
+_spec = spec_from_file_location("lmd_publish", "/scripts/publish-artifact.py")
+_publisher = module_from_spec(_spec)
+_spec.loader.exec_module(_publisher)
+_publisher.publish(local, output, effective_options=accepted_config)
+print("COMPILE_DONE", os.listdir(output), flush=True)

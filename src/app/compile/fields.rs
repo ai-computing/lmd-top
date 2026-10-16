@@ -101,7 +101,7 @@ pub const RBLN_COMPILE_FIELDS: &[CompileFieldDef] = &[
         "quantization",
         "none",
         &["none", "w8a8", "w4a16"],
-        "Weight/activation quantization format (RBLNQuantizationConfig); model support varies.",
+        "Prequantized checkpoint format (RBLNQuantizationConfig); requires compatible quantized weights. Does not quantize floating-point checkpoints.",
     ),
     CompileFieldDef::opt(
         "npu",
@@ -114,6 +114,14 @@ pub const RBLN_COMPILE_FIELDS: &[CompileFieldDef] = &[
 
 /// Compilation option definitions for Furiosa RNGD NPUs.
 pub const FURIOSA_COMPILE_FIELDS: &[CompileFieldDef] = &[
+    CompileFieldDef::num(
+        "concurrency", "compile-workers", "8", &["1", "2", "4", "8", "16"],
+        "Maximum kernel compilations in parallel (fxb --concurrency). Uses host CPU/RAM; independent of inference batch size.",
+    ),
+    CompileFieldDef::opt(
+        "optim", "bucket-optimization", "O3", &["O0", "O1", "O2", "O3"],
+        "FXB bucket filtering: O0 minimal for development; O3 full for production. Passed as --optim-level.",
+    ),
     CompileFieldDef::num(
         "tp",
         "tensor-parallel",
@@ -140,36 +148,33 @@ pub const FURIOSA_COMPILE_FIELDS: &[CompileFieldDef] = &[
         "batch-size",
         "1",
         &["1", "2", "4", "8"],
-        "Prefill/decode bucket batch size (BucketConfig).",
+        "Legacy placeholder: FXB chooses batch buckets from the SDK preset. Overrides are rejected.",
     ),
     CompileFieldDef::num(
         "chunk",
         "prefill-chunk",
         "none",
         &["none", "512", "1024", "2048"],
-        "Chunked prefill chunk size (prefill_chunk_size).",
+        "Legacy placeholder: FXB chooses prefill chunks from the SDK preset. Overrides are rejected.",
     ),
     CompileFieldDef::num(
         "block",
         "kv-block-size",
         "16",
         &["16", "32"],
-        "Tokens per PagedAttention block (paged_attention_block_size).",
+        "Legacy placeholder: 16 is not a forced SDK block size. FXB preset controls it; overrides are rejected.",
     ),
     CompileFieldDef::opt(
         "quant",
         "activation-dq",
         "none",
         &["none", "on"],
-        "use_activation_dq: dynamic activation quantization to reduce memory and improve throughput.",
+        "Legacy placeholder: FXB resolves quantization from the checkpoint/SDK. Overrides are rejected.",
     ),
 ];
 
 /// Construct standard compile fields for the given vendor and model artifact.
-pub fn vendor_compile_fields(
-    vendor: &str,
-    a: &crate::collect::ModelArtifact,
-) -> Vec<CompileField> {
+pub fn vendor_compile_fields(vendor: &str, a: &crate::collect::ModelArtifact) -> Vec<CompileField> {
     let defs = compile_profile(vendor)
         .map(|p| p.fields)
         .unwrap_or(FURIOSA_COMPILE_FIELDS);
@@ -183,6 +188,45 @@ pub fn vendor_compile_fields(
             help: d.help.into(),
         })
         .collect()
+}
+
+/// Reject unknown fields and conflicting aliases before constructing a headless plan.
+pub fn validate_overrides(
+    operation: &str,
+    extras: &[&str],
+    fields: &[CompileField],
+    overrides: &[(String, String)],
+) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for (key, _) in overrides {
+        if extras.contains(&key.as_str()) {
+            if !seen.insert(key.as_str()) {
+                return Err(format!("duplicate {operation} option {key:?}"));
+            }
+            continue;
+        }
+        let field = fields
+            .iter()
+            .find(|f| f.key == *key || f.label == *key)
+            .ok_or_else(|| {
+                format!(
+                    "unknown {operation} option {:?}; available: {}",
+                    key,
+                    fields
+                        .iter()
+                        .map(|f| f.key.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+        if !seen.insert(field.key.as_str()) {
+            return Err(format!(
+                "duplicate {operation} option {:?} (including aliases)",
+                field.key
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Apply user overrides to a list of compile fields.

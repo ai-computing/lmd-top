@@ -96,41 +96,72 @@ pub fn load_zoo() -> Vec<ZooModel> {
 /// `scripts/fetch-zoo.sh` — so it contributes nothing to a live refresh, by design.
 ///
 /// Uses `curl` because lmd-top ships no in-binary TLS (same shell-out ethos as kubectl).
-/// Best-effort per org: a failure returns nothing for that org and leaves the rest, so one
-/// unreachable vendor does not lose the others.
-pub async fn fetch_zoo_live() -> Vec<ZooModel> {
+/// Independent results per org: preserve successful entries and report failures,
+/// so an unreachable vendor never produces a false "up to date" message.
+pub struct ZooRefresh {
+    pub models: Vec<ZooModel>,
+    pub errors: Vec<String>,
+}
+
+impl ZooRefresh {
+    pub fn message(&self, added: usize) -> String {
+        if self.errors.is_empty() {
+            format!("zoo refresh completed — +{added} new models")
+        } else {
+            format!(
+                "zoo refresh incomplete — +{added} new; {}",
+                self.errors.join("; ")
+            )
+        }
+    }
+}
+
+pub async fn fetch_zoo_live() -> ZooRefresh {
     let mut set = tokio::task::JoinSet::new();
     for pack in crate::accel::packs().iter().copied() {
         for org in pack.hf_orgs {
             set.spawn(fetch_hf_org(pack, org));
         }
     }
-    let mut zoo = Vec::new();
+    let mut result = ZooRefresh {
+        models: Vec::new(),
+        errors: Vec::new(),
+    };
     while let Some(joined) = set.join_next().await {
-        if let Ok(models) = joined {
-            zoo.extend(models);
+        match joined {
+            Ok(Ok(models)) => result.models.extend(models),
+            Ok(Err(error)) => result.errors.push(error),
+            Err(error) => result.errors.push(format!("refresh task failed: {error}")),
         }
     }
-    zoo.sort_by_key(|z| z.source.to_lowercase());
-    zoo
+    result.models.sort_by_key(|z| z.source.to_lowercase());
+    result.errors.sort();
+    result
 }
 
-async fn fetch_hf_org(pack: &'static crate::accel::Pack, org: &str) -> Vec<ZooModel> {
-    let url = format!(
-        "https://huggingface.co/api/models?author={}&limit=500",
-        org
-    );
-    let out = match tokio::process::Command::new("curl")
-        .args(["-fsSL", "--max-time", "8", &url])
-        .output()
+async fn fetch_hf_org(
+    pack: &'static crate::accel::Pack,
+    org: &str,
+) -> Result<Vec<ZooModel>, String> {
+    let url = format!("https://huggingface.co/api/models?author={}&limit=500", org);
+    let mut command = tokio::process::Command::new("curl");
+    command.args(["-fsSL", "--max-time", "8", &url]);
+    let out = crate::process::run(command, None, tokio::time::Duration::from_secs(10))
         .await
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-    let Ok(serde_json::Value::Array(arr)) = serde_json::from_slice(&out.stdout) else {
-        return Vec::new();
-    };
+        .map_err(|error| format!("{org}: {error}"))?;
+    if !out.status.success() {
+        return Err(format!("{org}: curl failed ({})", out.status));
+    }
+    parse_hf_org(pack, org, &out.stdout)
+}
+
+fn parse_hf_org(
+    pack: &crate::accel::Pack,
+    org: &str,
+    bytes: &[u8],
+) -> Result<Vec<ZooModel>, String> {
+    let arr: Vec<serde_json::Value> = serde_json::from_slice(bytes)
+        .map_err(|error| format!("{org}: invalid model list: {error}"))?;
     let mut zoo = Vec::new();
     for m in &arr {
         let id = m["id"].as_str().unwrap_or("");
@@ -138,7 +169,7 @@ async fn fetch_hf_org(pack: &'static crate::accel::Pack, org: &str) -> Vec<ZooMo
         // plain HF repo id right here, so a hostile or malformed upstream entry can never reach
         // manifest generation (BUG-06).
         if !crate::quote::valid_model_id(id) {
-            continue;
+            return Err(format!("{org}: invalid model id in response"));
         }
         let role = match m["pipeline_tag"].as_str().unwrap_or("") {
             "text-generation" => "chat",
@@ -156,15 +187,15 @@ async fn fetch_hf_org(pack: &'static crate::accel::Pack, org: &str) -> Vec<ZooMo
             note: format!("{} HF org: {}", pack.display, org),
         });
     }
-    zoo
+    Ok(zoo)
 }
 
 /// Merge live entries into a base list, deduped by `source` (base kept; genuinely new appended).
 pub fn merge_zoo(mut base: Vec<ZooModel>, extra: Vec<ZooModel>) -> Vec<ZooModel> {
-    let have: std::collections::HashSet<String> =
+    let mut have: std::collections::HashSet<String> =
         base.iter().map(|z| z.source.to_lowercase()).collect();
     for z in extra {
-        if !have.contains(&z.source.to_lowercase()) {
+        if have.insert(z.source.to_lowercase()) {
             base.push(z);
         }
     }
@@ -291,5 +322,54 @@ mod live_tests {
         assert_eq!(merged.len(), 2, "case-insensitive dedup by source");
         assert_eq!(merged[0].note, "bundled", "bundled entry wins");
         assert_eq!(merged[1].vendor, "gpu");
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_remote_catalog_is_not_a_successful_empty_refresh() {
+        let pack = crate::accel::packs()[0];
+        for payload in [
+            b"{}".as_slice(),
+            b"null",
+            b"[{}]",
+            br#"[{"id":"bad;command","pipeline_tag":"text-generation"}]"#,
+        ] {
+            assert!(parse_hf_org(pack, "test", payload).is_err());
+        }
+        assert!(parse_hf_org(pack, "test", b"[]").unwrap().is_empty());
+        let failed = ZooRefresh {
+            models: Vec::new(),
+            errors: vec!["test: unavailable".into()],
+        };
+        assert!(failed.message(0).contains("incomplete"));
+        assert!(failed.message(0).contains("unavailable"));
+    }
+
+    #[test]
+    fn partial_refresh_preserves_base_and_deduplicates_remote_results() {
+        let pack = crate::accel::packs()[0];
+        let payload = br#"[{"id":"vendor/new","pipeline_tag":"text-generation"},{"id":"vendor/new","pipeline_tag":"text-generation"},{"id":"vendor/unsupported","pipeline_tag":"image-classification"}]"#;
+        let mut refresh = ZooRefresh {
+            models: parse_hf_org(pack, "vendor", payload).unwrap(),
+            errors: vec!["other: failed".into()],
+        };
+        let base = parse_hf_org(
+            pack,
+            "vendor",
+            br#"[{"id":"vendor/existing","pipeline_tag":"sentence-similarity"}]"#,
+        )
+        .unwrap();
+        let merged = merge_zoo(base, std::mem::take(&mut refresh.models));
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|m| m.source == "vendor/existing"));
+        assert_eq!(
+            merged.iter().filter(|m| m.source == "vendor/new").count(),
+            1
+        );
+        assert!(refresh.message(1).contains("incomplete"));
     }
 }

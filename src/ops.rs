@@ -9,11 +9,11 @@ use crate::app::Mode;
 #[derive(Clone, Debug, PartialEq)]
 pub struct EndpointDecision {
     pub pod: String,
-    pub picks: f64,          // 라우팅 픽 횟수(scheduler attempts) — 관측값
-    pub share: f64,          // 전체 대비 픽 점유율(%)
-    pub queue: Option<f64>,  // per-pod 큐 깊이 — 관측되면 실값
-    pub kv: Option<f64>,     // KV-cache usage score — EPP 노출 대기
-    pub score: Option<f64>,  // 종합 score — EPP 노출 대기
+    pub picks: Option<f64>, // 라우팅 픽 횟수(scheduler attempts) — 관측값
+    pub share: Option<f64>, // 전체 대비 픽 점유율(%)
+    pub queue: Option<f64>, // per-pod 큐 깊이 — 관측되면 실값
+    pub kv: Option<f64>,    // KV-cache usage score — EPP 노출 대기
+    pub score: Option<f64>, // 종합 score — EPP 노출 대기
 }
 
 /// 컴파일 옵션 편집 폼의 필드 하나. NPU 컴파일 파라미터(TP/PP/seq/batch/dtype/quant/npu).
@@ -109,21 +109,47 @@ impl CompileForm {
     pub fn move_cursor(&mut self, dir: i32) {
         ff_move(&mut self.cursor, self.fields.len(), dir);
     }
+    fn preset_controlled(&self) -> bool {
+        self.vendor == "furiosa"
+            && self
+                .fields
+                .get(self.cursor)
+                .is_some_and(|f| matches!(f.key.as_str(), "batch" | "chunk" | "block" | "quant"))
+    }
     pub fn cycle(&mut self, dir: i32) {
+        if self.preset_controlled() {
+            let field = &mut self.fields[self.cursor];
+            field.value = match field.key.as_str() {
+                "batch" => "1",
+                "block" => "16",
+                _ => "none",
+            }
+            .into();
+            return;
+        }
         ff_cycle(&mut self.fields, self.cursor, dir);
     }
     pub fn type_digit(&mut self, ch: char) {
+        if self.preset_controlled() {
+            return;
+        }
         ff_type_digit(&mut self.fields, self.cursor, ch);
     }
     pub fn type_char(&mut self, ch: char) {
+        if self.preset_controlled() {
+            return;
+        }
         ff_type_char(&mut self.fields, self.cursor, ch);
     }
     pub fn backspace(&mut self) {
+        if self.preset_controlled() {
+            return;
+        }
         ff_backspace(&mut self.fields, self.cursor, self.editing);
     }
     /// 컴파일 타깃 문자열 — npu 칩·TP·seq 로부터 산출(디스커버리 레이아웃과 일치).
     /// Name of the compiled build in the shared store — the artifact's identity, so two
-    /// option sets of the same model coexist. Shape comes from the accelerator's compile
+    /// option sets of the same model coexist (all form fields contribute to a stable fingerprint). Shape comes from the accelerator's compile
     /// profile rather than a vendor branch.
     pub fn target(&self) -> String {
         let tp = self.get("tp");
@@ -132,13 +158,17 @@ impl CompileForm {
         let prefix = profile.map(|p| p.target_prefix).unwrap_or("build");
         let chip = profile
             .and_then(|p| p.chip_field)
-            .map(|f| self.get(f).to_lowercase().replace(&format!("{}-", prefix), ""))
+            .map(|f| {
+                self.get(f)
+                    .to_lowercase()
+                    .replace(&format!("{}-", prefix), "")
+            })
             .filter(|c| !c.is_empty());
         let head = match chip {
             Some(c) => format!("{}-{}", prefix, c),
             None => prefix.to_string(),
         };
-        if profile.is_some_and(|p| p.target_has_pp) {
+        let summary = if profile.is_some_and(|p| p.target_has_pp) {
             let pp = self.get("pp");
             format!(
                 "{}-tp{}-pp{}-s{}",
@@ -149,7 +179,18 @@ impl CompileForm {
             )
         } else {
             format!("{}-tp{}-s{}", head, tp, seq)
-        }
+        };
+        let options: std::collections::BTreeMap<_, _> = self
+            .fields
+            .iter()
+            .map(|f| (f.key.as_str(), f.value.as_str()))
+            .collect();
+        let bytes = serde_json::to_vec(&(self.vendor, &self.model_id, options))
+            .expect("string options serialize");
+        let hash = bytes.iter().fold(0xcbf29ce484222325u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
+        });
+        format!("{summary}-{:012x}", hash & 0xffffffffffff)
     }
 }
 
@@ -307,6 +348,7 @@ impl Action {
 /// 라우트 편집 폼 — rename(경로 텍스트) 또는 retarget(백엔드 선택).
 #[derive(Clone)]
 pub struct RouteForm {
+    pub expected: Option<crate::resource_guard::Identity>,
     pub route: String,        // 소속 HTTPRoute 이름
     pub path: String,         // 현재 경로(대상)
     pub rename: bool,         // true=rename(텍스트 편집) · false=retarget(선택)
@@ -453,6 +495,7 @@ impl ActionItem {
 /// Enter 액션 메뉴 오버레이 — 선택 항목에 대해 가능한 동작 목록.
 #[derive(Clone)]
 pub struct ActionMenu {
+    pub route: Option<crate::collect::Route>,
     pub title: String,
     pub subject: String, // 대상 이름(모델/빌드) — 액션 실행 시 참조
     pub items: Vec<ActionItem>,
@@ -523,23 +566,28 @@ impl ObjectiveForm {
 /// 목표 대비 관측 판정 + 데이터기반 조정 제안(값싼 런타임 노브 중심).
 pub struct PerfAdvice {
     pub has_obj: bool,
+    pub unknown: Vec<(&'static str, String)>,
     pub checks: Vec<(&'static str, bool)>, // (지표, 충족?)
     pub tips: Vec<String>,
 }
 impl PerfAdvice {
     pub fn all_met(&self) -> bool {
-        self.has_obj && self.checks.iter().all(|(_, ok)| *ok)
+        self.has_obj
+            && !self.checks.is_empty()
+            && self.unknown.is_empty()
+            && self.checks.iter().all(|(_, ok)| *ok)
     }
 }
 
 /// 배포 용량 판정 — replica×디바이스 총 수요 대비 클러스터 동종 가속기 총량.
 pub struct DeployFit {
-    pub demand: i64,        // replicas × replica당 디바이스
-    pub total: i64,         // 클러스터 동종 디바이스 총 수
-    pub free: i64,          // 스케줄가능 유휴(노드별 총−requests 합, 스케줄러 관점)
-    pub metric_free: i64,   // metric idle(busy_model 비어있음) — 예약됐지만 노는 디바이스 구분용
+    pub input_valid: bool, // false while replicas/devices are incomplete or invalid
+    pub demand: i64,       // replicas × replica당 디바이스
+    pub total: i64,        // 클러스터 동종 디바이스 총 수
+    pub free: i64,         // 스케줄가능 유휴(노드별 총−requests 합, 스케줄러 관점)
+    pub metric_free: i64,  // metric idle(busy_model 비어있음) — 예약됐지만 노는 디바이스 구분용
     pub resource_free: i64, // k8s 리소스 유휴 = allocatable - requested(클러스터 인벤토리 집계)
-    pub nodes: i64,         // 동종 디바이스 보유 노드 수
+    pub nodes: i64,        // 동종 디바이스 보유 노드 수
     pub verdict: FitVerdict,
     pub tips: Vec<String>,
 }
@@ -689,14 +737,27 @@ mod secret_form_tests {
 
     #[test]
     fn never_renders_the_value() {
-        let mut f = SecretForm::new("hf-token", "token", "HuggingFace token", "hf.co/settings/tokens");
+        let mut f = SecretForm::new(
+            "hf-token",
+            "token",
+            "HuggingFace token",
+            "hf.co/settings/tokens",
+        );
         for c in "hf_SECRETvalue123".chars() {
             f.push(c);
         }
         let shown = f.masked();
-        assert!(!shown.contains("hf_"), "masked output leaked the value: {}", shown);
+        assert!(
+            !shown.contains("hf_"),
+            "masked output leaked the value: {}",
+            shown
+        );
         assert!(!shown.contains("SECRET"));
-        assert_eq!(shown.chars().count(), 17, "length is shown, characters are not");
+        assert_eq!(
+            shown.chars().count(),
+            17,
+            "length is shown, characters are not"
+        );
         assert!(shown.chars().all(|c| c == '•'));
         // Editing works.
         f.backspace();
@@ -712,11 +773,18 @@ mod secret_form_tests {
         for c in ['\n', '\t', '\r', '\u{7}'] {
             f.push(c);
         }
-        assert!(f.is_empty(), "control characters from a paste must not enter the value");
+        assert!(
+            f.is_empty(),
+            "control characters from a paste must not enter the value"
+        );
         for c in "  hf_tok  ".chars() {
             f.push(c);
         }
-        assert_eq!(f.into_value(), "hf_tok", "surrounding whitespace is trimmed");
+        assert_eq!(
+            f.into_value(),
+            "hf_tok",
+            "surrounding whitespace is trimmed"
+        );
     }
 
     /// A very long paste is clamped for display only — the value itself is kept whole.

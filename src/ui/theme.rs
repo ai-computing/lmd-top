@@ -124,7 +124,7 @@ pub(crate) const MEM_WARN: f64 = 70.0;
 pub(crate) const MEM_BAD: f64 = 90.0;
 pub(crate) const TEMP_WARN: f64 = 60.0;
 pub(crate) const TEMP_BAD: f64 = 80.0;
-pub(crate) const IDLE_UTIL: f64 = 10.0; // below this is dim (idle)
+pub(crate) const IDLE_UTIL: f64 = crate::measurement::IDLE_UTIL; // below this is dim (idle)
 
 /// Color by cell position (green→yellow→red). Same basis as the util thresholds.
 pub(crate) fn grad_color(pct: f64) -> Color {

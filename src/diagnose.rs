@@ -77,13 +77,13 @@ pub fn classify(log: &str, exit_code: Option<i32>) -> Failure {
     // The SDK validates its RBLN_* flags and aborts before compiling. Classifying this as a
     // compile failure would be wrong twice over: it hides the real message, and it teaches the
     // advisor that the *options* failed when they were never tried.
-    if let Some(line) = log
-        .lines()
-        .map(str::trim)
-        .find(|l| l.starts_with("[flag]"))
-    {
+    if let Some(line) = log.lines().map(str::trim).find(|l| l.starts_with("[flag]")) {
         let detail = line.trim_start_matches("[flag]").trim();
-        return Failure::new("vendor-flag", clip(detail), "fix or unset that flag in LMD_COMPILE_ENV");
+        return Failure::new(
+            "vendor-flag",
+            clip(detail),
+            "fix or unset that flag in LMD_COMPILE_ENV",
+        );
     }
 
     // ── Environment and inputs: fix these before touching compile options ──
@@ -108,7 +108,9 @@ pub fn classify(log: &str, exit_code: Option<i32>) -> Failure {
             "the shared store is SMB — build in local scratch and copy the artifact back",
         );
     }
-    if lc.contains("401 client error") || lc.contains("gated repo") || lc.contains("is not authorized")
+    if lc.contains("401 client error")
+        || lc.contains("gated repo")
+        || lc.contains("is not authorized")
     {
         return Failure::new(
             "hf-auth",
@@ -126,7 +128,9 @@ pub fn classify(log: &str, exit_code: Option<i32>) -> Failure {
             "check the source id — it must be org/name",
         );
     }
-    if lc.contains("connection error") || lc.contains("failed to resolve") || lc.contains("timed out")
+    if lc.contains("connection error")
+        || lc.contains("failed to resolve")
+        || lc.contains("timed out")
     {
         return Failure::new(
             "network",
@@ -209,7 +213,10 @@ pub fn classify(log: &str, exit_code: Option<i32>) -> Failure {
     {
         let detail = detail.trim();
         // Only worth surfacing when it says more than the generic wrapper already did.
-        if !detail.is_empty() && !detail.to_lowercase().contains("error occurred while compiling")
+        if !detail.is_empty()
+            && !detail
+                .to_lowercase()
+                .contains("error occurred while compiling")
         {
             return Failure::new("vendor-compiler", clip(detail), "");
         }
@@ -340,14 +347,20 @@ RuntimeError: Error occurred while compiling the model
             f
         );
         // A real kvpart error still classifies as one.
-        let real = format!("{}\nValueError: rbln_kvcache_partition_len must divide max_seq_len\n", log);
+        let real = format!(
+            "{}\nValueError: rbln_kvcache_partition_len must divide max_seq_len\n",
+            log
+        );
         assert_eq!(classify(&real, Some(1)).kind, "rbln-kvpart");
     }
 
     #[test]
     fn specific_causes_beat_the_traceback_line() {
         // A memory error inside a traceback must classify as memory, not as the final line.
-        let log = format!("{}\nRuntimeError: Out of memory on device 0\n", RBLN_CODEGEN);
+        let log = format!(
+            "{}\nRuntimeError: Out of memory on device 0\n",
+            RBLN_CODEGEN
+        );
         assert_eq!(classify(&log, Some(1)).kind, "device-oom");
         // OOMKilled is about the container, and outranks anything in the log.
         assert_eq!(classify(RBLN_CODEGEN, Some(137)).kind, "oom");
@@ -356,8 +369,14 @@ RuntimeError: Error occurred while compiling the model
     #[test]
     fn environment_failures_are_named() {
         let cases = [
-            ("401 Client Error: Unauthorized for url: https://huggingface.co/...", "hf-auth"),
-            ("404 Client Error. Repository Not Found for url", "hf-missing"),
+            (
+                "401 Client Error: Unauthorized for url: https://huggingface.co/...",
+                "hf-auth",
+            ),
+            (
+                "404 Client Error. Repository Not Found for url",
+                "hf-missing",
+            ),
             ("OSError: [Errno 95] Operation not supported", "store-io"),
             ("OSError: [Errno 28] No space left on device", "disk-full"),
             (
@@ -365,9 +384,18 @@ RuntimeError: Error occurred while compiling the model
                  status with 'rbln-smi' command.",
                 "rbln-no-device",
             ),
-            ("ValueError: rbln_kvcache_partition_len must divide max_seq_len", "rbln-kvpart"),
-            ("RuntimeError: model exceeds the available device memory", "device-oom"),
-            ("ValueError: architecture Qwen3ForCausalLM is not supported", "unsupported-model"),
+            (
+                "ValueError: rbln_kvcache_partition_len must divide max_seq_len",
+                "rbln-kvpart",
+            ),
+            (
+                "RuntimeError: model exceeds the available device memory",
+                "device-oom",
+            ),
+            (
+                "ValueError: architecture Qwen3ForCausalLM is not supported",
+                "unsupported-model",
+            ),
         ];
         for (log, want) in cases {
             let f = classify(log, Some(1));
@@ -413,7 +441,11 @@ RuntimeError: Error occurred while compiling the model
     fn long_lines_are_clipped_for_a_table_cell() {
         let long = format!("ValueError: {}", "x".repeat(400));
         let f = classify(&long, Some(1));
-        assert!(f.summary.chars().count() <= 120, "len {}", f.summary.chars().count());
+        assert!(
+            f.summary.chars().count() <= 120,
+            "len {}",
+            f.summary.chars().count()
+        );
         assert!(f.summary.ends_with('…'));
     }
 }
@@ -492,9 +524,7 @@ pub fn toolchain(log: &str) -> std::collections::BTreeMap<String, String> {
 /// So the only mismatch reported here is one the recipe measured: it compares installed
 /// versions against the vendor package's own declared requirements and prints
 /// `LMD_DEPS_MISMATCH …`. No version knowledge lives in lmd-top.
-pub fn toolchain_skew(
-    versions: &std::collections::BTreeMap<String, String>,
-) -> Option<String> {
+pub fn toolchain_skew(versions: &std::collections::BTreeMap<String, String>) -> Option<String> {
     versions.get("_mismatch").map(|detail| {
         format!(
             "installed packages disagree with what the vendor SDK declares: {} — reinstall the \
@@ -515,18 +545,36 @@ mod toolchain_tests {
         let samples = [
             ("oom", ("", Some(137))),
             ("disk-full", ("OSError: No space left on device", Some(1))),
-            ("store-io", ("OSError: [Errno 95] Operation not supported", Some(1))),
+            (
+                "store-io",
+                ("OSError: [Errno 95] Operation not supported", Some(1)),
+            ),
             ("hf-auth", ("401 Client Error: Unauthorized", Some(1))),
-            ("hf-missing", ("404 Client Error. Repository Not Found", Some(1))),
+            (
+                "hf-missing",
+                ("404 Client Error. Repository Not Found", Some(1)),
+            ),
             ("network", ("Connection error while fetching", Some(1))),
-            ("device-oom", ("RuntimeError: out of memory on device", Some(1))),
-            ("rbln-kvpart", ("ValueError: kvcache_partition_len invalid", Some(1))),
+            (
+                "device-oom",
+                ("RuntimeError: out of memory on device", Some(1)),
+            ),
+            (
+                "rbln-kvpart",
+                ("ValueError: kvcache_partition_len invalid", Some(1)),
+            ),
             (
                 "rbln-no-device",
                 ("ValueError: Device 0 is not a valid NPU device", Some(1)),
             ),
-            ("unsupported-model", ("ValueError: architecture X is not supported", Some(1))),
-            ("rbln-codegen", ("Error occurred while compiling the model", Some(1))),
+            (
+                "unsupported-model",
+                ("ValueError: architecture X is not supported", Some(1)),
+            ),
+            (
+                "rbln-codegen",
+                ("Error occurred while compiling the model", Some(1)),
+            ),
         ];
         for (want_kind, (log, exit)) in samples {
             let f = classify(log, exit);
@@ -539,7 +587,11 @@ mod toolchain_tests {
         }
         // The rbln-codegen advice must no longer name the disproven remedies.
         let a = advice_for_kind("rbln-codegen").unwrap();
-        assert!(!a.contains("lower max-len") && !a.contains("attn=eager"), "{}", a);
+        assert!(
+            !a.contains("lower max-len") && !a.contains("attn=eager"),
+            "{}",
+            a
+        );
         assert!(a.contains("RBLN-COMPILE-INCIDENT"), "{}", a);
         // A kind with genuinely no action gets no invented one.
         assert_eq!(advice_for_kind("error"), None);
@@ -575,11 +627,17 @@ mod toolchain_tests {
     fn parses_the_reported_line() {
         let log = "starting\nLMD_TOOLCHAIN optimum-rbln=0.11.0.post1 rebel-compiler=0.11.0                    transformers=5.8.1 torch=2.11.0+cpu\nRBLN_CONFIG {...}\n";
         let t = toolchain(log);
-        assert_eq!(t.get("optimum-rbln").map(String::as_str), Some("0.11.0.post1"));
+        assert_eq!(
+            t.get("optimum-rbln").map(String::as_str),
+            Some("0.11.0.post1")
+        );
         assert_eq!(t.get("transformers").map(String::as_str), Some("5.8.1"));
         assert_eq!(t.get("torch").map(String::as_str), Some("2.11.0+cpu"));
         // A package the recipe could not find is omitted rather than recorded as "absent".
-        assert_eq!(toolchain("LMD_TOOLCHAIN furiosa-llm=absent torch=2.4.0\n").len(), 1);
+        assert_eq!(
+            toolchain("LMD_TOOLCHAIN furiosa-llm=absent torch=2.4.0\n").len(),
+            1
+        );
         assert!(toolchain("no such line here").is_empty());
         // A measured mismatch travels alongside the versions.
         let with_bad = toolchain(
@@ -613,7 +671,10 @@ mod toolchain_tests {
 
         // When the recipe measures a real disagreement, it travels under `_mismatch`.
         let mut measured = vendor_consistent.clone();
-        measured.insert("_mismatch".into(), "transformers 4.40.0 != required 5.8.1".into());
+        measured.insert(
+            "_mismatch".into(),
+            "transformers 4.40.0 != required 5.8.1".into(),
+        );
         let why = toolchain_skew(&measured).expect("measured mismatch is reported");
         assert!(why.contains("transformers 4.40.0"), "{}", why);
         assert!(why.contains("vendor SDK declares"), "{}", why);

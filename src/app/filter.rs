@@ -77,9 +77,7 @@ impl App {
                 .map(|p| p.name.clone())
                 .unwrap_or_default(),
             View::Epp => self
-                .snap
-                .epp
-                .as_ref()
+                .selected_epp()
                 .and_then(|e| e.scorers.get(i))
                 .map(|(n, _)| n.clone())
                 .unwrap_or_default(),

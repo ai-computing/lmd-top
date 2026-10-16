@@ -1,5 +1,7 @@
 # lmd-top
 
+설치·초기 설정·업데이트는 [Quick start](docs/QUICKSTART.md)를 참고하세요. `--init`, `--check-setup`은 현재 소스에 추가됐으며 다음 릴리스에 포함될 예정입니다.
+
 > **[llm-d](https://llm-d.ai) 클러스터를 위한 터미널 관측·운영 도구.**
 > 서빙 스택 전체 — Gateway, EPP 라우팅, 모델 서버, 이종 가속기 — 를 하나의 정적 바이너리로, 한 화면에서 봅니다.
 
@@ -62,9 +64,9 @@ kubectl lmd-top                      # 또는: kubectl lmd-top --mode admin
 **원라이너 설치** (사전 빌드 바이너리 → `~/.local/bin`, Rust 툴체인 불필요):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gspark-etri/lmd-top/main/install.sh | sh
-#   ... | sh -s -- --version v0.34.0            # 버전 고정
-#   ... | sh -s -- --bin-dir /usr/local/bin     # 시스템 전역(쓰기 권한 필요)
+curl -fsSL https://raw.githubusercontent.com/gspark-etri/lmd-top/main/install.sh | bash
+#   ... | bash -s -- --version v0.34.0            # 버전 고정
+#   ... | bash -s -- --bin-dir /usr/local/bin     # 시스템 전역(쓰기 권한 필요)
 ```
 
 OS/arch(Linux/macOS · x86_64/aarch64) 자동 감지 → 릴리스 tarball 다운로드 → `.sha256` 검증 → 설치. 수동 등가:
@@ -115,6 +117,18 @@ LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # 다른 클러스터 지정
 | 이동 | `0-5`/`Tab` 섹션 · `←`/`→` (`[ ]`) 서브탭 · `Ctrl+w` 후 `hjkl`/화살표 패널 포커스 · `↑↓`/`kj` 선택 · `g`/`G` 처음/끝 · `Ctrl+u`/`Ctrl+d` 반 페이지 · `Esc` 뒤로 |
 | 액션 | `⏎`/`a` 액션 메뉴(없으면 상세) · `p i r e m` 크로스레이어 pivot(메뉴에 **Go: …** 로도) · `/` 필터 · `:` 커맨드 팔레트(뷰 점프 / 표시 액션 실행) · `o`/`O` 정렬 컬럼/방향 · `y` live YAML · `l` 로그 · 메뉴 → Compile/Deploy/Scale/Restart/Stop/Delete/Cordon/Objective (모드 게이팅 `⊘`·기본 No 확인) |
 | 표시 | `t` 테마 · `f` 애니메이션 · `z` zoom · `Space` 일시정지 · `A` 알림 · `?` 도움말 · `q` 종료 · `:graf` Grafana · `R` 세션 에너지 리셋 |
+
+수집 상태: `:` → **Data sources**에서 소스별 상태·마지막 성공 시각·오류를 확인할 수 있습니다. 수집에 실패하면 이전 값과 원래 수집 시각을 유지합니다. `–`와 대시 게이지는 0이 아닌 측정값 부재를 뜻합니다. JSON에는 `sources`, `source_states`, `warnings`가 포함됩니다. 조회창은 스냅샷이므로 다시 열면 갱신됩니다.
+
+워크로드 판별: `:` → **Workload classification**에서 모델·Prefill·Decode·게이트웨이·미확인 배포와 판별 근거를 조회합니다. 이름만으로 모델을 추정하지 않습니다. 인식되지 않는 커스텀 추론 서버는 Deployment에 `lmd-top.io/workload-role: model` 주석을 지정할 수 있습니다(`prefill`, `decode`도 지원). 이 판별과 Ready 수는 실제 추론 성공을 보장하지 않습니다. JSON의 `workloads`에는 모델 외 배포도 포함됩니다.
+
+성능 목표: `:` → **Performance assessment**에서 세션에 설정한 SLO의 충족·위반·판단 불가 사유를 조회합니다. 지표가 없거나 오래되었거나 요청 트래픽이 관측되지 않으면 목표 충족으로 판정하지 않습니다. 모델 이름이 모호하게 일치하면 더 구체적인 목표가 필요합니다. 단계별 p95는 독립적인 백분위수이므로 합산 지연이나 가속기 용량의 근거로 해석하지 않습니다.
+
+운영 권한은 실행 함수에서도 다시 검사합니다. 스토어 삭제의 `danger` 요구 권한은 미리보기·매니페스트 편집 후에도 유지됩니다. CLI의 `--plan … --apply`에는 이제 `--mode admin` 또는 `--mode danger`가 필요합니다. 계획 생성과 서버 dry-run은 적용 권한을 요구하지 않습니다. 이 모드는 조작 실수 방지용이며 실제 접근 권한은 Kubernetes RBAC가 결정합니다.
+
+감사 로그에는 고정된 컨텍스트, 요청·기본 네임스페이스, 확인한 UID·리소스 버전(있는 경우), 소요 시간이 추가됩니다. CLI 계획 적용도 기록됩니다. 작업 성공 후 로그 기록만 실패한 경우 별도로 표시하므로, 로그를 남기려고 작업을 다시 실행하지 마세요. 기존 로그도 그대로 조회할 수 있습니다.
+
+Kubernetes 대상: 최초 클러스터 접근 시 현재 kubeconfig를 세션용으로 고정합니다. 이후 모든 kubectl 조회·변경이 이 설정을 사용하므로 외부에서 현재 컨텍스트를 바꿔도 실행 중인 lmd-top의 대상은 바뀌지 않습니다. 다른 컨텍스트를 선택하거나 초기 설정 실패를 복구하려면 프로그램을 다시 실행하세요. 확인창과 JSON의 `kubernetes_context`에서 선택된 컨텍스트를 확인할 수 있습니다. 세션 설정 파일은 소유자만 접근 가능하며 정상 종료 시 삭제됩니다.
 
 **환경 변수.**
 

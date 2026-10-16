@@ -15,24 +15,39 @@ impl App {
 
     /// 새 스냅샷 반영 + ts 가 바뀌었으면 히스토리 append.
     pub fn apply(&mut self, snap: Snapshot) {
-        if snap.ts != self.snap.ts {
+        if snap.ts != self.snap.ts || snap.sources != self.snap.sources {
             // per-accelerator: util / mem% / temp 타임라인
             for a in &snap.accel {
+                if !snap.source_updated(
+                    &self.snap,
+                    &format!("accel/{}", crate::accel::by_kind(a.kind).id),
+                ) {
+                    continue;
+                }
                 let k = format!("acc:{}:{}:{}", a.kind.label(), a.node, a.id);
-                self.push_hist(
-                    &format!("{}:util", k),
-                    a.util.round().clamp(0.0, 100.0) as u64,
-                );
+                if a.util.is_finite() {
+                    self.push_hist(
+                        &format!("{}:util", k),
+                        a.util.round().clamp(0.0, 100.0) as u64,
+                    );
+                }
                 let memp = if a.mem_total_gb > 0.0 {
                     a.mem_used_gb / a.mem_total_gb * 100.0
                 } else {
-                    0.0
+                    f64::NAN
                 };
-                self.push_hist(&format!("{}:mem", k), memp.round().clamp(0.0, 100.0) as u64);
-                self.push_hist(&format!("{}:temp", k), a.temp.round().max(0.0) as u64);
+                if memp.is_finite() {
+                    self.push_hist(&format!("{}:mem", k), memp.round().clamp(0.0, 100.0) as u64);
+                }
+                if a.temp.is_finite() {
+                    self.push_hist(&format!("{}:temp", k), a.temp.round().max(0.0) as u64);
+                }
             }
             // per-node: cpu% / mem% / load
             for n in &snap.nodes {
+                if !snap.source_updated(&self.snap, "nodes") {
+                    continue;
+                }
                 let k = format!("nod:{}", n.name);
                 if !n.cpu_pct.is_nan() {
                     self.push_hist(
@@ -43,9 +58,11 @@ impl App {
                 let memp = if n.mem_total_gb > 0.0 {
                     n.mem_used_gb / n.mem_total_gb * 100.0
                 } else {
-                    0.0
+                    f64::NAN
                 };
-                self.push_hist(&format!("{}:mem", k), memp.round().clamp(0.0, 100.0) as u64);
+                if memp.is_finite() {
+                    self.push_hist(&format!("{}:mem", k), memp.round().clamp(0.0, 100.0) as u64);
+                }
                 if n.disk_total_gb > 0.0 {
                     let dp = n.disk_used_gb / n.disk_total_gb * 100.0;
                     self.push_hist(&format!("{}:disk", k), dp.round().clamp(0.0, 100.0) as u64);
@@ -65,7 +82,7 @@ impl App {
                     v.iter().sum::<f64>() / v.len() as f64
                 }
             };
-            let pct = |u: f64, t: f64| if t > 0.0 { u / t * 100.0 } else { 0.0 };
+            let pct = |u: f64, t: f64| if t > 0.0 { u / t * 100.0 } else { f64::NAN };
             let mut byk: std::collections::BTreeMap<&str, (Vec<f64>, f64, f64)> =
                 std::collections::BTreeMap::new();
             for a in &snap.accel {
@@ -75,14 +92,24 @@ impl App {
                 e.2 += a.mem_total_gb;
             }
             for (k, (u, mu, mt)) in &byk {
-                self.push_hist(
-                    &format!("sys:{}_util", k),
-                    mean(u).round().clamp(0.0, 100.0) as u64,
-                );
-                self.push_hist(
-                    &format!("sys:{}_mem", k),
-                    pct(*mu, *mt).round().clamp(0.0, 100.0) as u64,
-                );
+                let Some(pack) = crate::accel::packs().iter().find(|pack| pack.label == *k) else {
+                    continue;
+                };
+                if !snap.source_updated(&self.snap, &format!("accel/{}", pack.id)) {
+                    continue;
+                }
+                if mean(u).is_finite() {
+                    self.push_hist(
+                        &format!("sys:{}_util", k),
+                        mean(u).round().clamp(0.0, 100.0) as u64,
+                    );
+                }
+                if pct(*mu, *mt).is_finite() {
+                    self.push_hist(
+                        &format!("sys:{}_mem", k),
+                        pct(*mu, *mt).round().clamp(0.0, 100.0) as u64,
+                    );
+                }
             }
             let cpus: Vec<f64> = snap
                 .nodes
@@ -90,23 +117,28 @@ impl App {
                 .filter(|n| !n.cpu_pct.is_nan())
                 .map(|n| n.cpu_pct)
                 .collect();
-            if !cpus.is_empty() {
+            if snap.source_updated(&self.snap, "nodes") && !cpus.is_empty() {
                 self.push_hist("sys:cpu", mean(&cpus).round().clamp(0.0, 100.0) as u64);
             }
             let (hmu, hmt): (f64, f64) = snap.nodes.iter().fold((0.0, 0.0), |(u, t), n| {
                 (u + n.mem_used_gb, t + n.mem_total_gb)
             });
-            self.push_hist(
-                "sys:host_mem",
-                pct(hmu, hmt).round().clamp(0.0, 100.0) as u64,
-            );
+            if snap.source_updated(&self.snap, "nodes") && pct(hmu, hmt).is_finite() {
+                self.push_hist(
+                    "sys:host_mem",
+                    pct(hmu, hmt).round().clamp(0.0, 100.0) as u64,
+                );
+            }
             let tps = snap.perf.tps;
-            if !tps.is_nan() {
+            if snap.source_updated(&self.snap, "performance") && tps.is_finite() {
                 self.push_hist("sys:tps", tps.round().max(0.0) as u64);
             }
             // per-model perf 시계열 — Perf/Model 상세의 지표별 타임라인용.
             // 지연은 ms(정수), 처리량은 rate(반올림)로 저장. 값 없으면(NaN) 스킵.
             for r in &snap.perf_rows {
+                if !snap.source_updated(&self.snap, "performance") {
+                    continue;
+                }
                 let k = format!("mperf:{}", r.model);
                 let push_ms = |s: &mut Self, sub: &str, v: f64| {
                     if !v.is_nan() {
@@ -132,7 +164,11 @@ impl App {
             self.detect_alerts(&snap);
             // 세션 에너지 기준선(디바이스 최초 관측 시 캡처).
             for a in &snap.accel {
-                if !a.energy_mj.is_nan() {
+                if snap.source_updated(
+                    &self.snap,
+                    &format!("accel/{}", crate::accel::by_kind(a.kind).id),
+                ) && a.energy_mj.is_finite()
+                {
                     self.energy_base
                         .entry(Self::accel_key(a))
                         .or_insert(a.energy_mj);
@@ -140,6 +176,16 @@ impl App {
             }
             if self.energy_since == 0 {
                 self.energy_since = snap.ts;
+            }
+        }
+        if self.snap.epp != snap.epp {
+            self.epp_weights.clear();
+            if !snap.epp.as_ref().is_some_and(|cfg| {
+                cfg.entries
+                    .iter()
+                    .any(|entry| Some(&entry.profile) == self.epp_profile.as_ref())
+            }) {
+                self.epp_profile = None;
             }
         }
         self.snap = snap;
@@ -223,5 +269,40 @@ impl App {
             .get(key)
             .map(|d| d.iter().copied().collect())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+    use crate::quality::SourceStatus;
+    #[test]
+    fn failed_or_unrelated_refresh_does_not_duplicate_node_history() {
+        let mut app = App::new();
+        let first = Snapshot {
+            ts: 100,
+            nodes: vec![crate::collect::NodeInfo {
+                name: "node-a".into(),
+                cpu_pct: 25.0,
+                ..Default::default()
+            }],
+            sources: [("nodes".into(), SourceStatus::observed(100, 1, &[]))].into(),
+            ..Default::default()
+        };
+        app.apply(first.clone());
+        assert_eq!(app.hist["nod:node-a:cpu"].len(), 1);
+        let mut unrelated = first.clone();
+        unrelated.ts = 101;
+        app.apply(unrelated);
+        assert_eq!(app.hist["nod:node-a:cpu"].len(), 1);
+        let mut failed = first;
+        failed.ts = 102;
+        failed.sources.insert(
+            "nodes".into(),
+            SourceStatus::observed(102, 0, &["timeout".into()])
+                .after(app.snap.sources.get("nodes")),
+        );
+        app.apply(failed);
+        assert_eq!(app.hist["nod:node-a:cpu"].len(), 1);
     }
 }

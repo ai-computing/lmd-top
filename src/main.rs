@@ -7,24 +7,49 @@ mod advisor;
 mod agent;
 mod app;
 mod audit;
+mod bootstrap;
 mod cast;
 mod catalog;
 mod collect;
 mod compat;
 mod config;
 mod diagnose;
-mod history;
 mod doctor;
+mod drain;
+mod epp_config;
+mod history;
+mod inventory;
 mod kube;
+mod kube_session;
+mod latency;
+mod local_file;
 mod manifest;
+mod manifest_plan;
+mod measurement;
 mod metrics;
+mod mutation;
+mod performance;
+mod permissions;
+use mutation::{run_mutation, MutationOutcome};
 mod ops;
 mod palette;
+mod policy;
 mod probe;
+mod process;
 mod prom;
+mod quality;
 mod quote;
+mod resource_guard;
+mod rollback;
+mod route_edit;
+mod routing;
+mod service_binding;
+mod setup_probe;
+mod snapshot;
+mod snapshot_text;
 mod store;
 mod ui;
+mod workload;
 
 use anyhow::Result;
 use app::{App, Mode, Pending, View};
@@ -87,21 +112,32 @@ USAGE:
 OPTIONS:
     --mode <MODE>    permission mode: observe (default) | debug | admin | danger
     --json           print machine-readable agent state (JSON) and exit
+    --init           guided local configuration (preserves existing files)
+    --check-setup    check platform prerequisites; exit 1 if required items are missing
+    --version       print build version and exit
     --doctor         survey Prometheus: exporters, metric coverage, gaps
     --audit          print the audit log of applied mutations, then exit
     --history        print recorded compile/serving outcomes, then exit
     --snapshot, -s   collect once, print headless text summary
     --render         render each view to text via TestBackend (CI / no-tty)
     --cast [FILE]    write a demo asciicast (default: docs/demo.cast)
-    --plan <OP>      generate a compile/deploy manifest headlessly: compile | deploy
+    --policy <OP>    policy workspace: init | validate | render | plan | test | replay | build
+    --workspace DIR policy developer workspace (default: policy-workspace)
+    --file FILE     policy YAML (default: policy.yaml)
+    --base FILE     existing EndpointPickerConfig for offline policy render
+    --plan <OP>      generate a manifest headlessly: compile | deploy | train
+                     train = LoRA fine-tuning Job on RNGD (npu-lora), e.g.
+                     --plan train --vendor furiosa --model M --set data=/mnt/store/datasets/x.jsonl
     --model <HF_ID>  model id for --plan, e.g. Qwen/Qwen2.5-0.5B-Instruct
     --vendor <NAME>  target vendor for --plan: rbln | furiosa | gpu
-    --set k=v        override a form field for --plan (repeatable)
+    --set k=v        override a form field for --plan (repeatable); train keys: data name steps
+                     seq_len rank alpha targets lr accum node hf_host_path cache_host_path image merge
     --dry-run        server-side validate the generated --plan manifest
-    --apply          apply the generated --plan manifest
+    --apply          apply the generated --plan manifest (requires --mode admin+)
     --help, -h       show this help and exit
 
 ENVIRONMENT:
+    LMD_CONFIG       configuration file (default: ~/.config/lmd-top/lmd-top.yaml)
     LMD_PROM         Prometheus host:port
     LMD_NS           namespace (default: llm-serving)
     LMD_GRAFANA      Grafana base URL (opened via the `:graf` palette command)
@@ -125,6 +161,7 @@ enum ArgCheck {
     Unknown(String),
     BadMode(String),
     MissingMode,
+    BadSet(String),
 }
 
 /// Scan args[1..] and allow only known flags. Reject unsupported flags/invalid --mode.
@@ -135,6 +172,9 @@ fn check_args(args: &[String]) -> ArgCheck {
     }
     const NOVALUE: &[&str] = &[
         "--doctor",
+        "--init",
+        "--check-setup",
+        "--version",
         "--json",
         "--snapshot",
         "-s",
@@ -144,7 +184,16 @@ fn check_args(args: &[String]) -> ArgCheck {
         "--dry-run",
         "--apply",
     ];
-    const VALUE: &[&str] = &["--plan", "--model", "--vendor", "--set"];
+    const VALUE: &[&str] = &[
+        "--plan",
+        "--model",
+        "--vendor",
+        "--set",
+        "--policy",
+        "--workspace",
+        "--file",
+        "--base",
+    ];
     let mut i = 1;
     while i < args.len() {
         let a = args[i].as_str();
@@ -159,6 +208,13 @@ fn check_args(args: &[String]) -> ArgCheck {
         if VALUE.contains(&a) {
             if args.get(i + 1).map(|s| s.starts_with('-')).unwrap_or(true) {
                 return ArgCheck::Unknown(args[i].clone());
+            }
+            if a == "--set"
+                && !args[i + 1]
+                    .split_once('=')
+                    .is_some_and(|(k, v)| !k.trim().is_empty() && !v.is_empty())
+            {
+                return ArgCheck::BadSet(args[i + 1].clone());
             }
             i += 2;
             continue;
@@ -210,11 +266,7 @@ fn arg_sets(args: &[String]) -> Vec<(String, String)> {
 fn plan_vendor(v: &str) -> Result<&'static str> {
     accel::by_id(v).map(|p| p.id).ok_or_else(|| {
         let known: Vec<&str> = accel::packs().iter().map(|p| p.id).collect();
-        anyhow::anyhow!(
-            "unsupported --vendor '{}': expected {}",
-            v,
-            known.join("|")
-        )
+        anyhow::anyhow!("unsupported --vendor '{}': expected {}", v, known.join("|"))
     })
 }
 
@@ -246,6 +298,22 @@ async fn run_plan(cfg: &Config, args: &[String]) -> Result<()> {
             vendor
         );
     }
+    let mode = args
+        .iter()
+        .position(|a| a == "--mode")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| Mode::parse(s))
+        .unwrap_or(Mode::Observe);
+    if args.iter().any(|a| a == "--apply") {
+        Pending::Apply {
+            reviewed: None,
+            title: "CLI plan".into(),
+            yaml: String::new(),
+            required: Mode::Admin,
+        }
+        .authorize(mode)
+        .map_err(anyhow::Error::msg)?;
+    }
     let snap = collect(cfg).await;
     let mut app = App::new();
     app.ns = cfg.ns.clone();
@@ -253,8 +321,9 @@ async fn run_plan(cfg: &Config, args: &[String]) -> Result<()> {
     let (title, yaml) = match op.as_str() {
         "compile" => app.plan_compile_for_model(&model, vendor, &overrides),
         "deploy" => app.plan_deploy_for_model(&model, vendor, &overrides),
+        "train" => app::train::plan(&model, vendor, &overrides, &cfg.ns),
         _ => Err(format!(
-            "unsupported --plan '{}': expected compile|deploy",
+            "unsupported --plan '{}': expected compile|deploy|train",
             op
         )),
     }
@@ -268,8 +337,23 @@ async fn run_plan(cfg: &Config, args: &[String]) -> Result<()> {
         if manifest_has_placeholder(&yaml) {
             anyhow::bail!("apply blocked: generated manifest still contains TODO- placeholders");
         }
-        let out = kube::apply_manifest(&cfg.ns, &yaml, false)?;
-        eprintln!("applied {}:\n{}", title, out.trim());
+        let outcome = run_mutation(
+            Pending::Apply {
+                reviewed: Some(kube::prepare_manifest(&cfg.ns, &yaml)?),
+                title,
+                yaml: yaml.clone(),
+                required: Mode::Admin,
+            },
+            &cfg.ns,
+            mode,
+        );
+        if let Some(error) = outcome.audit_error {
+            eprintln!(
+                "audit log write failed: {error}; do not repeat the operation to retry logging"
+            );
+        }
+        let result = outcome.result.map_err(anyhow::Error::msg)?;
+        eprintln!("{}", result.notify);
     }
     if !args.iter().any(|a| a == "--apply") {
         println!("{}", yaml);
@@ -284,6 +368,10 @@ async fn main() -> Result<()> {
 
     // Argument validation — help/unsupported flags/invalid --mode handled here (before entering TUI).
     match check_args(&args) {
+        ArgCheck::BadSet(value) => {
+            eprintln!("invalid --set {:?}: expected nonempty key=value", value);
+            std::process::exit(2);
+        }
         ArgCheck::Ok => {}
         ArgCheck::Help => {
             println!("{}", HELP);
@@ -307,6 +395,51 @@ async fn main() -> Result<()> {
             eprintln!("{}", HELP);
             std::process::exit(2);
         }
+    }
+
+    if args.iter().any(|a| a == "--version") {
+        println!("lmd-top {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--init") {
+        return bootstrap::run(&cfg);
+    }
+    let _kube_session_cleanup = kube_session::Cleanup;
+    if args.iter().any(|a| a == "--check-setup") {
+        let mut app = App::new();
+        app.ns = cfg.ns.clone();
+        app.snap = collect(&cfg).await;
+        println!("Setup: namespace={} prometheus={}", cfg.ns, cfg.prom);
+        let mut missing = 0;
+        let mut unknown = 0;
+        for check in app.setup_checks() {
+            println!(
+                "{} [{}] {}: {}",
+                check.state.glyph(),
+                check.category,
+                check.name,
+                check.detail
+            );
+            if check.state == app::CheckState::Missing {
+                missing += 1;
+            } else if check.state == app::CheckState::Unknown {
+                unknown += 1;
+            }
+            if let app::SetupFix::Command(command) = check.fix {
+                println!("  {}", command.replace('\n', "\n  "));
+            }
+        }
+        println!("{missing} required checks missing; {unknown} checks unknown. Open section 6 (Setup) for details.");
+        if missing > 0 || unknown > 0 {
+            anyhow::bail!(
+                "setup incomplete: {missing} required checks missing; {unknown} checks unknown"
+            );
+        }
+        return Ok(());
+    }
+
+    if args.iter().any(|a| a == "--policy") {
+        return policy::cli(&cfg, &args).await;
     }
 
     if args.iter().any(|a| a == "--plan") {
@@ -341,7 +474,7 @@ async fn main() -> Result<()> {
 
     if args.iter().any(|a| a == "--snapshot" || a == "-s") {
         let snap = collect(&cfg).await;
-        print_snapshot(&snap, &cfg);
+        print!("{}", snapshot_text::render(&snap, &cfg, &history::load()));
         return Ok(());
     }
 
@@ -373,297 +506,12 @@ async fn main() -> Result<()> {
     run_tui(cfg, mode).await
 }
 
-/// Mutation execution result — kube is called on a worker thread, then this is passed to the main thread for audit/UI.
-/// Moving kube calls off the UI thread keeps rendering from freezing (removes up-to-8s freezes).
-struct MutationOutcome {
-    mode: Mode,
-    audit_action: String,           // audit log action field
-    audit_target: String,           // audit log target field
-    fail_label: &'static str,       // window title on failure (show_fail)
-    result: Result<OkInfo, String>, // Ok=success display info / Err=failure reason (1+ lines)
-}
-/// Display info on success — audit detail, toast text, whether to close preview (Apply success).
-struct OkInfo {
-    audit_detail: String,
-    notify: String,
-    clear_preview: bool,
-    /// A (title, body) to open in the scrollable window on success.
-    ///
-    /// The failure path has always done this; a read-only probe needs it too, since its whole
-    /// output is the answer and a toast would truncate it.
-    window: Option<(String, String)>,
-    /// `(deployment, replicas)` to write into the local snapshot on success.
-    ///
-    /// The replica toggle reads `desired` from the snapshot, which is up to a full tick (~3s)
-    /// old. Without this, pressing `s` twice in quick succession computes the second toggle
-    /// from the pre-scale value and scales to 0 again — so the second press looks like it did
-    /// nothing. Found by ACT-01. `ready` is deliberately left alone: the row should keep
-    /// showing that it has not converged yet.
-    desired_now: Option<(String, i64)>,
-}
-
-/// Execute a confirmed mutation via actual kubectl and return a MutationOutcome. (for worker threads)
-/// Every branch calls kube, so unit testing needs a real cluster — result handling lives in apply_outcome (testable).
-fn run_mutation(pending: Pending, ns: &str, mode: Mode) -> MutationOutcome {
-    let mk = |audit_action: String,
-              audit_target: String,
-              fail_label: &'static str,
-              result: Result<OkInfo, String>| MutationOutcome {
-        mode,
-        audit_action,
-        audit_target,
-        fail_label,
-        result,
-    };
-    match pending {
-        Pending::Scale { name, target } => {
-            let applied = (name.clone(), target);
-            let r = kube::scale_deploy(ns, &name, target)
-                .map(|_| OkInfo {
-                    audit_detail: "scaled".into(),
-                    notify: format!("scaled {} → {}", name, target),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: Some(applied),
-                })
-                .map_err(|e| e.to_string());
-            mk(format!("scale→{}", target), name, "scale", r)
-        }
-        Pending::Restart { name } => {
-            let r = kube::rollout_restart(ns, &name)
-                .map(|_| OkInfo {
-                    audit_detail: "restarted".into(),
-                    notify: format!("rollout restart {}", name),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: None,
-                })
-                .map_err(|e| e.to_string());
-            mk("rollout-restart".into(), name, "restart", r)
-        }
-        Pending::Rollback { name } => {
-            let r = kube::rollout_undo(ns, &name)
-                .map(|_| OkInfo {
-                    audit_detail: "rolled back".into(),
-                    notify: format!("rollout undo {} (previous revision)", name),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: None,
-                })
-                .map_err(|e| e.to_string());
-            mk("rollout-undo".into(), name, "rollback", r)
-        }
-        Pending::Drain { pod } => {
-            let r = kube::drain_pod(ns, &pod)
-                .map(|detail| OkInfo {
-                    audit_detail: format!("drained {}", detail),
-                    notify: format!("drained {} {} — in-flight streams finish", pod, detail),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: None,
-                })
-                .map_err(|e| e.to_string());
-            mk("drain".into(), pod, "drain", r)
-        }
-        Pending::Stop { name } => {
-            let stopped = (name.clone(), 0);
-            let r = kube::scale_deploy(ns, &name, 0)
-                .map(|_| OkInfo {
-                    audit_detail: "stopped".into(),
-                    notify: format!("stopped {} (scaled → 0)", name),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: Some(stopped),
-                })
-                .map_err(|e| e.to_string());
-            mk("stop(scale→0)".into(), name, "stop", r)
-        }
-        Pending::SetSecret {
-            name,
-            key,
-            value,
-            purpose,
-        } => {
-            let r = kube::apply_secret(ns, &name, &key, &value)
-                .map(|o| OkInfo {
-                    // Neither the audit detail nor the toast may contain the value.
-                    audit_detail: o.lines().next().unwrap_or("applied").to_string(),
-                    notify: format!("{} stored in secret {}/{}", purpose, name, key),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: None,
-                })
-                .map_err(|e| e.to_string());
-            mk("set-secret".into(), format!("{}/{}", name, key), "set secret", r)
-        }
-        Pending::Cordon { node, on } => {
-            let act = if on { "cordon" } else { "uncordon" };
-            let r = kube::cordon(&node, on)
-                .map(|_| OkInfo {
-                    audit_detail: "ok".into(),
-                    notify: format!("{} {}", if on { "cordoned" } else { "uncordoned" }, node),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: None,
-                })
-                .map_err(|e| e.to_string());
-            mk(act.into(), node, "cordon", r)
-        }
-        Pending::DeletePod { name } => {
-            let r = kube::delete_pod(ns, &name)
-                .map(|_| OkInfo {
-                    audit_detail: "deleted".into(),
-                    notify: format!("deleted pod {}", name),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: None,
-                })
-                .map_err(|e| e.to_string());
-            mk("delete-pod".into(), name, "delete", r)
-        }
-        Pending::Provenance {
-            deployment,
-            node,
-            path,
-        } => {
-            let (m, job) = crate::probe::provenance_manifest(ns, &deployment, &node, &path);
-            let r = kube::run_job_for_output(ns, &m.to_yaml(), &job, 90)
-                .map(|body| OkInfo {
-                    audit_detail: format!("read {}", path),
-                    notify: format!("provenance of {} — see window", deployment),
-                    clear_preview: false,
-                    window: Some((
-                        format!("provenance · {} @ {} (q to close)", deployment, node),
-                        body,
-                    )),
-                    desired_now: None,
-                })
-                .map_err(|e| e.to_string());
-            mk("provenance".into(), deployment, "provenance", r)
-        }
-        Pending::StoreRefresh => {
-            let r = kube::refresh_inventory(ns)
-                .map(|job| OkInfo {
-                    audit_detail: job.clone(),
-                    notify: format!("store re-scan started ({})", job),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: None,
-                })
-                .map_err(|e| e.to_string());
-            mk("store-refresh".into(), "model-inventory".into(), "store refresh", r)
-        }
-        Pending::DeleteJob { name } => {
-            let r = kube::delete_job(ns, &name)
-                .map(|_| OkInfo {
-                    audit_detail: "deleted".into(),
-                    notify: format!("deleted job {}", name),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: None,
-                })
-                .map_err(|e| e.to_string());
-            mk("delete-job".into(), name, "delete job", r)
-        }
-        Pending::RouteRename { route, old, new } => {
-            let r = kube::route_set_path(ns, &route, &old, &new)
-                .map(|_| OkInfo {
-                    audit_detail: "renamed".into(),
-                    notify: format!("renamed route {} → {}", old, new),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: None,
-                })
-                .map_err(|e| e.to_string());
-            mk(
-                format!("route-rename→{}", new),
-                format!("{}:{}", route, old),
-                "route rename",
-                r,
-            )
-        }
-        Pending::RouteRetarget {
-            route,
-            path,
-            backend,
-            kind,
-        } => {
-            let r = kube::route_retarget(ns, &route, &path, &backend, &kind)
-                .map(|_| OkInfo {
-                    audit_detail: "retargeted".into(),
-                    notify: format!("retargeted {} → {}", path, backend),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: None,
-                })
-                .map_err(|e| e.to_string());
-            mk(
-                format!("route-retarget→{}:{}", kind, backend),
-                format!("{}:{}", route, path),
-                "route retarget",
-                r,
-            )
-        }
-        Pending::RouteDelete { route, path } => {
-            let r = kube::route_delete_rule(ns, &route, &path)
-                .map(|_| OkInfo {
-                    audit_detail: "deleted".into(),
-                    notify: format!("deleted route {}", path),
-                    clear_preview: false,
-                    window: None,
-                    desired_now: None,
-                })
-                .map_err(|e| e.to_string());
-            mk(
-                "route-delete".into(),
-                format!("{}:{}", route, path),
-                "route delete",
-                r,
-            )
-        }
-        Pending::Apply { yaml, title } => {
-            let r = kube::apply_manifest(ns, &yaml, false)
-                .map(|o| {
-                    let line = o.lines().next().unwrap_or("ok").to_string();
-                    OkInfo {
-                        audit_detail: line.clone(),
-                        notify: format!("applied — {}", line),
-                        clear_preview: true,
-                        window: None,
-                        desired_now: None,
-                    }
-                })
-                .map_err(|e| e.to_string());
-            mk("apply".into(), title, "apply", r)
-        }
-        Pending::ApplyUrl { url, title } => {
-            let r = kube::apply_url(&url)
-                .map(|o| {
-                    let n = o.lines().count();
-                    OkInfo {
-                        audit_detail: format!("{} ({} objects)", url, n),
-                        notify: format!("applied {} — {} object(s)", title, n),
-                        clear_preview: true,
-                        window: None,
-                        desired_now: None,
-                    }
-                })
-                .map_err(|e| e.to_string());
-            mk("apply-url".into(), title, "apply", r)
-        }
-    }
-}
-
 /// Apply a mutation result to the audit log + UI (toast/failure preview). (main thread, unit-testable)
-fn apply_outcome(app: &mut App, o: MutationOutcome) {
+fn apply_outcome(app: &mut App, mut o: MutationOutcome) {
+    o.record_once();
+    let audit_error = o.audit_error.clone();
     match o.result {
         Ok(ok) => {
-            audit::record(
-                o.mode,
-                &o.audit_action,
-                &o.audit_target,
-                Ok(&ok.audit_detail),
-            );
             // Reflect the change locally so the next keystroke computes from what we just did
             // rather than from a snapshot up to a full tick old (ACT-01).
             if let Some((name, replicas)) = ok.desired_now {
@@ -679,7 +527,6 @@ fn apply_outcome(app: &mut App, o: MutationOutcome) {
             app.notify(ok.notify);
         }
         Err(e) => {
-            audit::record(o.mode, &o.audit_action, &o.audit_target, Err(&e));
             // Failure reason goes to a scrollable window, not a vanishing toast.
             app.notify(format!("{} failed — see window for details", o.fail_label));
             app.preview = Some((
@@ -689,6 +536,10 @@ fn apply_outcome(app: &mut App, o: MutationOutcome) {
             app.preview_scroll = 0;
             app.preview_apply = false;
         }
+    }
+    if let Some(error) = audit_error {
+        let status = app.toast.clone().unwrap_or_default();
+        app.notify(format!("{status} · audit log write failed: {error} (do not repeat the operation to retry logging)"));
     }
 }
 
@@ -719,6 +570,64 @@ fn dispatch_palette(
             terminal.clear().ok();
         }
         ResetEnergy => app.reset_energy(),
+        RoutingPolicy => app.open_policy_form(),
+        PerformanceAssessment => {
+            let mut lines = vec![
+                "Performance assessment · configured targets and current evidence".to_string(),
+            ];
+            for row in &app.snap.perf_rows {
+                let advice = app.perf_advice(row);
+                lines.push(format!("\n{}", row.model));
+                if !advice.has_obj {
+                    lines.push(
+                        "  No uniquely matched objective; set a target for this model.".into(),
+                    );
+                }
+                for (metric, met) in advice.checks {
+                    lines.push(format!(
+                        "  {metric}: {}",
+                        if met { "met" } else { "violated" }
+                    ));
+                }
+                for (metric, reason) in advice.unknown {
+                    lines.push(format!("  {metric}: unknown — {reason}"));
+                }
+                for tip in advice.tips {
+                    lines.push(format!("  {tip}"));
+                }
+            }
+            if app.snap.perf_rows.is_empty() {
+                lines.push("No per-model performance measurements available.".into());
+            }
+            lines.push("\nTargets are session-local. Independent stage percentiles are not additive. This is an observation, not proof of capacity or a benchmark comparison.".into());
+            app.preview = Some(("Performance assessment".into(), lines.join("\n")));
+            app.preview_apply = false;
+            app.preview_scroll = 0;
+        }
+        Workloads => {
+            app.preview = Some((
+                "Workload classification".into(),
+                workload::report(&app.snap.workloads),
+            ));
+            app.preview_apply = false;
+            app.preview_scroll = 0;
+        }
+        DataSources => {
+            app.preview = Some((
+                "Data sources · collection quality".into(),
+                app.snap.source_report(collect::now_secs()),
+            ));
+            app.preview_apply = false;
+            app.preview_scroll = 0;
+        }
+        EppCapabilities => {
+            app.preview = Some((
+                "EPP capabilities · pinned vs dev".into(),
+                include_str!("../docs/EPP-CAPABILITIES.md").into(),
+            ));
+            app.preview_apply = false;
+            app.preview_scroll = 0;
+        }
     }
 }
 
@@ -742,6 +651,7 @@ fn dispatch_action(
     app: &mut App,
     action: app::Action,
     subject: &str,
+    route: Option<crate::collect::Route>,
     ns: &str,
     prom: &str,
     rt: &tokio::runtime::Handle,
@@ -774,6 +684,7 @@ fn dispatch_action(
         Action::Stop => {
             if require_action(app, action) {
                 app.confirm = Some(Pending::Stop {
+                    expected: app.snap.deployment_versions.get(subject).cloned(),
                     name: subject.to_string(),
                 });
             }
@@ -788,6 +699,7 @@ fn dispatch_action(
                     .map(|d| if d == 0 { 1 } else { 0 })
                     .unwrap_or(1);
                 app.confirm = Some(Pending::Scale {
+                    expected: app.snap.deployment_versions.get(subject).cloned(),
                     name: subject.to_string(),
                     target,
                 });
@@ -796,6 +708,7 @@ fn dispatch_action(
         Action::Restart => {
             if require_action(app, action) {
                 app.confirm = Some(Pending::Restart {
+                    expected: app.snap.deployment_versions.get(subject).cloned(),
                     name: subject.to_string(),
                 });
             }
@@ -803,6 +716,7 @@ fn dispatch_action(
         Action::Rollback => {
             if require_action(app, action) {
                 app.confirm = Some(Pending::Rollback {
+                    expected: app.snap.deployment_versions.get(subject).cloned(),
                     name: subject.to_string(),
                 });
             }
@@ -816,23 +730,18 @@ fn dispatch_action(
         }
         Action::Yaml => {
             if let Some((kind, nsd, name)) = app.yaml_target() {
-                let nsopt = if nsd { Some(ns) } else { None };
-                match kube::resource_yaml(kind, nsopt, &name) {
-                    Ok(y) => {
-                        app.preview = Some((format!("{} {} · yaml (read-only)", kind, name), y));
-                        app.preview_scroll = 0;
-                        app.preview_apply = false;
-                    }
-                    Err(e) => app.notify(format!(
-                        "yaml: {}",
-                        e.to_string().lines().next().unwrap_or("")
-                    )),
-                }
+                app.request_yaml(kind, nsd, name);
             }
         }
         Action::Delete => {
             if require_action(app, action) {
                 app.confirm = Some(Pending::DeletePod {
+                    expected: app
+                        .snap
+                        .pods
+                        .iter()
+                        .find(|r| r.name == subject)
+                        .and_then(|r| r.identity.clone()),
                     name: subject.to_string(),
                 });
             }
@@ -840,6 +749,12 @@ fn dispatch_action(
         Action::DeleteJob => {
             if require_action(app, action) {
                 app.confirm = Some(Pending::DeleteJob {
+                    expected: app
+                        .snap
+                        .compiles
+                        .iter()
+                        .find(|r| r.name == subject)
+                        .and_then(|r| r.identity.clone()),
                     name: subject.to_string(),
                 });
             }
@@ -849,6 +764,12 @@ fn dispatch_action(
         Action::Cordon | Action::Uncordon => {
             if require_action(app, action) {
                 app.confirm = Some(Pending::Cordon {
+                    expected: app
+                        .snap
+                        .nodes
+                        .iter()
+                        .find(|n| n.name == subject)
+                        .and_then(|n| n.identity.clone()),
                     node: subject.to_string(),
                     on: matches!(action, Action::Cordon),
                 });
@@ -856,12 +777,20 @@ fn dispatch_action(
         }
         Action::RouteRename => {
             if require_action(app, action) {
-                app.open_route_rename();
+                if let Some(route) = route {
+                    app.open_route_rename(route);
+                } else {
+                    app.notify("route target unavailable — reopen its action menu".into());
+                }
             }
         }
         Action::RouteRetarget => {
             if require_action(app, action) {
-                app.open_route_retarget();
+                if let Some(route) = route {
+                    app.open_route_retarget(route);
+                } else {
+                    app.notify("route target unavailable — reopen its action menu".into());
+                }
             }
         }
         // Shared-store housekeeping. Both build a Job manifest and hand it to the preview,
@@ -881,8 +810,9 @@ fn dispatch_action(
         Action::RouteDelete => {
             if require_action(app, action) {
                 // Same rule as Scale: the target is the route the menu was opened on (BUG-02).
-                if let Some(r) = app.route_by_path(subject).or_else(|| app.selected_route()) {
+                if let Some(r) = route {
                     app.confirm = Some(Pending::RouteDelete {
+                        expected: r.identity,
                         route: r.route,
                         path: r.path,
                     });
@@ -893,21 +823,13 @@ fn dispatch_action(
             if !require_action(app, action) {
                 // already notified
             } else if let Some(pod) = app.logs_target_pod() {
-                match kube::logs(ns, &pod, 400) {
-                    Ok(l) => {
-                        app.logs_scroll = l.len().saturating_sub(30) as u16;
-                        app.logs = l;
-                        app.logs_target = pod;
-                        app.logs_mode = true;
-                    }
-                    Err(e) => app.notify(format!("logs: {}", e)),
-                }
+                app.request_logs(pod);
             } else {
                 app.notify("logs: no pod for selection".to_string());
             }
         }
     }
-    let _ = (prom, rt); // currently unused (reserved for future on-demand queries)
+    let _ = (ns, prom, rt); // currently unused (reserved for future on-demand queries)
 }
 
 /// Route a wheel notch to whatever the user is actually looking at.
@@ -923,6 +845,11 @@ fn scroll_wheel(app: &mut App, dir: i64) {
         None => app.move_sel(dir),
         // Option forms: move the field cursor, unless a free-text field is being edited
         // (there the wheel has no meaning and must not silently change which field is active).
+        Some(Overlay::PolicyForm) => {
+            if let Some(f) = app.policy_form.as_mut().filter(|f| !f.editing) {
+                f.move_cursor(d);
+            }
+        }
         Some(Overlay::CompileForm) => {
             if let Some(f) = app.compile_form.as_mut().filter(|f| !f.editing) {
                 f.move_cursor(d);
@@ -997,32 +924,12 @@ fn open_actions_or_detail(app: &mut App, detail_fallback: bool) {
 
 /// Save preview content to a file — for editing then kubectl apply, or archiving. Filename inferred from title.
 fn save_manifest(title: &str, yaml: &str) -> Result<String> {
-    // First tokens of the title → safe filename.
-    let base: String = title
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string();
-    let base = if base.is_empty() {
-        "manifest".to_string()
-    } else {
-        base
-    };
-    let dir = std::env::var("LMD_SAVE_DIR").unwrap_or_else(|_| ".".to_string());
-    let path = format!(
-        "{}/lmd-{}.yaml",
-        dir.trim_end_matches('/'),
-        &base[..base.len().min(48)]
-    );
-    std::fs::write(&path, yaml)?;
-    Ok(path)
+    let directory = std::env::var("LMD_SAVE_DIR").unwrap_or_else(|_| ".".into());
+    Ok(
+        local_file::save_manifest(std::path::Path::new(&directory), title, yaml)?
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// Edit the manifest in $EDITOR (default vi) — briefly suspend the TUI, run the editor, then restore.
@@ -1031,22 +938,20 @@ fn edit_in_editor(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     content: &str,
 ) -> Option<String> {
-    let path = std::env::temp_dir().join("lmd-top-manifest.yaml");
-    if std::fs::write(&path, content).is_err() {
-        return None;
-    }
+    let session = local_file::EditFile::new(content).ok()?;
+    let path = session.path();
     let editor = std::env::var("EDITOR")
         .or_else(|_| std::env::var("VISUAL"))
         .unwrap_or_else(|_| "vi".into());
     // Suspend TUI (leave alt-screen, disable raw) → editor → restore.
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
-    let status = std::process::Command::new(&editor).arg(&path).status();
+    let status = std::process::Command::new(&editor).arg(path).status();
     let _ = enable_raw_mode();
     let _ = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture);
     let _ = terminal.clear();
     match status {
-        Ok(s) if s.success() => std::fs::read_to_string(&path).ok(),
+        Ok(s) if s.success() => std::fs::read_to_string(path).ok(),
         _ => None,
     }
 }
@@ -1089,7 +994,8 @@ fn render_dump(snap: collect::Snapshot) {
 }
 
 async fn run_tui(cfg: Config, mode: Mode) -> Result<()> {
-    let shared = Arc::new(Mutex::new(collect(&cfg).await)); // first collection (display immediately)
+    // Start the UI immediately; unavailable collectors must not block quit/help.
+    let shared = Arc::new(Mutex::new(collect::Snapshot::default()));
 
     // full collection loop (3s) — heavy items: models/EPP/perf/events etc.
     {
@@ -1097,12 +1003,12 @@ async fn run_tui(cfg: Config, mode: Mode) -> Result<()> {
         let cfg = cfg.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(cfg.interval_full));
-            tick.tick().await;
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tick.tick().await;
                 let snap = collect(&cfg).await;
                 if let Ok(mut g) = shared.lock() {
-                    *g = snap;
+                    g.merge_full(snap);
                 }
             }
         });
@@ -1113,33 +1019,13 @@ async fn run_tui(cfg: Config, mode: Mode) -> Result<()> {
         let cfg = cfg.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(cfg.interval_fast));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             tick.tick().await;
             loop {
                 tick.tick().await;
-                let (accel, nodes) = collect::collect_fast(&cfg).await;
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let observation = collect::collect_fast(&cfg).await;
                 if let Ok(mut g) = shared.lock() {
-                    // Don't overwrite existing tables with empty results — keeps a momentary Prometheus outage from reading as "no accelerators".
-                    if !accel.is_empty() || g.accel.is_empty() {
-                        g.accel = accel;
-                    }
-                    if !nodes.is_empty() || g.nodes.is_empty() {
-                        // fast tier 는 node.npu(드라이버, 노드 라벨 기반)를 full tier 에서만 채운다.
-                        // 새 노드에 npu 가 비었으면 직전 값을 이어받아 "미싱↔존재" 깜빡임을 막는다.
-                        let mut nodes = nodes;
-                        for n in &mut nodes {
-                            if n.npu.is_empty() {
-                                if let Some(prev) = g.nodes.iter().find(|o| o.name == n.name) {
-                                    n.npu = prev.npu.clone();
-                                }
-                            }
-                        }
-                        g.nodes = nodes;
-                    }
-                    g.ts = ts;
+                    g.merge_fast(observation);
                 }
             }
         });
@@ -1149,6 +1035,40 @@ async fn run_tui(cfg: Config, mode: Mode) -> Result<()> {
     let rt = tokio::runtime::Handle::current(); // for on-demand Perf drill queries
     let res = tokio::task::spawn_blocking(move || ui_loop(shared, cfg, mode, rt)).await?;
     res
+}
+
+/// Server dry-run uses the same operation slot as mutations but never mutates UI state
+/// from a worker or marks a later edited manifest as validated.
+fn start_validation(
+    app: &mut App,
+    tx: &std::sync::mpsc::Sender<Result<String, String>>,
+    ns: &str,
+    yaml: &str,
+) {
+    if app.inflight.is_some() {
+        app.notify("operation in progress — retry validation after it completes".into());
+        return;
+    }
+    app.inflight = Some("validating manifest (server dry-run)".into());
+    let tx = tx.clone();
+    let ns = ns.to_string();
+    let yaml = yaml.to_string();
+    std::thread::spawn(move || {
+        let result = kube::apply_manifest(&ns, &yaml, true)
+            .map(|out| {
+                format!(
+                    "submitted manifest valid ✓ {}{}",
+                    out.lines().next().unwrap_or("ok"),
+                    if manifest_has_placeholder(&yaml) {
+                        " · TODO placeholders remain"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .map_err(|e| e.to_string());
+        let _ = tx.send(result);
+    });
 }
 
 fn ui_loop(
@@ -1179,6 +1099,18 @@ fn ui_loop(
     let mut fx = ui::FxState::new();
     // Mutation result channel — worker thread sends the result after running kube; the main loop drains and applies it.
     let (mut_tx, mut_rx) = std::sync::mpsc::channel::<MutationOutcome>();
+    let (validation_tx, validation_rx) = std::sync::mpsc::channel::<Result<String, String>>();
+    let (review_tx, review_rx) =
+        std::sync::mpsc::channel::<(u64, Result<manifest_plan::Reviewed, String>)>();
+    let mut review_busy = false;
+    let (logs_tx, logs_rx) = std::sync::mpsc::channel();
+    let mut logs_busy = false;
+    let (zoo_tx, zoo_rx) = std::sync::mpsc::channel::<crate::catalog::ZooRefresh>();
+    let mut zoo_busy = false;
+    let (perf_tx, perf_rx) = std::sync::mpsc::channel();
+    let mut perf_busy = false;
+    let (yaml_tx, yaml_rx) = std::sync::mpsc::channel();
+    let mut yaml_busy = false;
     let mut collector_dead = false; // report a poisoned snapshot lock once, not every frame
     let result = (|| -> Result<()> {
         loop {
@@ -1200,11 +1132,113 @@ fn ui_loop(
                     }
                 }
             }
+            app.manifest_review.sync(app.confirm.as_ref(), &ns);
+            while let Ok((generation, result)) = review_rx.try_recv() {
+                review_busy = false;
+                if let Some(result) =
+                    app.manifest_review
+                        .finish(&mut app.confirm, &ns, generation, result)
+                {
+                    app.confirm_yes = false;
+                    app.manifest_review_details = false;
+                    app.notify(match result {
+                        Ok(()) => {
+                            "manifest targets prepared — review with p before confirming".into()
+                        }
+                        Err(error) => format!("manifest preparation failed: {error}; v to retry"),
+                    });
+                }
+            }
+            if !review_busy {
+                if let Some((generation, yaml)) =
+                    app.manifest_review
+                        .request(app.confirm.as_ref(), &ns, app.mode)
+                {
+                    review_busy = true;
+                    let tx = review_tx.clone();
+                    let ns = ns.clone();
+                    std::thread::spawn(move || {
+                        let result = kube::prepare_manifest(&ns, &yaml).map_err(|e| e.to_string());
+                        let _ = tx.send((generation, result));
+                    });
+                }
+            }
             // Apply completed mutations (audit + toast/failure window). Clear in-flight.
             while let Ok(outcome) = mut_rx.try_recv() {
                 app.inflight = None;
                 apply_outcome(&mut app, outcome);
             }
+            while let Ok(result) = validation_rx.try_recv() {
+                app.inflight = None;
+                app.notify(match result {
+                    Ok(message) => message,
+                    Err(e) => format!("submitted manifest invalid: {e}"),
+                });
+            }
+            while let Ok((generation, result)) = logs_rx.try_recv() {
+                logs_busy = false;
+                app.finish_logs(generation, result);
+            }
+            // One worker at a time; a newer target replaces the queued request.
+            if !logs_busy {
+                if let Some((generation, pod)) = app.logs_request.take() {
+                    logs_busy = true;
+                    let tx = logs_tx.clone();
+                    let ns = ns.clone();
+                    std::thread::spawn(move || {
+                        let result = kube::logs(&ns, &pod, 400).map_err(|e| e.to_string());
+                        let _ = tx.send((generation, result));
+                    });
+                }
+            }
+            while let Ok(mut result) = zoo_rx.try_recv() {
+                zoo_busy = false;
+                let previous = app.zoo.len();
+                app.zoo = crate::catalog::merge_zoo(
+                    std::mem::take(&mut app.zoo),
+                    std::mem::take(&mut result.models),
+                );
+                app.notify(result.message(app.zoo.len().saturating_sub(previous)));
+            }
+            app.invalidate_perf_request();
+            while let Ok((generation, detail)) = perf_rx.try_recv() {
+                perf_busy = false;
+                app.finish_perf_detail(generation, detail);
+            }
+            if !perf_busy {
+                if let Some((generation, model, target)) = app.perf_request.take() {
+                    perf_busy = true;
+                    let tx = perf_tx.clone();
+                    let prom = prom.clone();
+                    let ns = ns.clone();
+                    rt.spawn(async move {
+                        let detail = collect::perf_detail(&prom, &ns, &model, &target).await;
+                        let _ = tx.send((generation, detail));
+                    });
+                }
+            }
+            app.invalidate_yaml_request();
+            while let Ok((generation, result)) = yaml_rx.try_recv() {
+                yaml_busy = false;
+                app.finish_yaml(generation, result);
+            }
+            if !yaml_busy {
+                if let Some(request) = app.yaml_request.take() {
+                    yaml_busy = true;
+                    let tx = yaml_tx.clone();
+                    let ns = ns.clone();
+                    std::thread::spawn(move || {
+                        let result = kube::resource_yaml(
+                            &request.kind,
+                            request.namespaced.then_some(ns.as_str()),
+                            &request.name,
+                        )
+                        .map_err(|e| e.to_string());
+                        let _ = tx.send((request.generation, result));
+                    });
+                }
+            }
+            app.poll_policy();
             app.tick = app.tick.wrapping_add(1);
             terminal.draw(|f| ui::draw(f, &app, &mut fx))?;
 
@@ -1276,9 +1310,22 @@ fn ui_loop(
                         }
                         continue;
                     }
-                    // Help overlay: any key closes it
+                    // Help scrolling stays inside the modal.
                     if top == Some(ui::Overlay::Help) {
-                        app.help = false;
+                        let size = terminal.size()?;
+                        let max = ui::help_scroll_max(size.width, size.height);
+                        app.help_scroll = app.help_scroll.min(max);
+                        match k.code {
+                            KeyCode::Up => app.help_scroll = app.help_scroll.saturating_sub(1),
+                            KeyCode::Down => app.help_scroll = app.help_scroll.saturating_add(1),
+                            KeyCode::PageUp => app.help_scroll = app.help_scroll.saturating_sub(10),
+                            KeyCode::PageDown => {
+                                app.help_scroll = app.help_scroll.saturating_add(10)
+                            }
+                            KeyCode::Home => app.help_scroll = 0,
+                            KeyCode::End => app.help_scroll = max,
+                            _ => app.help = false,
+                        }
                         continue;
                     }
                     // Quit confirmation: opened by q in the background. Keep it separate from mutation confirms.
@@ -1294,33 +1341,83 @@ fn ui_loop(
                         continue;
                     }
                     // Mutation confirm (y/n) — other keys ignored. Execution happens here (permission check at trigger time).
-                    if let Some(pending) = app.confirm.clone().filter(|_| top == Some(ui::Overlay::Confirm)) {
-                        // Only for Apply confirms: e=edit in vi, v=server dry-run validation (YAML reachable only via specific keys).
-                        if let Pending::Apply { yaml, title } = &pending {
+                    if let Some(pending) = app
+                        .confirm
+                        .clone()
+                        .filter(|_| top == Some(ui::Overlay::Confirm))
+                    {
+                        if app.manifest_review_details {
+                            let size = terminal.size()?;
+                            let max = ui::manifest_review_scroll_max(
+                                &pending,
+                                size.width,
+                                size.height,
+                                app.manifest_review.error.as_deref(),
+                            );
+                            app.manifest_review_scroll = app.manifest_review_scroll.min(max);
                             match k.code {
+                                KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q') => {
+                                    app.manifest_review_details = false
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    app.manifest_review_scroll =
+                                        app.manifest_review_scroll.saturating_add(1).min(max)
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    app.manifest_review_scroll =
+                                        app.manifest_review_scroll.saturating_sub(1)
+                                }
+                                KeyCode::PageDown => {
+                                    app.manifest_review_scroll =
+                                        app.manifest_review_scroll.saturating_add(10).min(max)
+                                }
+                                KeyCode::PageUp => {
+                                    app.manifest_review_scroll =
+                                        app.manifest_review_scroll.saturating_sub(10)
+                                }
+                                KeyCode::Home => app.manifest_review_scroll = 0,
+                                KeyCode::End => app.manifest_review_scroll = max,
+                                _ => {}
+                            }
+                            continue;
+                        }
+                        // Only for Apply confirms: e=edit in vi, v=server dry-run validation (YAML reachable only via specific keys).
+                        if let Pending::Apply {
+                            yaml,
+                            title,
+                            required,
+                            ..
+                        } = &pending
+                        {
+                            match k.code {
+                                KeyCode::Char('p') | KeyCode::Char('P') => {
+                                    app.manifest_review_details = true;
+                                    app.manifest_review_scroll = 0;
+                                    continue;
+                                }
                                 KeyCode::Char('e') | KeyCode::Char('E') => {
                                     if let Some(edited) = edit_in_editor(&mut terminal, yaml) {
                                         app.confirm = Some(Pending::Apply {
+                                            reviewed: None,
+                                            required: *required,
                                             title: title.clone(),
                                             yaml: edited,
                                         });
+                                        app.manifest_review.reset();
+                                        app.confirm_yes = false;
                                         app.notify(
-                                            "manifest edited (vi) — Enter to apply".to_string(),
+                                            "manifest edited — preparing targets again".to_string(),
                                         );
                                     }
                                     continue;
                                 }
                                 KeyCode::Char('v') | KeyCode::Char('V') => {
-                                    match kube::apply_manifest(&ns, yaml, true) {
-                                        Ok(o) => app.notify(format!(
-                                            "valid ✓ {}",
-                                            o.lines().next().unwrap_or("ok")
-                                        )),
-                                        Err(e) => app.notify(format!(
-                                            "invalid: {}",
-                                            e.to_string().lines().next().unwrap_or("")
-                                        )),
+                                    if let Some(Pending::Apply { reviewed, .. }) = &mut app.confirm
+                                    {
+                                        *reviewed = None;
                                     }
+                                    app.manifest_review.reset();
+                                    app.confirm_yes = false;
                                     continue;
                                 }
                                 _ => {}
@@ -1341,21 +1438,10 @@ fn ui_loop(
                             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => false,
                             _ => continue, // ignore other keys (popup stays)
                         };
-                        app.confirm = None;
-                        app.confirm_yes = false; // next popup defaults to No
-                        if !execute {
-                            app.notify("cancelled".to_string());
+                        let Some(pending) = app.resolve_confirmation(execute) else {
                             continue;
-                        }
-                        // Mutations run on a worker thread — so kube (up to 8s) doesn't freeze the UI.
-                        // Result arrives via mut_rx; the main loop runs apply_outcome (audit + toast/failure window).
-                        if app.inflight.is_some() {
-                            app.notify(
-                                "mutation in progress — retry after it completes".to_string(),
-                            );
-                            continue;
-                        }
-                        app.inflight = Some(pending.prompt());
+                        };
+                        // The reviewed operation now owns the execution slot.
                         let tx = mut_tx.clone();
                         let ns2 = ns.clone();
                         let amode = app.mode;
@@ -1395,11 +1481,43 @@ fn ui_loop(
                             _ => None,
                         };
                         if let Some(action) = act {
-                            let subject = app.action_menu.as_ref().unwrap().subject.clone();
-                            app.action_menu = None;
-                            dispatch_action(&mut app, action, &subject, &ns, &prom, &rt);
+                            let menu = app.action_menu.take().unwrap();
+                            dispatch_action(
+                                &mut app,
+                                action,
+                                &menu.subject,
+                                menu.route,
+                                &ns,
+                                &prom,
+                                &rt,
+                            );
                         }
                         continue;
+                    }
+                    // Manual form viewport movement never edits or submits a field.
+                    if matches!(
+                        top,
+                        Some(
+                            ui::Overlay::CompileForm
+                                | ui::Overlay::DeployForm
+                                | ui::Overlay::PrefetchForm
+                                | ui::Overlay::ObjectiveForm
+                        )
+                    ) {
+                        let scroll = app.form_view_position.get();
+                        let next = match k.code {
+                            KeyCode::PageUp => Some(scroll.saturating_sub(10)),
+                            KeyCode::PageDown => Some(scroll.saturating_add(10)),
+                            KeyCode::Home => Some(0),
+                            KeyCode::End => Some(u16::MAX),
+                            _ => None,
+                        };
+                        app.form_scroll.set(next);
+                        if next.is_some() {
+                            continue;
+                        }
+                    } else {
+                        app.form_scroll.set(None);
                     }
                     // Serving objective edit form overlay.
                     if top == Some(ui::Overlay::ObjectiveForm) {
@@ -1452,9 +1570,7 @@ fn ui_loop(
                             KeyCode::Backspace => {
                                 app.store_form.as_mut().unwrap().value.pop();
                             }
-                            KeyCode::Char(c) => {
-                                app.store_form.as_mut().unwrap().value.push(c)
-                            }
+                            KeyCode::Char(c) => app.store_form.as_mut().unwrap().value.push(c),
                             _ => {}
                         }
                         continue;
@@ -1473,6 +1589,7 @@ fn ui_loop(
                                         app.notify("route: no changes".to_string());
                                     } else {
                                         app.confirm = Some(Pending::RouteRename {
+                                            expected: form.expected,
                                             route: form.route,
                                             old: form.path,
                                             new,
@@ -1480,6 +1597,7 @@ fn ui_loop(
                                     }
                                 } else if let Some((kind, name)) = form.value.split_once(':') {
                                     app.confirm = Some(Pending::RouteRetarget {
+                                        expected: form.expected,
                                         route: form.route,
                                         path: form.path,
                                         backend: name.to_string(),
@@ -1524,6 +1642,10 @@ fn ui_loop(
                         continue;
                     }
                     // NPU compile options form overlay. Enter(옵션 확정) → 목적지 노드 picker(2단계).
+                    if top == Some(ui::Overlay::PolicyForm) {
+                        handle_edit_form!(app, policy_form, policy_form_submit, k.code);
+                        continue;
+                    }
                     if top == Some(ui::Overlay::CompileForm) {
                         let editing = app.compile_form.as_ref().unwrap().editing;
                         if !editing && matches!(k.code, KeyCode::Enter) {
@@ -1564,17 +1686,20 @@ fn ui_loop(
                             // Clamp at the last line — unbounded `j` used to scroll the content
                             // off into a blank window with no way to tell you had passed the end (BUG-15).
                             KeyCode::Down | KeyCode::Char('j') => {
-                                let lines = app
-                                    .preview
-                                    .as_ref()
-                                    .map(|(_, y)| y.lines().count())
-                                    .unwrap_or(0) as u16;
+                                let lines =
+                                    app.preview
+                                        .as_ref()
+                                        .map(|(_, y)| y.lines().count())
+                                        .unwrap_or(0) as u16;
                                 app.preview_scroll = app
                                     .preview_scroll
                                     .saturating_add(3)
                                     .min(lines.saturating_sub(1));
                             }
                             // 파일로 저장(어느 preview 든) — 편집 후 kubectl apply 하거나 보관.
+                            KeyCode::Char('w') if app.yaml_is_loading() => {
+                                app.notify("YAML is still loading".into());
+                            }
                             KeyCode::Char('w') => {
                                 if let Some((title, yaml)) = app.preview.clone() {
                                     match save_manifest(&title, &yaml) {
@@ -1586,29 +1711,16 @@ fn ui_loop(
                             // 서버 dry-run 검증(무변경) — 생성 매니페스트에만.
                             KeyCode::Char('v') if app.preview_apply => {
                                 if let Some((_, yaml)) = app.preview.clone() {
-                                    // placeholder 여부 — dry-run 은 이미지 형식을 검증하지 않아 valid 로 통과함을 명시.
-                                    let ph = if manifest_has_placeholder(&yaml) {
-                                        " · ⚠ still has TODO- placeholders (apply blocked)"
-                                    } else {
-                                        ""
-                                    };
-                                    match kube::apply_manifest(&ns, &yaml, true) {
-                                        Ok(o) => app.notify(format!(
-                                            "valid ✓ {}{}",
-                                            o.lines().next().unwrap_or("ok"),
-                                            ph
-                                        )),
-                                        Err(e) => app.notify(format!(
-                                            "invalid: {}",
-                                            e.to_string().lines().next().unwrap_or("")
-                                        )),
-                                    }
+                                    start_validation(&mut app, &validation_tx, &ns, &yaml);
                                 }
                             }
                             // 실제 적용(admin+, 확인, 생성 매니페스트만). TODO placeholder 있으면 거부.
-                            KeyCode::Char('a') if app.preview_apply && !app.can(Mode::Admin) => {
+                            KeyCode::Char('a')
+                                if app.preview_apply && !app.can(app.preview_required) =>
+                            {
                                 app.notify(format!(
-                                    "apply needs --mode admin+ (current: {})",
+                                    "apply needs --mode {}+ (current: {})",
+                                    app.preview_required.name(),
                                     app.mode.name()
                                 ));
                             }
@@ -1618,7 +1730,12 @@ fn ui_loop(
                                     if manifest_has_placeholder(&yaml) {
                                         app.notify("apply blocked: TODO- placeholder remains; set the LMD_*_IMAGE env var".to_string());
                                     } else {
-                                        app.confirm = Some(Pending::Apply { title, yaml });
+                                        app.confirm = Some(Pending::Apply {
+                                            reviewed: None,
+                                            title,
+                                            yaml,
+                                            required: app.preview_required,
+                                        });
                                     }
                                 }
                             }
@@ -1629,7 +1746,7 @@ fn ui_loop(
                     // Logs overlay.
                     if top == Some(ui::Overlay::Logs) {
                         match k.code {
-                            KeyCode::Esc | KeyCode::Char('q') => app.logs_mode = false,
+                            KeyCode::Esc | KeyCode::Char('q') => app.close_logs(),
                             KeyCode::Up | KeyCode::Char('k') => {
                                 app.logs_scroll = app.logs_scroll.saturating_sub(1)
                             }
@@ -1642,9 +1759,7 @@ fn ui_loop(
                                     .min((app.logs.len() as u16).saturating_sub(1));
                             }
                             KeyCode::Char('r') => {
-                                if let Ok(l) = kube::logs(&ns, &app.logs_target, 400) {
-                                    app.logs = l;
-                                }
+                                app.request_logs(app.logs_target.clone());
                             }
                             _ => {}
                         }
@@ -1687,22 +1802,17 @@ fn ui_loop(
                         }
                         // Zoo: r → furiosa-ai HF org 라이브 새로고침(curl shell-out; pivot 보다 우선).
                         KeyCode::Char('r') if app.view == View::Zoo => {
-                            let live = rt.block_on(crate::catalog::fetch_zoo_live());
-                            let n0 = app.zoo.len();
-                            app.zoo = crate::catalog::merge_zoo(std::mem::take(&mut app.zoo), live);
-                            let added = app.zoo.len().saturating_sub(n0);
-                            let orgs: Vec<&str> = accel::packs()
-                                .iter()
-                                .flat_map(|p| p.hf_orgs.iter().copied())
-                                .collect();
-                            app.notify(if added > 0 {
-                                format!("zoo refreshed — +{} new from {}", added, orgs.join(", "))
+                            if !zoo_busy {
+                                zoo_busy = true;
+                                app.notify("refreshing model zoo…".into());
+                                let tx = zoo_tx.clone();
+                                rt.spawn(async move {
+                                    let result = crate::catalog::fetch_zoo_live().await;
+                                    let _ = tx.send(result);
+                                });
                             } else {
-                                format!(
-                                    "zoo refreshed — up to date (queried {})",
-                                    orgs.join(", ")
-                                )
-                            });
+                                app.notify("model zoo refresh already running".into());
+                            }
                         }
                         // 크로스레이어 드릴 pivot — 선택 엔티티에서 관련 레이어로 점프
                         KeyCode::Char(c @ ('p' | 'i' | 'r' | 'e' | 'm' | 'n')) => app.pivot(c),
@@ -1711,6 +1821,7 @@ fn ui_loop(
                         KeyCode::Char('-') | KeyCode::Char('_') => app.epp_adjust(-1.0),
                         // 세션 에너지 리셋(all-smi 식)
                         KeyCode::Char('R') => app.reset_energy(),
+                        KeyCode::Char('P') if app.view == app::View::Epp => app.cycle_epp_profile(),
                         KeyCode::Char('?') => app.toggle_help(),
                         KeyCode::Char('A') => app.toggle_alerts(),
                         KeyCode::Char('a') => open_actions_or_detail(&mut app, false),
@@ -1739,10 +1850,8 @@ fn ui_loop(
                         KeyCode::Enter => {
                             if app.view == View::Perf {
                                 // 선택 모델 지연 분포 온디맨드 조회 → 히스토그램 드릴
-                                if let Some(model) = app.selected_perf_model() {
-                                    let d = rt.block_on(collect::perf_detail(&prom, &model));
-                                    app.perf_detail = Some(d);
-                                    app.detail = true;
+                                if let Some(model) = app.perf_model_to_query() {
+                                    app.request_perf_detail(model);
                                 }
                             } else if app.view == View::Routing {
                                 open_actions_or_detail(&mut app, false);
@@ -1807,15 +1916,7 @@ fn ui_loop(
                         KeyCode::Char('l') => {
                             // 선택 pod/모델의 로그 오버레이
                             if let Some(pod) = app.logs_target_pod() {
-                                match kube::logs(&ns, &pod, 400) {
-                                    Ok(l) => {
-                                        app.logs_scroll = l.len().saturating_sub(30) as u16;
-                                        app.logs = l;
-                                        app.logs_target = pod;
-                                        app.logs_mode = true;
-                                    }
-                                    Err(e) => app.notify(format!("logs: {}", e)),
-                                }
+                                app.request_logs(pod);
                             } else {
                                 app.notify(
                                     "logs: select a pod/model in Pods or Models".to_string(),
@@ -1837,7 +1938,11 @@ fn ui_loop(
                                 // reading it here made a second `s` scale to 0 again (ACT-01).
                                 let now = app.effective_desired(&name).unwrap_or(m.desired);
                                 let target = if now == 0 { 1 } else { 0 };
-                                app.confirm = Some(Pending::Scale { name, target });
+                                app.confirm = Some(Pending::Scale {
+                                    expected: app.snap.deployment_versions.get(&name).cloned(),
+                                    name,
+                                    target,
+                                });
                             } else {
                                 app.notify("scale: select a model in Models/Overview".to_string());
                             }
@@ -1852,6 +1957,7 @@ fn ui_loop(
                         KeyCode::Char('S') => {
                             if let Some(m) = app.selected_model() {
                                 app.confirm = Some(Pending::Restart {
+                                    expected: app.snap.deployment_versions.get(&m.name).cloned(),
                                     name: m.name.clone(),
                                 });
                             } else {
@@ -1871,9 +1977,8 @@ fn ui_loop(
                             if let Some(m) = app.selected_model() {
                                 // Same reason as `s`: right after a stop the snapshot still
                                 // says it is running, so this would offer to stop it again.
-                                let now = app
-                                    .effective_desired(&m.name.clone())
-                                    .unwrap_or(m.desired);
+                                let now =
+                                    app.effective_desired(&m.name.clone()).unwrap_or(m.desired);
                                 if now == 0 {
                                     app.notify(format!(
                                         "{} is already stopped (0 replicas)",
@@ -1881,6 +1986,11 @@ fn ui_loop(
                                     ));
                                 } else {
                                     app.confirm = Some(Pending::Stop {
+                                        expected: app
+                                            .snap
+                                            .deployment_versions
+                                            .get(&m.name)
+                                            .cloned(),
                                         name: m.name.clone(),
                                     });
                                 }
@@ -1893,21 +2003,7 @@ fn ui_loop(
                         // 선택 리소스의 live YAML 보기(읽기전용 preview) — k9s y.
                         KeyCode::Char('y') => {
                             if let Some((kind, nsd, name)) = app.yaml_target() {
-                                let nsopt = if nsd { Some(ns.as_str()) } else { None };
-                                match kube::resource_yaml(kind, nsopt, &name) {
-                                    Ok(y) => {
-                                        app.preview = Some((
-                                            format!("{} {} · yaml (read-only)", kind, name),
-                                            y,
-                                        ));
-                                        app.preview_scroll = 0;
-                                        app.preview_apply = false;
-                                    }
-                                    Err(e) => app.notify(format!(
-                                        "yaml: {}",
-                                        e.to_string().lines().next().unwrap_or("")
-                                    )),
-                                }
+                                app.request_yaml(kind, nsd, name);
                             } else {
                                 app.notify(
                                     "yaml: select a resource in Models, Pods, Nodes, or Deploy"
@@ -1960,158 +2056,67 @@ fn ui_loop(
     result
 }
 
-/// Missing metric → em dash, matching how the TUI and `--json` (null) report absence.
-/// The headless text used to print a raw `NaN`, which reads as a broken value rather than
-/// "this node has no node-exporter" (BUG-14).
-fn dash(v: f64) -> String {
-    if v.is_nan() {
-        "—".to_string()
-    } else {
-        format!("{:.2}", v)
-    }
-}
-
-/// Same, at a caller-chosen precision.
-fn dashp(v: f64, prec: usize) -> String {
-    if v.is_nan() {
-        "—".to_string()
-    } else {
-        format!("{:.*}", prec, v)
-    }
-}
-
-fn print_snapshot(s: &collect::Snapshot, cfg: &Config) {
-    println!("== lmd-top snapshot (prom={}, ns={}) ==", cfg.prom, cfg.ns);
-    println!(
-        "gateway: {} {}",
-        if s.gw_addr.is_empty() {
-            "—"
-        } else {
-            &s.gw_addr
-        },
-        if s.gw_ok { "Programmed" } else { "" }
-    );
-    println!("\n[nodes] {}", s.nodes.len());
-    for n in &s.nodes {
-        println!(
-            "  {:<24} load1 {:>5}  mem {}/{}G",
-            n.name,
-            dash(n.load1),
-            dashp(n.mem_used_gb, 0),
-            dashp(n.mem_total_gb, 0)
-        );
-    }
-    println!("\n[accelerators] {}", s.accel.len());
-    for a in &s.accel {
-        println!(
-            "  {:<5} {:<6} {:<16} util {:>5}%  mem {}/{}G  {}°C {}W  {}",
-            a.disp(),
-            a.id,
-            a.node,
-            dashp(a.util, 1),
-            dashp(a.mem_used_gb, 0),
-            dashp(a.mem_total_gb, 0),
-            dashp(a.temp, 0),
-            dashp(a.power, 0),
-            a.busy_model
-        );
-    }
-    println!("\n[inference pools] {}", s.pools.len());
-    for p in &s.pools {
-        println!(
-            "  {:<16} ready {}  queue {}  kv {}  sat {}",
-            p.name,
-            dashp(p.ready, 0),
-            dashp(p.queue, 1),
-            dash(p.kv),
-            dash(p.sat)
-        );
-    }
-    if let Some(e) = &s.epp {
-        println!(
-            "\n[EPP] profile={} picker={}\n  scorers: {}",
-            e.profile,
-            e.picker,
-            e.scorers
-                .iter()
-                .map(|(n, w)| format!("{}·w{:.0}", n, w))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    println!("\n[models] {}", s.models.len());
-    for m in &s.models {
-        println!(
-            "  {:<24} {}/{}  run={} wait={} tps={}  path={}  {}",
-            m.name,
-            m.ready,
-            m.desired,
-            m.running.map(|x| format!("{:.0}", x)).unwrap_or("-".into()),
-            m.waiting.map(|x| format!("{:.0}", x)).unwrap_or("-".into()),
-            m.tps.map(|x| format!("{:.0}", x)).unwrap_or("-".into()),
-            if m.route.is_empty() { "-" } else { &m.route },
-            m.status
-        );
-    }
-    println!(
-        "\n[routes] {} (epp_in_path={})",
-        s.routes.len(),
-        s.epp_in_path
-    );
-    for r in &s.routes {
-        println!("  {:<10} → {}/{}", r.path, r.kind, r.backend);
-    }
-    if !s.objectives.is_empty() {
-        println!(
-            "[SLO] {}",
-            s.objectives
-                .iter()
-                .map(|o| format!("{}(p{})", o.name, o.priority))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    println!("\n[pods] {}", s.pods.len());
-    for p in &s.pods {
-        println!(
-            "  {:<40} {:<8} {} {} restarts={}",
-            p.name, p.phase, p.ready, p.node, p.restarts
-        );
-    }
-    // Compile-option advice from recorded history, for the models currently in the store.
-    let hist = crate::history::load();
-    if !hist.is_empty() {
-        println!("\n[history] {} record(s)", hist.len());
-        let mut seen = std::collections::BTreeSet::new();
-        for r in hist.iter().rev() {
-            if !seen.insert((r.model.clone(), r.vendor.clone())) {
-                continue;
-            }
-            let advice = crate::advisor::advise(&hist, &r.model, &r.vendor);
-            let line = advice.line();
-            if !line.is_empty() {
-                println!("  {} / {}: {}", r.model, r.vendor, line);
-            }
-        }
-    }
-    if !s.warnings.is_empty() {
-        println!("\n[warnings] {}", s.warnings.len());
-        for w in &s.warnings {
-            println!("  ! {}", w);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{apply_outcome, check_args, ArgCheck, MutationOutcome, OkInfo};
+    use super::{apply_outcome, check_args, ArgCheck, MutationOutcome};
     use super::{App, Mode};
+    use crate::mutation::OkInfo;
 
     fn args(v: &[&str]) -> Vec<String> {
         std::iter::once("lmd-top")
             .chain(v.iter().copied())
             .map(String::from)
             .collect()
+    }
+
+    #[test]
+    fn worker_audit_is_not_duplicated_by_ui_delivery() {
+        let _sink = crate::audit::TestSink::new();
+        let path = std::env::temp_dir().join(format!("lmd-audit-once-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        std::env::set_var("LMD_AUDIT", &path);
+        let outcome =
+            super::run_mutation(crate::app::Pending::StoreRefresh, "test-ns", Mode::Observe);
+        assert!(outcome.audit_attempted);
+        assert!(outcome.audit_error.is_none());
+        let before = std::fs::read_to_string(&path).unwrap();
+        apply_outcome(&mut App::new(), outcome);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(before.lines().count(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn audit_failure_does_not_turn_completed_operation_into_retry() {
+        let _sink = crate::audit::TestSink::new();
+        std::env::set_var("LMD_AUDIT", std::env::temp_dir());
+        let mut app = App::new();
+        apply_outcome(
+            &mut app,
+            MutationOutcome {
+                audit_scope: Default::default(),
+                audit_attempted: false,
+                audit_error: None,
+                mode: Mode::Admin,
+                audit_action: "scale".into(),
+                audit_target: "model".into(),
+                fail_label: "scale",
+                result: Ok(OkInfo {
+                    audit_detail: "scaled".into(),
+                    notify: "scaled model".into(),
+                    clear_preview: false,
+                    window: None,
+                    desired_now: Some(("model".into(), 2)),
+                }),
+            },
+        );
+        assert_eq!(app.pending_desired.get("model"), Some(&2));
+        assert!(app
+            .toast
+            .as_deref()
+            .unwrap()
+            .contains("audit log write failed"));
+        assert!(app.toast.as_deref().unwrap().contains("do not repeat"));
     }
 
     #[test]
@@ -2127,6 +2132,9 @@ mod tests {
         apply_outcome(
             &mut app,
             MutationOutcome {
+                audit_scope: Default::default(),
+                audit_attempted: false,
+                audit_error: None,
                 mode: Mode::Admin,
                 audit_action: "apply".into(),
                 audit_target: "manifest-x".into(),
@@ -2181,6 +2189,9 @@ mod tests {
         apply_outcome(
             &mut app,
             MutationOutcome {
+                audit_scope: Default::default(),
+                audit_attempted: false,
+                audit_error: None,
                 mode: Mode::Admin,
                 audit_action: "scale→0".into(),
                 audit_target: "qa-dummy".into(),
@@ -2220,6 +2231,9 @@ mod tests {
         apply_outcome(
             &mut app,
             MutationOutcome {
+                audit_scope: Default::default(),
+                audit_attempted: false,
+                audit_error: None,
                 mode: Mode::Admin,
                 audit_action: "scale→1".into(),
                 audit_target: "gone".into(),
@@ -2257,6 +2271,9 @@ mod tests {
         apply_outcome(
             &mut app,
             MutationOutcome {
+                audit_scope: Default::default(),
+                audit_attempted: false,
+                audit_error: None,
                 mode: Mode::Admin,
                 audit_action: "scale→2".into(),
                 audit_target: "ds4".into(),
@@ -2310,18 +2327,39 @@ mod tests {
         app.view = crate::app::View::Overview;
         // A is running (stop → 0); B is stopped (start → 1).
         app.snap.models = vec![model("model-a", 1), model("model-b", 0)];
+        let reviewed = crate::resource_guard::Identity {
+            uid: "original-a".into(),
+            version: "12".into(),
+        };
+        app.snap
+            .deployment_versions
+            .insert("model-a".into(), reviewed.clone());
         app.selected = 1; // selection sits on B, as a stray wheel event would leave it
 
         super::dispatch_action(
             &mut app,
             crate::app::Action::Scale,
             "model-a", // subject frozen when the menu opened
+            None,
             "llm-serving",
             "127.0.0.1:9090",
             rt.handle(),
         );
+        // A background collection must not retarget an already displayed confirmation.
+        app.snap.deployment_versions.insert(
+            "model-a".into(),
+            crate::resource_guard::Identity {
+                uid: "replacement-a".into(),
+                version: "13".into(),
+            },
+        );
         match app.confirm.take() {
-            Some(crate::app::Pending::Scale { name, target }) => {
+            Some(crate::app::Pending::Scale {
+                name,
+                target,
+                expected,
+            }) => {
+                assert_eq!(expected, Some(reviewed));
                 assert_eq!(name, "model-a");
                 assert_eq!(target, 0, "running subject must scale to 0, not follow B");
             }
@@ -2413,6 +2451,7 @@ mod tests {
         let mut app = App::new();
         assert!(crate::ui::Overlay::top(&app).is_none());
         app.action_menu = Some(crate::app::ActionMenu {
+            route: None,
             title: "model-a".into(),
             subject: "model-a".into(),
             items: Vec::new(),
@@ -2577,5 +2616,77 @@ mod tests {
             check_args(&args(&["--mode", "admin", "--x"])),
             ArgCheck::Unknown("--x".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod route_menu_subject_tests {
+    use super::*;
+    #[test]
+    fn route_mutations_use_the_frozen_menu_object_even_with_duplicate_paths() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for action in [
+            app::Action::RouteRename,
+            app::Action::RouteRetarget,
+            app::Action::RouteDelete,
+        ] {
+            let mut app = App::new();
+            app.mode = Mode::Danger;
+            app.view = app::View::Routing;
+            app.snap.service_names = vec!["destination".into()];
+            for name in ["first-route", "selected-route"] {
+                app.snap.routes.push(collect::Route {
+                    configuration: None,
+                    match_summary: String::new(),
+                    backend_summary: String::new(),
+                    single_local_backend: true,
+                    identity: Some(resource_guard::Identity {
+                        uid: format!("{name}-uid"),
+                        version: "42".into(),
+                    }),
+                    route: name.into(),
+                    path: "/v1".into(),
+                    backend: "destination".into(),
+                    kind: "Service".into(),
+                });
+            }
+            app.selected = 1;
+            app.open_action_menu();
+            let menu = app.action_menu.take().unwrap();
+            let selected = menu.route.as_ref().unwrap();
+            assert_eq!(selected.route, "selected-route");
+            assert!(menu.title.contains("selected-route"));
+            let expected = selected.identity.clone();
+            // Simulate refresh/re-sort/removal while the operator reads the menu.
+            app.snap.routes.remove(1);
+            app.selected = 0;
+            dispatch_action(
+                &mut app,
+                action,
+                &menu.subject,
+                menu.route,
+                "ns",
+                "unused:1",
+                rt.handle(),
+            );
+            if matches!(action, app::Action::RouteDelete) {
+                let Some(Pending::RouteDelete {
+                    route,
+                    path,
+                    expected: actual,
+                }) = app.confirm
+                else {
+                    panic!("expected deletion confirmation")
+                };
+                assert_eq!(route, "selected-route");
+                assert_eq!(path, "/v1");
+                assert_eq!(actual, expected);
+            } else {
+                let form = app.route_form.unwrap();
+                assert_eq!(form.route, "selected-route");
+                assert_eq!(form.path, "/v1");
+                assert_eq!(form.expected, expected);
+            }
+        }
     }
 }

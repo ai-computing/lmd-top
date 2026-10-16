@@ -12,6 +12,8 @@ use tokio::time::{timeout, Duration};
 /// Circuit breaker — set once a reachability probe fails, cleared when one succeeds.
 /// While open, queries fail instantly instead of each burning a 6 s timeout. Without this
 /// a blackholed Prometheus made one collect take 92 s (BUG-01), freezing startup for that long.
+const MAX_HTTP_BYTES: usize = 16 * 1024 * 1024;
+
 static PROM_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// Record probe outcome (called by collect's `vector(1)` probe). `up=false` opens the circuit.
@@ -62,7 +64,9 @@ pub async fn query_all(base: &str, qs: &[&str]) -> Vec<Result<Vec<Series>>> {
         let q = q.to_string();
         set.spawn(async move { (i, query(&base, &q).await) });
     }
-    let mut out: Vec<Result<Vec<Series>>> = (0..qs.len()).map(|_| Ok(Vec::new())).collect();
+    let mut out: Vec<Result<Vec<Series>>> = (0..qs.len())
+        .map(|_| Err(anyhow!("query task did not complete")))
+        .collect();
     while let Some(joined) = set.join_next().await {
         if let Ok((i, r)) = joined {
             out[i] = r;
@@ -75,18 +79,25 @@ pub async fn query_all(base: &str, qs: &[&str]) -> Vec<Result<Vec<Series>>> {
 /// label="job" → scrape jobs (= exporters). Used by doctor (full survey).
 pub async fn label_values(base: &str, label: &str) -> Result<Vec<String>> {
     let body = http_get(base, &format!("/api/v1/label/{}/values", label)).await?;
-    let v: serde_json::Value = serde_json::from_str(&body)?;
+    parse_label_values(&body)
+}
+
+fn parse_label_values(body: &str) -> Result<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(body)?;
     if v["status"] != "success" {
         return Err(anyhow!("prometheus status != success"));
     }
-    Ok(v["data"]
+    v["data"]
         .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
+        .ok_or_else(|| anyhow!("prometheus label data must be an array"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(String::from)
+                .ok_or_else(|| anyhow!("prometheus label value must be a string"))
         })
-        .unwrap_or_default())
+        .collect()
 }
 
 async fn http_get(base: &str, path: &str) -> Result<String> {
@@ -128,69 +139,157 @@ fn is_retryable(e: &anyhow::Error) -> bool {
 async fn http_get_once(host: &str, path: &str, budget: Duration) -> Result<String> {
     let fut = async {
         let mut stream = TcpStream::connect(host).await?;
-        // HTTP/1.1 + Connection: close — works behind 1.1-only proxies. Chunked decoded below.
-        let req = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nUser-Agent: lmd-top\r\nConnection: close\r\n\r\n",
-            path, host
-        );
-        stream.write_all(req.as_bytes()).await?;
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await?;
-        Ok::<Vec<u8>, anyhow::Error>(buf)
+        read_http_exchange(&mut stream, host, path).await
     };
     // Response stays bytes until the body is fully de-chunked. Decoding chunk-size *byte* offsets
     // on a lossy String shifts every offset once a chunk splits a multi-byte char (BUG-13).
     let raw = timeout(budget, fut)
         .await
         .map_err(|_| anyhow!("prometheus timeout"))??;
+    decode_http_response(&raw)
+}
+
+async fn read_http_exchange(
+    stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
+    host: &str,
+    path: &str,
+) -> Result<Vec<u8>> {
+    // HTTP/1.1 + Connection: close — works behind 1.1-only proxies. Chunked decoded below.
+    let req = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nUser-Agent: lmd-top\r\nConnection: close\r\n\r\n",
+            path, host
+        );
+    stream.write_all(req.as_bytes()).await?;
+    let mut buf = Vec::new();
+    stream
+        .take((MAX_HTTP_BYTES + 1) as u64)
+        .read_to_end(&mut buf)
+        .await?;
+    if buf.len() > MAX_HTTP_BYTES {
+        return Err(anyhow!(
+            "prometheus HTTP response exceeds {MAX_HTTP_BYTES} bytes"
+        ));
+    }
+    Ok::<Vec<u8>, anyhow::Error>(buf)
+}
+
+fn decode_http_response(raw: &[u8]) -> Result<String> {
     let sep = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| anyhow!("malformed http response"))?;
-    let (head, body) = (&raw[..sep], &raw[sep + 4..]);
-    let head = String::from_utf8_lossy(head); // headers are ASCII by spec
-    // Check the status line (report 4xx/5xx clearly).
-    if let Some(status) = head.lines().next() {
-        if let Some(code) = status.split_whitespace().nth(1) {
-            if code.starts_with('4') || code.starts_with('5') {
-                return Err(anyhow!("prometheus HTTP {}", code));
+        .filter(|size| *size <= 65536)
+        .ok_or_else(|| anyhow!("prometheus HTTP missing or oversized headers"))?;
+    let head =
+        std::str::from_utf8(&raw[..sep]).map_err(|_| anyhow!("prometheus HTTP invalid headers"))?;
+    let body = &raw[sep + 4..];
+    let mut lines = head.split("\r\n");
+    let mut status = lines.next().unwrap_or("").split_whitespace();
+    if !matches!(status.next(), Some("HTTP/1.0" | "HTTP/1.1")) {
+        return Err(anyhow!("prometheus HTTP invalid status line"));
+    }
+    let code = status
+        .next()
+        .filter(|code| code.len() == 3 && code.bytes().all(|c| c.is_ascii_digit()))
+        .ok_or_else(|| anyhow!("prometheus HTTP invalid status code"))?;
+    if code != "200" {
+        return Err(anyhow!("prometheus HTTP {code}"));
+    }
+    let mut length = None;
+    let mut encoding = Vec::new();
+    for line in lines {
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| anyhow!("prometheus HTTP malformed header"))?;
+        if name.is_empty() || name.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            return Err(anyhow!("prometheus HTTP invalid header name"));
+        }
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("content-length") {
+            for value in value.split(',').map(str::trim) {
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(anyhow!("prometheus HTTP invalid Content-Length"));
+                }
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| anyhow!("prometheus HTTP Content-Length overflow"))?;
+                if length.is_some_and(|previous| previous != parsed) {
+                    return Err(anyhow!("prometheus HTTP conflicting Content-Length"));
+                }
+                length = Some(parsed);
             }
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            encoding.extend(
+                value
+                    .split(',')
+                    .map(|part| part.trim().to_ascii_lowercase()),
+            );
+        } else if name.eq_ignore_ascii_case("content-encoding")
+            && !value.eq_ignore_ascii_case("identity")
+        {
+            return Err(anyhow!("prometheus HTTP unsupported Content-Encoding"));
         }
     }
-    // Decode if Transfer-Encoding: chunked.
-    let body = if head.to_lowercase().contains("transfer-encoding: chunked") {
-        dechunk(body)
+    let decoded = if !encoding.is_empty() {
+        if length.is_some() || encoding != ["chunked"] {
+            return Err(anyhow!(
+                "prometheus HTTP unsupported or conflicting framing"
+            ));
+        }
+        dechunk(body)?
     } else {
+        if length.is_some_and(|length| length != body.len()) {
+            return Err(anyhow!("prometheus HTTP Content-Length mismatch"));
+        }
         body.to_vec()
     };
-    Ok(String::from_utf8_lossy(&body).into_owned())
+    String::from_utf8(decoded).map_err(|_| anyhow!("prometheus HTTP invalid UTF-8 body"))
 }
 
 /// Decode HTTP chunked transfer, on bytes. A chunk boundary may fall in the middle of a
 /// multi-byte character, so the join has to happen before any UTF-8 interpretation —
 /// doing it on a `&str` corrupts the body (and any non-ASCII label with it).
-/// A truncated final chunk yields whatever bytes remain (no panic, no header bleed).
-fn dechunk(body: &[u8]) -> Vec<u8> {
+/// Reject incomplete framing instead of accepting a parseable JSON prefix.
+fn dechunk(body: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(body.len());
     let mut rest = body;
-    while let Some(nl) = rest.windows(2).position(|w| w == b"\r\n") {
-        let size_line = String::from_utf8_lossy(&rest[..nl]);
-        let size =
-            usize::from_str_radix(size_line.trim().split(';').next().unwrap_or("").trim(), 16)
-                .unwrap_or(0);
-        let after = &rest[nl + 2..];
+    loop {
+        let nl = rest
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .ok_or_else(|| anyhow!("prometheus HTTP incomplete chunk header"))?;
+        let size_line = std::str::from_utf8(&rest[..nl])?;
+        let digits = size_line.split(';').next().unwrap_or("");
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(anyhow!("prometheus HTTP invalid chunk size"));
+        }
+        let size = usize::from_str_radix(digits, 16)
+            .map_err(|_| anyhow!("prometheus HTTP chunk size overflow"))?;
+        rest = &rest[nl + 2..];
         if size == 0 {
-            break;
+            loop {
+                let end = rest
+                    .windows(2)
+                    .position(|w| w == b"\r\n")
+                    .ok_or_else(|| anyhow!("prometheus HTTP incomplete chunk trailer"))?;
+                if end == 0 {
+                    return Ok(out);
+                }
+                if !rest[..end].contains(&b':') {
+                    return Err(anyhow!("prometheus HTTP invalid chunk trailer"));
+                }
+                rest = &rest[end + 2..];
+            }
         }
-        if size >= after.len() {
-            // Declared size exceeds what arrived → take the remainder and stop.
-            out.extend_from_slice(after);
-            break;
+        let end = size
+            .checked_add(2)
+            .filter(|end| *end <= rest.len())
+            .ok_or_else(|| anyhow!("prometheus HTTP truncated chunk"))?;
+        if &rest[size..end] != b"\r\n" {
+            return Err(anyhow!("prometheus HTTP missing chunk terminator"));
         }
-        out.extend_from_slice(&after[..size]);
-        rest = after[size..].strip_prefix(b"\r\n").unwrap_or(&after[size..]);
+        out.extend_from_slice(&rest[..size]);
+        rest = &rest[end..];
     }
-    out
 }
 
 fn parse(body: &str) -> Result<Vec<Series>> {
@@ -198,24 +297,33 @@ fn parse(body: &str) -> Result<Vec<Series>> {
     if v["status"] != "success" {
         return Err(anyhow!("prometheus status != success"));
     }
+    if v["data"]["resultType"] != "vector" {
+        return Err(anyhow!("prometheus response is not an instant vector"));
+    }
+    let arr = v["data"]["result"]
+        .as_array()
+        .ok_or_else(|| anyhow!("prometheus response has no result array"))?;
     let mut out = Vec::new();
-    if let Some(arr) = v["data"]["result"].as_array() {
-        for item in arr {
-            let mut labels = BTreeMap::new();
-            if let Some(m) = item["metric"].as_object() {
-                for (k, val) in m {
-                    if let Some(s) = val.as_str() {
-                        labels.insert(k.clone(), s.to_string());
-                    }
-                }
-            }
-            // value: [ <ts>, "<num>" ]
-            let value = item["value"][1]
+    for item in arr {
+        let metric = item["metric"]
+            .as_object()
+            .ok_or_else(|| anyhow!("prometheus vector sample has no metric labels"))?;
+        let mut labels = BTreeMap::new();
+        for (key, value) in metric {
+            let value = value
                 .as_str()
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(f64::NAN);
-            out.push(Series { labels, value });
+                .ok_or_else(|| anyhow!("prometheus metric label is not a string"))?;
+            labels.insert(key.clone(), value.to_string());
         }
+        let pair = item["value"]
+            .as_array()
+            .filter(|pair| pair.len() == 2 && pair[0].as_f64().is_some())
+            .ok_or_else(|| anyhow!("prometheus vector sample has invalid timestamp/value pair"))?;
+        let value = pair[1]
+            .as_str()
+            .and_then(|value| value.parse::<f64>().ok())
+            .ok_or_else(|| anyhow!("prometheus vector sample has invalid numeric value"))?;
+        out.push(Series { labels, value });
     }
     Ok(out)
 }
@@ -238,7 +346,135 @@ mod tests {
     use super::*;
 
     fn dec(body: &[u8]) -> String {
-        String::from_utf8_lossy(&dechunk(body)).into_owned()
+        String::from_utf8_lossy(&dechunk(body).unwrap()).into_owned()
+    }
+
+    #[test]
+    fn malformed_success_payloads_are_errors_not_empty_measurements() {
+        for body in [
+            r#"{"status":"success"}"#,
+            r#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#,
+            r#"{"status":"success","data":{"resultType":"vector","result":null}}"#,
+            r#"{"status":"success","data":{"resultType":"vector","result":[{}]}}"#,
+            r#"{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"bad"]}]}}"#,
+        ] {
+            assert!(parse(body).is_err(), "{body}");
+        }
+        assert!(
+            parse(r#"{"status":"success","data":{"resultType":"vector","result":[]}}"#)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn http_framing_rejects_conflicts_truncation_and_wrong_status() {
+        assert_eq!(
+            decode_http_response(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap(),
+            "{}"
+        );
+        assert_eq!(
+            decode_http_response(
+                b"HTTP/1.1 200 OK\r\nTRANSFER-ENCODING:chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
+            )
+            .unwrap(),
+            "{}"
+        );
+        for response in [
+            "HTTP/1.1 302 Found\r\n\r\n{}",
+            "garbage 200 OK\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n{}",
+        ] {
+            let error = decode_http_response(response.as_bytes()).unwrap_err();
+            assert!(!is_retryable(&error));
+        }
+    }
+
+    #[test]
+    fn label_values_distinguish_empty_inventory_from_invalid_payloads() {
+        assert!(parse_label_values(r#"{"status":"success","data":[]}"#)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            parse_label_values(r#"{"status":"success","data":["gpu_util","queue_depth"]}"#)
+                .unwrap(),
+            ["gpu_util", "queue_depth"]
+        );
+        for body in [
+            r#"{"status":"success"}"#,
+            r#"{"status":"success","data":null}"#,
+            r#"{"status":"success","data":{}}"#,
+            r#"{"status":"success","data":["valid",123]}"#,
+            r#"{"status":"error","data":[]}"#,
+        ] {
+            assert!(parse_label_values(body).is_err(), "{body}");
+        }
+    }
+
+    #[test]
+    fn bounded_exchange_accepts_exact_limit_after_eof() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (mut client, mut peer) = tokio::io::duplex(1024);
+            let server = tokio::spawn(async move {
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(peer.read_u8().await.unwrap());
+                }
+                peer.write_all(&vec![b'x'; MAX_HTTP_BYTES]).await.unwrap();
+                peer.shutdown().await.unwrap();
+            });
+            let bytes = timeout(
+                Duration::from_secs(5),
+                read_http_exchange(&mut client, "test", "/"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(bytes.len(), MAX_HTTP_BYTES);
+            assert!(bytes.iter().all(|b| *b == b'x'));
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn http_response_limit_is_enforced_before_parsing() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // Exercise the production request/write/bounded-read path with a tiny
+            // duplex buffer: real async backpressure, no socket permissions needed.
+            let (mut client, mut peer) = tokio::io::duplex(1024);
+            let server = tokio::spawn(async move {
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(peer.read_u8().await.unwrap());
+                }
+                assert!(request.starts_with(b"GET / HTTP/1.1\r\nHost: test\r\n"));
+                peer.write_all(&vec![b'x'; MAX_HTTP_BYTES + 1])
+                    .await
+                    .unwrap();
+                peer
+            });
+            let error = timeout(
+                Duration::from_secs(5),
+                read_http_exchange(&mut client, "test", "/"),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(error.to_string().contains("response exceeds"));
+            assert!(!is_retryable(&error));
+            server.await.unwrap();
+        });
     }
 
     #[test]
@@ -249,7 +485,7 @@ mod tests {
 
     #[test]
     fn dechunk_single_json() {
-        let json = r#"{"status":"success"}"#;
+        let json = r#"{"status":"success","data":{"resultType":"vector","result":[]}}"#;
         let body = format!("{:x}\r\n{}\r\n0\r\n\r\n", json.len(), json);
         assert_eq!(dec(body.as_bytes()), json);
         // Decoded output should parse again.
@@ -258,8 +494,20 @@ mod tests {
 
     #[test]
     fn dechunk_truncated_no_panic() {
-        // Body shorter than declared size → take what remains without panicking.
-        assert_eq!(dec(b"FF\r\nshort"), "short");
+        for body in [
+            b"FF\r\nshort".as_slice(),
+            b"bad-size\r\n",
+            b"1\r\nx",
+            b"1\r\nxXX0\r\n\r\n",
+            b"1\r\nx\r\n",
+            b"0\r\n",
+        ] {
+            assert!(dechunk(body).is_err());
+        }
+        assert_eq!(
+            dec(b"1;extension=yes\r\nx\r\n0\r\nX-Test: yes\r\n\r\n"),
+            "x"
+        );
     }
 
     #[test]
@@ -278,7 +526,7 @@ mod tests {
     #[test]
     fn dechunk_non_ascii_json_across_chunks() {
         // 한국어 라벨이 청크 경계에 걸려도 JSON 이 그대로 파싱돼야 한다(FAULT-04).
-        let json = r#"{"status":"success","data":{"result":[{"metric":{"pod":"모델-서버"},"value":[1.0,"7"]}]}}"#;
+        let json = r#"{"status":"success","data":{"resultType":"vector","result":[{"metric":{"pod":"모델-서버"},"value":[1.0,"7"]}]}}"#;
         let b = json.as_bytes();
         let cut = 60; // '모' 바이트열 중간을 가로지르도록 자름
         let mut body: Vec<u8> = Vec::new();
@@ -335,7 +583,7 @@ mod tests {
 
     #[test]
     fn parse_success_and_labels() {
-        let body = r#"{"status":"success","data":{"result":[
+        let body = r#"{"status":"success","data":{"resultType":"vector","result":[
             {"metric":{"service":"koni","le":"1"},"value":[1.0,"3.5"]}
         ]}}"#;
         let v = parse(body).expect("ok");
@@ -347,7 +595,7 @@ mod tests {
     #[test]
     fn parse_plus_inf_and_missing() {
         // Prometheus returns "+Inf"/"NaN" strings when histogram_quantile has no data.
-        let body = r#"{"status":"success","data":{"result":[
+        let body = r#"{"status":"success","data":{"resultType":"vector","result":[
             {"metric":{},"value":[1.0,"+Inf"]},
             {"metric":{},"value":[1.0,"NaN"]}
         ]}}"#;

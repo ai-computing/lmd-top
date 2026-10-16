@@ -79,7 +79,9 @@ impl Advice {
         match (&self.best, &self.next, self.avoid.first()) {
             (Some(b), _, _) => format!("↺ history: try {} — {}", b.options_line(), b.reason),
             (None, Some(n), _) => format!("↺ history: try {} — {}", n.options_line(), n.reason),
-            (None, None, Some(a)) => format!("↺ history: avoid {} — {}", a.options_line(), a.reason),
+            (None, None, Some(a)) => {
+                format!("↺ history: avoid {} — {}", a.options_line(), a.reason)
+            }
             (None, None, None) => String::new(),
         }
     }
@@ -191,7 +193,10 @@ pub fn advise(history: &[Record], model: &str, vendor: &str) -> Advice {
         .map(|(rel, rec)| (options_key(&build_options(rec)), *rel))
         .collect();
     ok.sort_by(|a, b| {
-        let (ka, kb) = (options_key(&build_options(a.1)), options_key(&build_options(b.1)));
+        let (ka, kb) = (
+            options_key(&build_options(a.1)),
+            options_key(&build_options(b.1)),
+        );
         b.0.cmp(&a.0)
             .then_with(|| {
                 served
@@ -266,10 +271,7 @@ pub fn advise(history: &[Record], model: &str, vendor: &str) -> Advice {
 /// An option set worth trying next, paired with (label, reason) for why it is worth trying.
 type Experiment = (BTreeMap<String, String>, (&'static str, String));
 
-fn next_experiment(
-    failed: &BTreeMap<String, String>,
-    failure_kind: &str,
-) -> Option<Experiment> {
+fn next_experiment(failed: &BTreeMap<String, String>, failure_kind: &str) -> Option<Experiment> {
     let mut opts = failed.clone();
     let halve = |v: Option<&String>| -> Option<i64> {
         let n = v?.parse::<i64>().ok()?;
@@ -293,7 +295,10 @@ fn next_experiment(
                         opts.insert("max-len".into(), half.to_string());
                         return Some((
                             opts,
-                            ("max-len", format!("halve it to {} and drop flash_attn", half)),
+                            (
+                                "max-len",
+                                format!("halve it to {} and drop flash_attn", half),
+                            ),
                         ));
                     }
                 }
@@ -394,15 +399,33 @@ mod tests {
     #[test]
     fn recommends_what_compiled_and_warns_about_what_failed() {
         let h = vec![
-            compile("j1", "Qwen/Qwen3-4B", "rbln", Outcome::Fail, &[("tp", "4"), ("max-len", "8192")], 100),
-            compile("j2", "Qwen/Qwen3-4B", "rbln", Outcome::Ok, &[("tp", "4"), ("max-len", "4096")], 200),
+            compile(
+                "j1",
+                "Qwen/Qwen3-4B",
+                "rbln",
+                Outcome::Fail,
+                &[("tp", "4"), ("max-len", "8192")],
+                100,
+            ),
+            compile(
+                "j2",
+                "Qwen/Qwen3-4B",
+                "rbln",
+                Outcome::Ok,
+                &[("tp", "4"), ("max-len", "4096")],
+                200,
+            ),
         ];
         let a = advise(&h, "Qwen/Qwen3-4B", "rbln");
         let best = a.best.clone().expect("a suggestion");
         assert_eq!(best.options_line(), "max-len=4096 tp=4");
         assert!(best.reason.contains("this model"), "{}", best.reason);
         assert_eq!(a.avoid.len(), 1);
-        assert!(a.avoid[0].reason.contains("code generation"), "{}", a.avoid[0].reason);
+        assert!(
+            a.avoid[0].reason.contains("code generation"),
+            "{}",
+            a.avoid[0].reason
+        );
         assert!(a.line().contains("try max-len=4096"), "{}", a.line());
     }
 
@@ -410,13 +433,38 @@ mod tests {
     #[test]
     fn closer_evidence_wins() {
         let h = vec![
-            compile("j1", "meta-llama/Llama-3.1-8B", "rbln", Outcome::Ok, &[("tp", "2")], 300),
-            compile("j2", "Qwen/Qwen3-4B-FP8", "rbln", Outcome::Ok, &[("tp", "3")], 200),
-            compile("j3", "Qwen/Qwen3-4B", "rbln", Outcome::Ok, &[("tp", "4")], 100),
+            compile(
+                "j1",
+                "meta-llama/Llama-3.1-8B",
+                "rbln",
+                Outcome::Ok,
+                &[("tp", "2")],
+                300,
+            ),
+            compile(
+                "j2",
+                "Qwen/Qwen3-4B-FP8",
+                "rbln",
+                Outcome::Ok,
+                &[("tp", "3")],
+                200,
+            ),
+            compile(
+                "j3",
+                "Qwen/Qwen3-4B",
+                "rbln",
+                Outcome::Ok,
+                &[("tp", "4")],
+                100,
+            ),
         ];
         let a = advise(&h, "Qwen/Qwen3-4B", "rbln");
         let best = a.best.clone().expect("a suggestion");
-        assert_eq!(best.options_line(), "tp=4", "exact model beats family and vendor");
+        assert_eq!(
+            best.options_line(),
+            "tp=4",
+            "exact model beats family and vendor"
+        );
         assert!(best.reason.contains("this model"), "{}", best.reason);
 
         // Without the exact record, the family record wins over the unrelated one.
@@ -428,8 +476,22 @@ mod tests {
     #[test]
     fn serving_throughput_breaks_ties() {
         let h = vec![
-            compile("j1", "Qwen/Qwen3-4B", "rbln", Outcome::Ok, &[("tp", "2")], 100),
-            compile("j2", "Qwen/Qwen3-4B", "rbln", Outcome::Ok, &[("tp", "4")], 100),
+            compile(
+                "j1",
+                "Qwen/Qwen3-4B",
+                "rbln",
+                Outcome::Ok,
+                &[("tp", "2")],
+                100,
+            ),
+            compile(
+                "j2",
+                "Qwen/Qwen3-4B",
+                "rbln",
+                Outcome::Ok,
+                &[("tp", "4")],
+                100,
+            ),
             serve("Qwen/Qwen3-4B", "rbln", &[("tp", "2")], 40.0),
             serve("Qwen/Qwen3-4B", "rbln", &[("tp", "4")], 180.0),
         ];
@@ -445,11 +507,28 @@ mod tests {
     #[test]
     fn a_later_failure_supersedes_an_earlier_success() {
         let h = vec![
-            compile("j1", "Qwen/Qwen3-4B", "rbln", Outcome::Ok, &[("tp", "4")], 100),
-            compile("j2", "Qwen/Qwen3-4B", "rbln", Outcome::Fail, &[("tp", "4")], 200),
+            compile(
+                "j1",
+                "Qwen/Qwen3-4B",
+                "rbln",
+                Outcome::Ok,
+                &[("tp", "4")],
+                100,
+            ),
+            compile(
+                "j2",
+                "Qwen/Qwen3-4B",
+                "rbln",
+                Outcome::Fail,
+                &[("tp", "4")],
+                200,
+            ),
         ];
         let a = advise(&h, "Qwen/Qwen3-4B", "rbln");
-        assert!(a.best.is_none(), "tp=4 both succeeded and failed — do not recommend it");
+        assert!(
+            a.best.is_none(),
+            "tp=4 both succeeded and failed — do not recommend it"
+        );
         assert_eq!(a.avoid.len(), 1);
         assert!(a.line().contains("avoid"), "{}", a.line());
     }
@@ -459,9 +538,19 @@ mod tests {
     /// so history genuinely contains such records.
     #[test]
     fn a_record_without_options_is_not_a_suggestion() {
-        let h = vec![compile("j1", "Qwen/Qwen3-4B", "rbln", Outcome::Ok, &[], 100)];
+        let h = vec![compile(
+            "j1",
+            "Qwen/Qwen3-4B",
+            "rbln",
+            Outcome::Ok,
+            &[],
+            100,
+        )];
         let a = advise(&h, "Qwen/Qwen3-4B", "rbln");
-        assert!(a.best.is_none(), "no options recorded — nothing to recommend");
+        assert!(
+            a.best.is_none(),
+            "no options recorded — nothing to recommend"
+        );
         assert_eq!(a.line(), "");
         // But it still counts as evidence that the model compiles at all.
         assert_eq!(a.compiles_seen, 1);
@@ -478,7 +567,12 @@ mod tests {
             "Qwen/Qwen3-4B",
             "rbln",
             Outcome::Fail,
-            &[("tp", "4"), ("max-len", "8192"), ("kvpart", "4096"), ("attn", "flash_attn")],
+            &[
+                ("tp", "4"),
+                ("max-len", "8192"),
+                ("kvpart", "4096"),
+                ("attn", "flash_attn"),
+            ],
             100,
         )];
         h[0].failure_kind = "device-oom".into();
@@ -488,10 +582,17 @@ mod tests {
         let next = a.next.clone().expect("a next experiment");
         // max-len halves; 4096 would no longer have ≥2 flash_attn partitions, so attention
         // drops to eager and kvpart goes away rather than staying invalid.
-        assert_eq!(next.options.get("max-len").map(String::as_str), Some("4096"));
+        assert_eq!(
+            next.options.get("max-len").map(String::as_str),
+            Some("4096")
+        );
         assert_eq!(next.options.get("attn").map(String::as_str), Some("eager"));
         assert!(!next.options.contains_key("kvpart"));
-        assert_eq!(next.options.get("tp").map(String::as_str), Some("4"), "tp is unchanged");
+        assert_eq!(
+            next.options.get("tp").map(String::as_str),
+            Some("4"),
+            "tp is unchanged"
+        );
         assert!(next.reason.contains("untried"), "{}", next.reason);
         assert!(a.line().contains("try "), "{}", a.line());
     }
@@ -500,14 +601,27 @@ mod tests {
     #[test]
     fn kvpart_failures_switch_attention_not_length() {
         let h = vec![compile(
-            "j1", "m/x", "rbln", Outcome::Fail,
-            &[("tp", "4"), ("max-len", "8192"), ("kvpart", "16384"), ("attn", "flash_attn")], 100,
+            "j1",
+            "m/x",
+            "rbln",
+            Outcome::Fail,
+            &[
+                ("tp", "4"),
+                ("max-len", "8192"),
+                ("kvpart", "16384"),
+                ("attn", "flash_attn"),
+            ],
+            100,
         )];
         let mut h = h;
         h[0].failure_kind = "rbln-kvpart".into();
         let next = advise(&h, "m/x", "rbln").next.expect("a next experiment");
         assert_eq!(next.options.get("attn").map(String::as_str), Some("eager"));
-        assert_eq!(next.options.get("max-len").map(String::as_str), Some("8192"), "length kept");
+        assert_eq!(
+            next.options.get("max-len").map(String::as_str),
+            Some("8192"),
+            "length kept"
+        );
         assert!(!next.options.contains_key("kvpart"));
     }
 
@@ -524,11 +638,20 @@ mod tests {
             "unsupported-model",
         ] {
             let mut h = vec![compile(
-                "j1", "m/x", "rbln", Outcome::Fail, &[("tp", "4"), ("max-len", "8192")], 100,
+                "j1",
+                "m/x",
+                "rbln",
+                Outcome::Fail,
+                &[("tp", "4"), ("max-len", "8192")],
+                100,
             )];
             h[0].failure_kind = kind.to_string();
             let a = advise(&h, "m/x", "rbln");
-            assert!(a.next.is_none(), "{} should not propose an option change", kind);
+            assert!(
+                a.next.is_none(),
+                "{} should not propose an option change",
+                kind
+            );
             // But it must still be reported, so the operator knows what to fix.
             assert_eq!(a.avoid.len(), 1);
             assert!(a.line().contains("avoid"), "{}: {}", kind, a.line());
@@ -539,8 +662,22 @@ mod tests {
     #[test]
     fn does_not_propose_an_already_failed_combination() {
         let mut h = vec![
-            compile("j1", "m/x", "rbln", Outcome::Fail, &[("max-len", "8192"), ("tp", "4")], 100),
-            compile("j2", "m/x", "rbln", Outcome::Fail, &[("max-len", "4096"), ("tp", "4")], 200),
+            compile(
+                "j1",
+                "m/x",
+                "rbln",
+                Outcome::Fail,
+                &[("max-len", "8192"), ("tp", "4")],
+                100,
+            ),
+            compile(
+                "j2",
+                "m/x",
+                "rbln",
+                Outcome::Fail,
+                &[("max-len", "4096"), ("tp", "4")],
+                200,
+            ),
         ];
         for r in &mut h {
             r.failure_kind = "device-oom".into();
@@ -556,7 +693,12 @@ mod tests {
     #[test]
     fn other_accelerators_are_not_evidence() {
         let h = vec![compile(
-            "j1", "Qwen/Qwen3-4B", "furiosa", Outcome::Ok, &[("tp", "8")], 100,
+            "j1",
+            "Qwen/Qwen3-4B",
+            "furiosa",
+            Outcome::Ok,
+            &[("tp", "8")],
+            100,
         )];
         let a = advise(&h, "Qwen/Qwen3-4B", "rbln");
         assert!(a.best.is_none(), "a Furiosa build says nothing about RBLN");
@@ -567,11 +709,28 @@ mod tests {
     #[test]
     fn placement_keys_do_not_fragment_the_evidence() {
         let h = vec![
-            compile("j1", "Qwen/Qwen3-4B", "rbln", Outcome::Ok, &[("tp", "4"), ("node", "npu-1")], 100),
-            compile("j2", "Qwen/Qwen3-4B", "rbln", Outcome::Fail, &[("tp", "4"), ("node", "npu-2")], 200),
+            compile(
+                "j1",
+                "Qwen/Qwen3-4B",
+                "rbln",
+                Outcome::Ok,
+                &[("tp", "4"), ("node", "npu-1")],
+                100,
+            ),
+            compile(
+                "j2",
+                "Qwen/Qwen3-4B",
+                "rbln",
+                Outcome::Fail,
+                &[("tp", "4"), ("node", "npu-2")],
+                200,
+            ),
         ];
         let a = advise(&h, "Qwen/Qwen3-4B", "rbln");
-        assert!(a.best.is_none(), "same options, different node — still superseded");
+        assert!(
+            a.best.is_none(),
+            "same options, different node — still superseded"
+        );
         assert_eq!(a.avoid.len(), 1, "and recorded once, not per node");
         assert_eq!(a.avoid[0].options_line(), "tp=4");
     }
@@ -636,7 +795,10 @@ pub fn patterns(history: &[Record]) -> Vec<Pattern> {
             } else {
                 rec.failure_kind.clone()
             };
-            groups.entry((rec.vendor.clone(), kind)).or_default().push(rec);
+            groups
+                .entry((rec.vendor.clone(), kind))
+                .or_default()
+                .push(rec);
         }
     }
 
@@ -723,7 +885,10 @@ mod pattern_tests {
             id: format!("{}-{}-{}", model, vendor, opts.len()),
             model: model.into(),
             vendor: vendor.into(),
-            options: opts.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            options: opts
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             outcome,
             duration_secs: Some(60),
             failure_kind: kind.into(),
@@ -745,11 +910,20 @@ mod pattern_tests {
             r("a", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "4")]),
             r("b", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "2")]),
             r("c", "rbln", Outcome::Ok, "", &[("tp", "4")]),
-            r("d", "furiosa", Outcome::Fail, "furiosa-build", &[("tp", "8")]),
+            r(
+                "d",
+                "furiosa",
+                Outcome::Fail,
+                "furiosa-build",
+                &[("tp", "8")],
+            ),
         ];
         let p = patterns(&h);
         assert_eq!(p.len(), 2);
-        assert_eq!((p[0].vendor.as_str(), p[0].failures, p[0].attempts), ("rbln", 2, 3));
+        assert_eq!(
+            (p[0].vendor.as_str(), p[0].failures, p[0].attempts),
+            ("rbln", 2, 3)
+        );
         assert_eq!(p[1].vendor, "furiosa");
         assert!(p[0].line().contains("2 of 3 compiles"), "{}", p[0].line());
     }
@@ -758,13 +932,35 @@ mod pattern_tests {
     #[test]
     fn reports_an_option_that_separates_failures_from_successes() {
         let h = vec![
-            r("a", "rbln", Outcome::Fail, "rbln-codegen", &[("attn", "flash_attn"), ("tp", "4")]),
-            r("b", "rbln", Outcome::Fail, "rbln-codegen", &[("attn", "flash_attn"), ("tp", "2")]),
-            r("c", "rbln", Outcome::Ok, "", &[("attn", "eager"), ("tp", "4")]),
+            r(
+                "a",
+                "rbln",
+                Outcome::Fail,
+                "rbln-codegen",
+                &[("attn", "flash_attn"), ("tp", "4")],
+            ),
+            r(
+                "b",
+                "rbln",
+                Outcome::Fail,
+                "rbln-codegen",
+                &[("attn", "flash_attn"), ("tp", "2")],
+            ),
+            r(
+                "c",
+                "rbln",
+                Outcome::Ok,
+                "",
+                &[("attn", "eager"), ("tp", "4")],
+            ),
         ];
         let p = patterns(&h);
         assert_eq!(p[0].correlates.as_deref(), Some("attn=flash_attn"));
-        assert!(p[0].line().contains("all of them had attn=flash_attn"), "{}", p[0].line());
+        assert!(
+            p[0].line().contains("all of them had attn=flash_attn"),
+            "{}",
+            p[0].line()
+        );
     }
 
     /// An option shared by failures *and* successes explains nothing, and saying it would
@@ -772,9 +968,27 @@ mod pattern_tests {
     #[test]
     fn does_not_blame_an_option_the_successes_also_have() {
         let h = vec![
-            r("a", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "4"), ("max-len", "8192")]),
-            r("b", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "4"), ("max-len", "8192")]),
-            r("c", "rbln", Outcome::Ok, "", &[("tp", "4"), ("max-len", "8192")]),
+            r(
+                "a",
+                "rbln",
+                Outcome::Fail,
+                "rbln-codegen",
+                &[("tp", "4"), ("max-len", "8192")],
+            ),
+            r(
+                "b",
+                "rbln",
+                Outcome::Fail,
+                "rbln-codegen",
+                &[("tp", "4"), ("max-len", "8192")],
+            ),
+            r(
+                "c",
+                "rbln",
+                Outcome::Ok,
+                "",
+                &[("tp", "4"), ("max-len", "8192")],
+            ),
         ];
         assert_eq!(patterns(&h)[0].correlates, None);
     }
@@ -783,16 +997,38 @@ mod pattern_tests {
     #[test]
     fn needs_a_contrasting_success_and_two_failures() {
         let only_fails = vec![
-            r("a", "rbln", Outcome::Fail, "rbln-codegen", &[("attn", "flash_attn")]),
-            r("b", "rbln", Outcome::Fail, "rbln-codegen", &[("attn", "flash_attn")]),
+            r(
+                "a",
+                "rbln",
+                Outcome::Fail,
+                "rbln-codegen",
+                &[("attn", "flash_attn")],
+            ),
+            r(
+                "b",
+                "rbln",
+                Outcome::Fail,
+                "rbln-codegen",
+                &[("attn", "flash_attn")],
+            ),
         ];
         assert_eq!(patterns(&only_fails)[0].correlates, None);
 
         let single = vec![
-            r("a", "rbln", Outcome::Fail, "rbln-codegen", &[("attn", "flash_attn")]),
+            r(
+                "a",
+                "rbln",
+                Outcome::Fail,
+                "rbln-codegen",
+                &[("attn", "flash_attn")],
+            ),
             r("c", "rbln", Outcome::Ok, "", &[("attn", "eager")]),
         ];
-        assert_eq!(patterns(&single)[0].correlates, None, "one failure is not a pattern");
+        assert_eq!(
+            patterns(&single)[0].correlates,
+            None,
+            "one failure is not a pattern"
+        );
     }
 
     /// The case that actually happened: three models, three parameter sets, all failing the
@@ -807,9 +1043,27 @@ mod pattern_tests {
                 .collect()
         };
         let mut h = vec![
-            r("qwen3-4b", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "4"), ("max-len", "8192")]),
-            r("qwen2.5-0.5b", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "1"), ("max-len", "4096")]),
-            r("llama-3.1-8b", "rbln", Outcome::Ok, "", &[("tp", "4"), ("max-len", "4096")]),
+            r(
+                "qwen3-4b",
+                "rbln",
+                Outcome::Fail,
+                "rbln-codegen",
+                &[("tp", "4"), ("max-len", "8192")],
+            ),
+            r(
+                "qwen2.5-0.5b",
+                "rbln",
+                Outcome::Fail,
+                "rbln-codegen",
+                &[("tp", "1"), ("max-len", "4096")],
+            ),
+            r(
+                "llama-3.1-8b",
+                "rbln",
+                Outcome::Ok,
+                "",
+                &[("tp", "4"), ("max-len", "4096")],
+            ),
         ];
         h[0].toolchain = tools("5.8.1");
         h[1].toolchain = tools("5.8.1");
@@ -830,7 +1084,13 @@ mod pattern_tests {
     /// transformers 5.8.1, and calling that a skew would break a healthy host.
     #[test]
     fn reports_a_measured_mismatch_immediately() {
-        let mut h = vec![r("m", "rbln", Outcome::Fail, "rbln-codegen", &[("tp", "4")])];
+        let mut h = vec![r(
+            "m",
+            "rbln",
+            Outcome::Fail,
+            "rbln-codegen",
+            &[("tp", "4")],
+        )];
         h[0].toolchain = [("optimum-rbln", "0.11.0.post1"), ("transformers", "5.8.1")]
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -840,9 +1100,10 @@ mod pattern_tests {
             "the vendor's own pins are not a skew"
         );
 
-        h[0]
-            .toolchain
-            .insert("_mismatch".into(), "transformers 4.40.0 != required 5.8.1".into());
+        h[0].toolchain.insert(
+            "_mismatch".into(),
+            "transformers 4.40.0 != required 5.8.1".into(),
+        );
         let w = toolchain_warnings(&h);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].0, "rbln");
@@ -864,7 +1125,10 @@ mod pattern_tests {
         h[0].id = "flagrun".into();
         let a = advise(&h, "m", "rbln");
         assert_eq!(a.compiles_seen, 1, "only the real build counts");
-        assert!(a.avoid.is_empty(), "the flag failure is not an option to avoid");
+        assert!(
+            a.avoid.is_empty(),
+            "the flag failure is not an option to avoid"
+        );
         assert_eq!(
             a.best.map(|b| b.options_line()),
             Some("tp=4".to_string()),
@@ -896,7 +1160,11 @@ mod pattern_tests {
         with_ok.push(r("m", "rbln", Outcome::Ok, "", &[("tp", "2")]));
         let p2 = patterns(&with_ok);
         assert_eq!(p2[0].successes, 1);
-        assert!(!p2[0].line().contains("has ever succeeded"), "{}", p2[0].line());
+        assert!(
+            !p2[0].line().contains("has ever succeeded"),
+            "{}",
+            p2[0].line()
+        );
     }
 
     #[test]

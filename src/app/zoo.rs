@@ -63,8 +63,16 @@ impl App {
     /// 선택 zoo 모델 → 컴파일 흐름이 쓰는 합성 아티팩트(첫 컴파일 벤더 기준).
     pub(super) fn selected_zoo_artifact(&self) -> Option<crate::collect::ModelArtifact> {
         let z = self.selected_zoo()?;
-        let vendor = Self::zoo_vendors(&z.source).first().copied().unwrap_or("gpu");
-        Some(Self::synthetic_artifact_for(&z.source, vendor, String::new(), &[]))
+        let vendor = Self::zoo_vendors(&z.source)
+            .first()
+            .copied()
+            .unwrap_or("gpu");
+        Some(Self::synthetic_artifact_for(
+            &z.source,
+            vendor,
+            String::new(),
+            &[],
+        ))
     }
 
     /// Prefetch 폼 — 다운로드 대상(저장소 PVC·경로·리비전)을 고른 뒤 Job 을 만든다.
@@ -82,16 +90,15 @@ impl App {
                 pvcs.push(name.clone());
             }
         }
-        let field = |key: &str, label: &str, value: &str, choices: Vec<String>, help: &str| {
-            CompileField {
+        let field =
+            |key: &str, label: &str, value: &str, choices: Vec<String>, help: &str| CompileField {
                 key: key.into(),
                 label: label.into(),
                 value: value.into(),
                 choices,
                 numeric: false,
                 help: help.into(),
-            }
-        };
+            };
         let _ = &pvcs; // 목적지 PVC 는 폼 필드가 아니라 2단계 picker(open_prefetch_dest_picker)에서 고른다
         let fields = vec![
             field(
@@ -284,6 +291,8 @@ impl App {
             .push(Doc::new(job))
             .to_yaml();
         self.confirm = Some(Pending::Apply {
+            reviewed: None,
+            required: crate::app::Mode::Admin,
             title: format!("prefetch {} → {}:{}", source, pvc, hf_home),
             yaml,
         });
@@ -301,7 +310,11 @@ mod zoo_tests {
         assert!(!a.zoo.is_empty(), "bundled zoo.yaml should load");
         // 모든 source 는 org/name 형태(HF repo id) 여야 compile/prefetch 가 동작.
         for z in &a.zoo {
-            assert!(z.source.contains('/'), "zoo source must be an HF repo id: {}", z.source);
+            assert!(
+                z.source.contains('/'),
+                "zoo source must be an HF repo id: {}",
+                z.source
+            );
         }
     }
 
@@ -309,7 +322,10 @@ mod zoo_tests {
     fn zoo_vendors_derived_from_compat() {
         // Llama 는 RBLN·Furiosa 둘 다 컴파일 가능.
         let v = App::zoo_vendors("meta-llama/Llama-3.1-8B-Instruct");
-        assert!(v.contains(&"rbln") || v.contains(&"furiosa"), "Llama should be compilable");
+        assert!(
+            v.contains(&"rbln") || v.contains(&"furiosa"),
+            "Llama should be compilable"
+        );
     }
 
     #[test]
@@ -318,7 +334,10 @@ mod zoo_tests {
         a.view = View::Zoo;
         a.selected = 0;
         a.open_prefetch_form();
-        assert!(a.prefetch_form.is_some(), "prefetch opens a destination form");
+        assert!(
+            a.prefetch_form.is_some(),
+            "prefetch opens a destination form"
+        );
         // 대상 경로를 사용자가 바꿔도 반영되는지: dir=models 로 변경.
         if let Some(f) = a.prefetch_form.as_mut() {
             if let Some(d) = f.fields.iter_mut().find(|x| x.key == "dir") {
@@ -327,7 +346,11 @@ mod zoo_tests {
         }
         a.prefetch_form_submit();
         match a.confirm {
-            Some(Pending::Apply { ref yaml, ref title }) => {
+            Some(Pending::Apply {
+                ref yaml,
+                ref title,
+                ..
+            }) => {
                 let docs: Vec<serde_yaml::Value> = serde_yaml::Deserializer::from_str(yaml)
                     .map(|d| {
                         <serde_yaml::Value as serde::Deserialize>::deserialize(d)
@@ -344,7 +367,10 @@ mod zoo_tests {
                     .find(|d| d["kind"].as_str() == Some("ConfigMap"))
                     .expect("the recipe ConfigMap");
                 let recipe = cm["data"]["prefetch.sh"].as_str().expect("prefetch.sh");
-                assert!(recipe.contains("snapshot_download"), "recipe downloads the snapshot");
+                assert!(
+                    recipe.contains("snapshot_download"),
+                    "recipe downloads the snapshot"
+                );
                 assert!(
                     recipe.contains("os.environ[\"SOURCE\"]"),
                     "recipe reads the repo id from the environment, not interpolation"
@@ -354,7 +380,9 @@ mod zoo_tests {
                     .as_sequence()
                     .expect("env")
                     .iter()
-                    .filter_map(|e| Some((e["name"].as_str()?, e["value"].as_str().unwrap_or("<ref>"))))
+                    .filter_map(|e| {
+                        Some((e["name"].as_str()?, e["value"].as_str().unwrap_or("<ref>")))
+                    })
                     .collect();
                 assert_eq!(
                     env.get("HF_HOME"),
@@ -368,7 +396,10 @@ mod zoo_tests {
                     .filter_map(|v| v["persistentVolumeClaim"]["claimName"].as_str())
                     .collect();
                 assert_eq!(claims, vec!["model-store"]);
-                assert!(title.contains("/mnt/store/models"), "destination shown in title");
+                assert!(
+                    title.contains("/mnt/store/models"),
+                    "destination shown in title"
+                );
             }
             _ => panic!("prefetch should stage a Pending::Apply Job"),
         }
@@ -388,10 +419,16 @@ mod zoo_tests {
             f.dest = "furiosa-artifacts".into();
         }
         a.prefetch_form_submit();
-        assert!(a.confirm.is_none(), "없는 PVC 는 Job 을 staging 하지 않아야 한다");
+        assert!(
+            a.confirm.is_none(),
+            "없는 PVC 는 Job 을 staging 하지 않아야 한다"
+        );
         assert!(a.toast_bad, "차단은 빨강 토스트로 알린다");
         assert!(
-            a.toast.as_deref().unwrap_or("").contains("furiosa-artifacts"),
+            a.toast
+                .as_deref()
+                .unwrap_or("")
+                .contains("furiosa-artifacts"),
             "토스트에 문제 PVC 이름이 보여야 한다"
         );
     }
@@ -411,7 +448,10 @@ mod zoo_tests {
             .map(|p| p.rows.iter().map(|r| r.value.clone()).collect())
             .unwrap_or_default();
         assert!(rows.contains(&"model-store".to_string()));
-        assert!(rows.contains(&"rbln-artifacts".to_string()), "관측된 PVC 는 후보에 포함");
+        assert!(
+            rows.contains(&"rbln-artifacts".to_string()),
+            "관측된 PVC 는 후보에 포함"
+        );
         assert!(
             !rows.contains(&"furiosa-artifacts".to_string()),
             "관측되지 않은 PVC 는 후보에 없어야 한다"
@@ -442,6 +482,9 @@ mod zoo_tests {
         a.view = View::Zoo;
         a.selected = 0;
         let art = a.selected_zoo_artifact().expect("zoo artifact");
-        assert!(App::artifact_model_id(&art).contains('/'), "compile model_id must be an HF id");
+        assert!(
+            App::artifact_model_id(&art).contains('/'),
+            "compile model_id must be an HF id"
+        );
     }
 }

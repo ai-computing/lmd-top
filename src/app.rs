@@ -8,17 +8,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 mod action;
 mod activity;
 pub mod compile;
+mod confirmation;
 mod deploy;
 mod filter;
 mod library;
+pub mod manifest_review;
 mod nav;
 mod objective;
 mod order;
+mod policy;
+mod reads;
 mod select;
 mod setup;
 mod sort;
 mod state;
 mod store;
+pub mod train;
 mod zoo;
 
 pub use setup::{CheckState, SetupFix};
@@ -78,19 +83,23 @@ pub struct NavState {
 #[derive(Clone)]
 pub enum Pending {
     Scale {
+        expected: Option<crate::resource_guard::Identity>,
         name: String,
         target: i64,
     },
     Restart {
+        expected: Option<crate::resource_guard::Identity>,
         name: String,
     },
     Rollback {
+        expected: Option<crate::resource_guard::Identity>,
         name: String,
     }, // rollout undo = 직전 ReplicaSet 으로 되돌리기
     Drain {
         pod: String,
     }, // endpoint drain = 라우팅 제외(relabel), in-flight stream 은 종료까지 유지
     Stop {
+        expected: Option<crate::resource_guard::Identity>,
         name: String,
     }, // stop serving = replicas to 0 (frees devices, reversible)
     /// Run the store discovery scan now rather than waiting for its CronJob schedule.
@@ -102,6 +111,8 @@ pub enum Pending {
         path: String,
     },
     Apply {
+        reviewed: Option<crate::manifest_plan::Reviewed>,
+        required: Mode,
         title: String,
         yaml: String,
     }, // kubectl apply the previewed manifest
@@ -123,38 +134,59 @@ pub enum Pending {
         purpose: String,
     },
     Cordon {
+        expected: Option<crate::resource_guard::Identity>,
         node: String,
         on: bool,
     }, // block/allow scheduling on a node
     DeletePod {
+        expected: Option<crate::resource_guard::Identity>,
         name: String,
     }, // delete pod
     DeleteJob {
+        expected: Option<crate::resource_guard::Identity>,
         name: String,
     }, // delete compile Job (cancel / clean up)
     RouteRename {
+        expected: Option<crate::resource_guard::Identity>,
         route: String,
         old: String,
         new: String,
     }, // change HTTPRoute path
     RouteRetarget {
+        expected: Option<crate::resource_guard::Identity>,
         route: String,
         path: String,
         backend: String,
         kind: String,
     }, // change backend
     RouteDelete {
+        expected: Option<crate::resource_guard::Identity>,
         route: String,
         path: String,
     }, // delete route rule
 }
 impl Pending {
+    pub fn reviewed_identity(&self) -> Option<&crate::resource_guard::Identity> {
+        match self {
+            Self::Scale { expected, .. }
+            | Self::Restart { expected, .. }
+            | Self::Stop { expected, .. }
+            | Self::Rollback { expected, .. }
+            | Self::Cordon { expected, .. }
+            | Self::DeletePod { expected, .. }
+            | Self::DeleteJob { expected, .. }
+            | Self::RouteRename { expected, .. }
+            | Self::RouteRetarget { expected, .. }
+            | Self::RouteDelete { expected, .. } => expected.as_ref(),
+            _ => None,
+        }
+    }
     /// Confirmation prompt text.
     pub fn prompt(&self) -> String {
         match self {
-            Pending::Scale { name, target } => format!("scale {} → {} replica(s)?", name, target),
-            Pending::Restart { name } => format!("rollout restart {} (rolling)?", name),
-            Pending::Rollback { name } => {
+            Pending::Scale { name, target, .. } => format!("scale {} → {} replica(s)?", name, target),
+            Pending::Restart { name, .. } => format!("rollout restart {} (rolling)?", name),
+            Pending::Rollback { name, .. } => {
                 format!("rollout undo {} (revert to previous revision)?", name)
             }
             // The value is intentionally absent — this string is shown on screen and, for
@@ -166,10 +198,10 @@ impl Pending {
                 purpose, name, key
             ),
             Pending::Drain { pod } => format!(
-                "drain endpoint {} (relabel out of routing; in-flight streams finish)?",
+                "exclude endpoint {} from routing selectors (active streams require separate verification)?",
                 pod
             ),
-            Pending::Stop { name } => format!("stop serving {} (scale → 0, frees devices)?", name),
+            Pending::Stop { name, .. } => format!("stop serving {} (scale → 0, frees devices)?", name),
             Pending::StoreRefresh => {
                 "re-scan the shared store now (read-only scan Job)?".to_string()
             }
@@ -185,7 +217,7 @@ impl Pending {
             Pending::ApplyUrl { title, url } => {
                 format!("apply upstream manifest — {} (from {})?", title, url)
             }
-            Pending::Cordon { node, on } => format!(
+            Pending::Cordon { node, on, .. } => format!(
                 "{} node {}?",
                 if *on {
                     "cordon (block scheduling on)"
@@ -194,8 +226,8 @@ impl Pending {
                 },
                 node
             ),
-            Pending::DeletePod { name } => format!("delete pod {} (reschedules)?", name),
-            Pending::DeleteJob { name } => {
+            Pending::DeletePod { name, .. } => format!("delete pod {} (controller may recreate)?", name),
+            Pending::DeleteJob { name, .. } => {
                 format!("delete compile job {} (cancel / clean up)?", name)
             }
             Pending::RouteRename { old, new, .. } => format!("rename route {} → {}?", old, new),
@@ -205,7 +237,7 @@ impl Pending {
                 kind,
                 ..
             } => format!("retarget {} → {}:{}?", path, kind, backend),
-            Pending::RouteDelete { path, route } => {
+            Pending::RouteDelete { path, route, .. } => {
                 format!("delete route {} from {}?", path, route)
             }
         }
@@ -341,8 +373,8 @@ pub enum View {
     Routing,
     Pods,
     Perf,
-    Serving,  // Serving 섹션 랜딩: 현재 서빙 중인 배포(라이브 아티팩트 트리) + 라이프사이클
-    Library,  // Deploy 섹션: 위=Model List(배포 가능) · 아래=Activity(compile/deploy 작업) 2패널
+    Serving, // Serving 섹션 랜딩: 현재 서빙 중인 배포(라이브 아티팩트 트리) + 라이프사이클
+    Library, // Deploy 섹션: 위=Model List(배포 가능) · 아래=Activity(compile/deploy 작업) 2패널
     Events,
     Nodes,
     Topo,  // Nodes hub's topology / device pressure map (Canvas)
@@ -388,8 +420,8 @@ impl View {
             View::Routing => "Flow",
             View::Pods => "Pods",
             View::Perf => "Perf",
-            View::Serving => "Serving",  // 현재 서빙 중인 배포(라이프사이클)
-            View::Library => "Deploy",   // Model List + Activity (2패널)
+            View::Serving => "Serving", // 현재 서빙 중인 배포(라이프사이클)
+            View::Library => "Deploy",  // Model List + Activity (2패널)
             View::Events => "Events",
             View::Nodes => "Nodes",
             View::Topo => "Topology",
@@ -476,15 +508,19 @@ pub struct App {
     pub img_serving: Option<String>, // LMD_SERVING_IMAGE — placeholder if absent
     pub hist: HashMap<String, VecDeque<u64>>, // accel util history
     pub toast: Option<String>,
-    pub detail: bool,       // whether to show the selected row's detail (drill-down)
-    pub sort: usize,        // current view's sort column index (per sort_cols, cycled with o)
+    pub detail: bool,    // whether to show the selected row's detail (drill-down)
+    pub sort: usize,     // current view's sort column index (per sort_cols, cycled with o)
     pub sort_desc: bool, // sort direction (true=descending) — toggled with O, resets to default on column change
     pub tick: u64,       // render tick (for marquee/spinner animation)
     pub filter: String,  // row filter (substring match)
     pub filtering: bool, // filter input mode
-    pub help: bool,      // help/legend overlay
-    pub zoom: bool,      // focus (zoom) — hide header/tabs and maximize body
-    pub paused: bool,    // pause screen refresh (data frozen, for reading)
+    pub form_scroll: std::cell::Cell<Option<u16>>,
+    pub form_view_position: std::cell::Cell<u16>,
+    pub epp_profile: Option<String>,
+    pub help_scroll: u16,
+    pub help: bool,         // help/legend overlay
+    pub zoom: bool,         // focus (zoom) — hide header/tabs and maximize body
+    pub paused: bool,       // pause screen refresh (data frozen, for reading)
     pub detail_scroll: u16, // vertical scroll within detail
     /// Line count of the detail pane as last rendered — the only place that height is known.
     /// `scroll_detail` clamps against it, so `j` stops at the end of the content instead of
@@ -494,8 +530,18 @@ pub struct App {
     pub panel_focus: usize, // active (focused) panel index in multi-panel views (moved with Ctrl-w + hjkl)
     pub panel_move: bool, // vi/tmux-style panel-focus mode — armed by Ctrl-w, hjkl/arrows move, Esc exits
     pub preview: Option<(String, String)>, // (title, YAML) preview overlay (generated manifest or read-only YAML)
+    pub yaml_request: Option<reads::YamlRequest>,
+    yaml_loading: Option<(u64, String)>,
+    yaml_generation: u64,
     pub preview_scroll: u16,
+    pub preview_required: Mode,
+    pub manifest_review: manifest_review::State,
+    pub manifest_review_details: bool,
+    pub manifest_review_scroll: u16,
     pub preview_apply: bool, // true=generated manifest (v to verify, a to apply), false=read-only (describe/yaml)
+    pub policy_form: Option<CompileForm>,
+    pub policy_draft: Option<crate::policy::Policy>,
+    pub policy_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     pub compile_form: Option<CompileForm>, // NPU compile options edit form (c → edit → Enter → preview)
     pub deploy_form: Option<DeployForm>, // deploy (serving) options edit form (d → edit → Enter → preview)
     pub prefetch_form: Option<CompileForm>, // zoo prefetch(다운로드) 대상 저장소/경로 선택 폼
@@ -505,10 +551,13 @@ pub struct App {
     pub objective_form: Option<ObjectiveForm>, // objective edit form
     /// Masked secret entry (HF token). Never rendered, never previewed — see `SecretForm`.
     pub secret_form: Option<crate::ops::SecretForm>,
-    pub logs_mode: bool,                 // logs overlay
-    pub logs_target: String,             // logs target pod
-    pub logs: Vec<String>,               // log lines
+    pub logs_mode: bool,     // logs overlay
+    pub logs_target: String, // logs target pod
+    pub logs: Vec<String>,   // log lines
     pub logs_scroll: u16,
+    pub logs_request: Option<(u64, String)>,
+    logs_generation: u64,
+    logs_loading: bool,
     pub cols: HashMap<String, Vec<String>>, // per-view displayed columns (order) — config file
     pub catalog: Vec<crate::catalog::CatModel>, // model catalog (launcher)
     pub zoo: Vec<crate::catalog::ZooModel>, // vendor model zoo (Deploy▸Zoo)
@@ -540,6 +589,9 @@ pub struct App {
     // ── Cross-layer drill ──
     pub nav_stack: Vec<NavState>, // pivot breadcrumb (retraced with esc)
     // ── Perf drill ──
+    pub perf_request: Option<(u64, String, crate::collect::PerformanceTarget)>,
+    pub perf_loading: Option<String>,
+    perf_generation: u64,
     pub perf_detail: Option<crate::collect::PerfDetail>, // selected model's latency distribution (on-demand on Enter)
     // ── EPP scorer weight what-if (local sim, no cluster change) ──
     pub epp_weights: HashMap<String, f64>, // scorer name → adjusted weight override
@@ -572,6 +624,76 @@ fn load_columns() -> HashMap<String, Vec<String>> {
 }
 
 impl App {
+    pub fn request_perf_detail(&mut self, model: String) {
+        if self.perf_loading.as_ref() == Some(&model) {
+            return;
+        }
+        self.perf_generation = self.perf_generation.wrapping_add(1);
+        self.perf_detail = None;
+        self.detail = true;
+        self.perf_loading = Some(model.clone());
+        let target = self
+            .snap
+            .perf_targets
+            .get(&model)
+            .cloned()
+            .unwrap_or_default();
+        self.perf_request = Some((self.perf_generation, model, target));
+    }
+
+    pub fn invalidate_perf_request(&mut self) {
+        if self.view != View::Perf || !self.detail {
+            if self.perf_loading.take().is_some() {
+                self.perf_generation = self.perf_generation.wrapping_add(1);
+            }
+            self.perf_request = None;
+        }
+    }
+
+    pub fn finish_perf_detail(&mut self, generation: u64, detail: crate::collect::PerfDetail) {
+        self.invalidate_perf_request();
+        if generation == self.perf_generation && self.perf_loading.as_ref() == Some(&detail.model) {
+            self.perf_loading = None;
+            self.perf_detail = Some(detail);
+        }
+    }
+
+    pub fn request_logs(&mut self, pod: String) {
+        if self.logs_mode && self.logs_loading && self.logs_target == pod {
+            return;
+        }
+        self.logs_generation = self.logs_generation.wrapping_add(1);
+        self.logs_mode = true;
+        self.logs_loading = true;
+        self.logs_target = pod.clone();
+        self.logs = vec!["Loading logs… (Esc to close)".into()];
+        self.logs_scroll = 0;
+        self.logs_request = Some((self.logs_generation, pod));
+    }
+
+    pub fn close_logs(&mut self) {
+        self.logs_mode = false;
+        self.logs_loading = false;
+        self.logs_request = None;
+        self.logs_generation = self.logs_generation.wrapping_add(1);
+    }
+
+    pub fn finish_logs(&mut self, generation: u64, result: Result<Vec<String>, String>) {
+        if !self.logs_mode || generation != self.logs_generation {
+            return;
+        }
+        self.logs_loading = false;
+        self.logs = match result {
+            Ok(lines) if lines.is_empty() => vec!["No log lines returned.".into()],
+            Ok(lines) => lines,
+            Err(error) => vec![
+                format!("Log request failed: {error}"),
+                "Press r to retry.".into(),
+            ],
+        };
+        self.logs_scroll = self.logs.len().saturating_sub(30).min(u16::MAX as usize) as u16;
+    }
+
     pub fn new() -> Self {
         let env = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
         App {
@@ -592,6 +714,10 @@ impl App {
             tick: 0,
             filter: String::new(),
             filtering: false,
+            form_scroll: std::cell::Cell::new(None),
+            form_view_position: std::cell::Cell::new(0),
+            epp_profile: None,
+            help_scroll: 0,
             help: false,
             zoom: false,
             paused: false,
@@ -601,8 +727,18 @@ impl App {
             panel_focus: 0,
             panel_move: false,
             preview: None,
+            yaml_request: None,
+            yaml_loading: None,
+            yaml_generation: 0,
             preview_scroll: 0,
+            preview_required: Mode::Admin,
+            manifest_review: Default::default(),
+            manifest_review_details: false,
+            manifest_review_scroll: 0,
             preview_apply: false,
+            policy_form: None,
+            policy_draft: None,
+            policy_rx: None,
             compile_form: None,
             deploy_form: None,
             prefetch_form: None,
@@ -615,6 +751,9 @@ impl App {
             logs_target: String::new(),
             logs: Vec::new(),
             logs_scroll: 0,
+            logs_request: None,
+            logs_generation: 0,
+            logs_loading: false,
             cols: load_columns(),
             catalog: crate::catalog::load(),
             zoo: crate::catalog::load_zoo(),
@@ -635,6 +774,9 @@ impl App {
             pending_desired: std::collections::HashMap::new(),
             palette: None,
             nav_stack: Vec::new(),
+            perf_request: None,
+            perf_loading: None,
+            perf_generation: 0,
             perf_detail: None,
             epp_weights: HashMap::new(),
             energy_base: HashMap::new(),
@@ -670,17 +812,49 @@ impl App {
         self.notify("energy session reset".to_string());
     }
 
+    pub fn selected_epp(&self) -> Option<&crate::epp_config::EppProfile> {
+        let cfg = self.snap.epp.as_ref()?;
+        cfg.entries
+            .iter()
+            .find(|entry| Some(&entry.profile) == self.epp_profile.as_ref())
+            .or_else(|| cfg.entries.first())
+    }
+    pub fn cycle_epp_profile(&mut self) {
+        let Some(cfg) = &self.snap.epp else {
+            return;
+        };
+        if cfg.entries.is_empty() {
+            return;
+        }
+        let current = cfg
+            .entries
+            .iter()
+            .position(|entry| Some(&entry.profile) == self.epp_profile.as_ref())
+            .unwrap_or(0);
+        self.epp_profile = Some(
+            cfg.entries[(current + 1) % cfg.entries.len()]
+                .profile
+                .clone(),
+        );
+        self.epp_weights.clear();
+        self.selected = 0;
+    }
+
     /// EPP what-if: adjust the selected scorer's weight by delta (local override, ≥0).
     pub fn epp_adjust(&mut self, delta: f64) {
         if self.view != View::Epp || self.panel_focus != 0 {
             return; // only when the scorers panel is focused
         }
         let ord = self.order();
-        if let (Some(cfg), Some(&i)) = (&self.snap.epp, ord.get(self.selected)) {
+        if let (Some(cfg), Some(&i)) = (self.selected_epp().cloned(), ord.get(self.selected)) {
             if let Some((name, base)) = cfg.scorers.get(i) {
                 let cur = *self.epp_weights.get(name).unwrap_or(base);
-                self.epp_weights
-                    .insert(name.clone(), (cur + delta).max(0.0));
+                let next = cur + delta;
+                if next.is_finite() {
+                    self.epp_weights.insert(name.clone(), next.max(0.0));
+                } else {
+                    self.notify("weight adjustment exceeds finite range".into());
+                }
             }
         }
     }
@@ -693,11 +867,18 @@ impl App {
     /// 관측 신호(decisions=픽 횟수, pod_queues=큐 깊이)를 pod 기준으로 조인한다.
     /// score(kv/종합)는 EPP 가 per-endpoint 로 노출하기 전까지 None. 픽 많은 순 정렬.
     pub fn epp_endpoints(&self) -> Vec<EndpointDecision> {
-        let total: f64 = self.snap.decisions.iter().map(|(_, c)| c).sum();
+        let total: f64 = self
+            .snap
+            .decisions
+            .iter()
+            .map(|(_, c)| *c)
+            .filter(|c| c.is_finite() && *c >= 0.0)
+            .sum();
         let qmap: std::collections::HashMap<&str, f64> = self
             .snap
             .pod_queues
             .iter()
+            .filter(|(_, q)| q.is_finite() && *q >= 0.0)
             .map(|(p, q)| (p.as_str(), *q))
             .collect();
         // per-pod composite score from the epp-score-observer plugin (empty until deployed).
@@ -705,6 +886,7 @@ impl App {
             .snap
             .endpoint_scores
             .iter()
+            .filter(|(_, s)| s.is_finite())
             .map(|(p, s)| (p.as_str(), *s))
             .collect();
         let mut rows: Vec<EndpointDecision> = self
@@ -713,8 +895,9 @@ impl App {
             .iter()
             .map(|(pod, picks)| EndpointDecision {
                 pod: pod.clone(),
-                picks: *picks,
-                share: if total > 0.0 { picks / total * 100.0 } else { 0.0 },
+                picks: (picks.is_finite() && *picks >= 0.0).then_some(*picks),
+                share: (total.is_finite() && total > 0.0 && picks.is_finite() && *picks >= 0.0)
+                    .then(|| picks / total * 100.0),
                 queue: qmap.get(pod.as_str()).copied(),
                 kv: None,
                 score: smap.get(pod.as_str()).copied(),
@@ -723,11 +906,14 @@ impl App {
         // decisions 는 이미 픽 내림차순이지만, pod_queues 만 있고 decision 이 없는 endpoint 도
         // 후보로 보이도록 큐만 있는 pod 를 뒤에 덧붙인다(픽 0 = 라우팅 안 받음).
         for (pod, q) in &self.snap.pod_queues {
+            if !q.is_finite() || *q < 0.0 {
+                continue;
+            }
             if !rows.iter().any(|r| &r.pod == pod) {
                 rows.push(EndpointDecision {
                     pod: pod.clone(),
-                    picks: 0.0,
-                    share: 0.0,
+                    picks: None,
+                    share: None,
                     queue: Some(*q),
                     kv: None,
                     score: smap.get(pod.as_str()).copied(),
@@ -736,11 +922,14 @@ impl App {
         }
         // scored-but-not-picked/queued candidates (e.g. score present, no traffic yet).
         for (pod, s) in &self.snap.endpoint_scores {
+            if !s.is_finite() {
+                continue;
+            }
             if !rows.iter().any(|r| &r.pod == pod) {
                 rows.push(EndpointDecision {
                     pod: pod.clone(),
-                    picks: 0.0,
-                    share: 0.0,
+                    picks: None,
+                    share: None,
                     queue: qmap.get(pod.as_str()).copied(),
                     kv: None,
                     score: Some(*s),
@@ -753,49 +942,53 @@ impl App {
     /// 관측 신호만으로 "왜 이 pick" 을 추론(EPP score 부재 시 근사 설명). 데이터 없으면 None.
     /// 픽 최다 endpoint 와 큐 최소 endpoint 를 비교 — 일치하면 큐 기반 라우팅과 정합.
     pub fn epp_decision_hint(&self) -> Option<String> {
+        if ["epp_decisions", "epp_queues"].iter().any(|key| {
+            self.snap.sources.get(*key).is_some_and(|status| {
+                status.state(
+                    crate::collect::now_secs(),
+                    self.snap.stale_after_secs.max(10),
+                ) != crate::quality::Quality::Fresh
+            })
+        }) {
+            return None;
+        }
         let rows = self.epp_endpoints();
         let top = rows.iter().max_by(|a, b| {
             a.picks
                 .partial_cmp(&b.picks)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })?;
-        if top.picks <= 0.0 {
+        if !top.picks.is_some_and(|picks| picks > 0.0) {
             return None; // 관측된 라우팅 없음
         }
-        let lowq = rows
-            .iter()
-            .filter(|r| r.queue.is_some())
-            .min_by(|a, b| {
-                a.queue
-                    .partial_cmp(&b.queue)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+        let lowq = rows.iter().filter(|r| r.queue.is_some()).min_by(|a, b| {
+            a.queue
+                .partial_cmp(&b.queue)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         match lowq {
             Some(lq) if lq.pod == top.pod => Some(format!(
                 "picked-most {} also has the shortest queue — consistent with load/queue scoring",
                 short_pod(&top.pod, 24)
             )),
             Some(lq) => Some(format!(
-                "picked-most {} ≠ shortest-queue {} — pick likely driven by cache/prefix locality",
+                "picked-most {} ≠ shortest-queue {} — cause unverified; queue and pick totals alone do not explain routing",
                 short_pod(&top.pod, 20),
                 short_pod(&lq.pod, 20)
             )),
             None => Some(format!(
-                "picked-most {} — per-endpoint scores not exposed (queue/kv unavailable)",
+                "picked-most {} — queue unavailable; routing cause unverified",
                 short_pod(&top.pod, 24)
             )),
         }
     }
 
-    /// Backend (model) name of the route selected in Flow(Topo) — for pivoting to a layer from the path.
+    /// Resolve a Service route to one verified owning Deployment. A backend name
+    /// (including an InferencePool name) is not itself a model identity.
     pub fn selected_route_backend(&self) -> Option<String> {
-        if self.view == View::Routing {
-            self.sel_orig()
-                .and_then(|i| self.snap.routes.get(i))
-                .map(|r| r.backend.clone())
-        } else {
-            None
-        }
+        let route = self.selected_route()?;
+        let owners = crate::routing::owners(&self.snap, &route);
+        (owners.len() == 1).then(|| owners[0].to_owned())
     }
 
     /// What history says about compiling `model` on `vendor` — see [`crate::advisor`].
@@ -810,11 +1003,6 @@ impl App {
         self.snap.models.iter().find(|m| m.name == name)
     }
 
-    /// Same rule as `model_by_name`, for routes (the action subject is the route path).
-    pub fn route_by_path(&self, path: &str) -> Option<crate::collect::Route> {
-        self.snap.routes.iter().find(|r| r.path == path).cloned()
-    }
-
     /// Route selected in Flow (only when panel 0 is focused).
     pub fn selected_route(&self) -> Option<crate::collect::Route> {
         if self.view == View::Routing && self.panel_focus == 0 {
@@ -827,15 +1015,13 @@ impl App {
     }
 
     /// Open the route rename form — current path as the initial value, text-editable.
-    pub fn open_route_rename(&mut self) {
-        let Some(r) = self.selected_route() else {
-            return;
-        };
+    pub fn open_route_rename(&mut self, r: crate::collect::Route) {
         if r.route.is_empty() {
             self.notify("route: HTTPRoute name unknown — cannot edit".into());
             return;
         }
         self.route_form = Some(RouteForm {
+            expected: r.identity,
             route: r.route,
             path: r.path.clone(),
             rename: true,
@@ -846,31 +1032,33 @@ impl App {
     }
 
     /// Open the route retarget form — pick from a list of candidate backends (InferencePool/Service).
-    pub fn open_route_retarget(&mut self) {
-        let Some(r) = self.selected_route() else {
-            return;
-        };
+    pub fn open_route_retarget(&mut self, r: crate::collect::Route) {
         if r.route.is_empty() {
             self.notify("route: HTTPRoute name unknown — cannot edit".into());
             return;
         }
-        // Candidates: current InferencePools + serving Services (kind:name).
+        // Candidates: observed InferencePools and actual namespace Services (kind:name).
         let mut choices: Vec<String> = self
             .snap
             .pools
             .iter()
             .map(|p| format!("InferencePool:{}", p.name))
             .collect();
-        for m in &self.snap.models {
-            let s = format!("Service:{}", m.name);
+        for name in &self.snap.service_names {
+            let s = format!("Service:{}", name);
             if !choices.contains(&s) {
                 choices.push(s);
             }
+        }
+        if choices.is_empty() {
+            self.notify("route: no observed Service or InferencePool targets; refresh and check data sources".into());
+            return;
         }
         let cur = format!("{}:{}", r.kind, r.backend);
         let cursor = choices.iter().position(|c| *c == cur).unwrap_or(0);
         let value = choices.get(cursor).cloned().unwrap_or_default();
         self.route_form = Some(RouteForm {
+            expected: r.identity,
             route: r.route,
             path: r.path,
             rename: false,
@@ -891,14 +1079,25 @@ impl App {
         }
     }
 
-    /// Pod name → owning model (deployment) name. Prefix match, else the pod name as-is.
-    fn model_of_pod(&self, pod: &str) -> String {
-        self.snap
-            .models
+    /// Resolve a Pod only through current controller UID evidence.
+    fn model_of_pod(&self, pod: &str) -> Option<String> {
+        let now = crate::collect::now_secs();
+        if !["pods", "replicasets", "workloads"].iter().all(|source| {
+            self.snap.sources.get(*source).is_some_and(|status| {
+                status.state(now, self.snap.stale_after_secs.max(10))
+                    == crate::quality::Quality::Fresh
+            })
+        }) {
+            return None;
+        }
+        let mut owners = self
+            .snap
+            .deployment_pods
             .iter()
-            .find(|m| pod.starts_with(&m.name))
-            .map(|m| m.name.clone())
-            .unwrap_or_else(|| pod.to_string())
+            .filter(|(_, pods)| pods.iter().any(|name| name == pod))
+            .map(|(name, _)| name);
+        let owner = owners.next()?;
+        owners.next().is_none().then(|| owner.clone())
     }
 
     // (navigation — pivot/tabs/panels/list/detail — moved to src/app/nav.rs)
@@ -988,6 +1187,20 @@ pub fn snapshot_alerts(snap: &Snapshot) -> Vec<Alert> {
 
 /// 크로스레이어 1줄 진단 → (문구, 심각도). None = 정상(healthy). UI diagnosis 와 agent JSON 공유.
 pub fn diagnose(s: &Snapshot) -> (String, Option<Sev>) {
+    let degraded = s.degraded_sources(crate::collect::now_secs());
+    if !degraded.is_empty() {
+        return (
+            format!(
+                "collection degraded: {} — retained values may be stale",
+                degraded
+                    .iter()
+                    .map(|(key, _)| *key)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Some(Sev::Warn),
+        );
+    }
     let serving = s.serving_count();
     if s.accel.is_empty() && serving == 0 {
         return (
@@ -997,7 +1210,7 @@ pub fn diagnose(s: &Snapshot) -> (String, Option<Sev>) {
     }
     if serving == 0 {
         return (
-            "0 models serving — press 's' in Models to start one (no backend)".into(),
+            "0 model workloads ready — inspect Serving / Pods / Events".into(),
             Some(Sev::Warn),
         );
     }
@@ -1017,6 +1230,15 @@ pub fn diagnose(s: &Snapshot) -> (String, Option<Sev>) {
             Some(Sev::Warn),
         );
     }
+    if !s.accel.iter().any(|a| a.util.is_finite()) {
+        return (
+            format!(
+                "{} model(s) serving · accelerator utilization unavailable",
+                serving
+            ),
+            Some(Sev::Warn),
+        );
+    }
     let busy = s.accel.iter().filter(|a| a.util > 80.0).count();
     if busy > 0 {
         return (
@@ -1028,7 +1250,10 @@ pub fn diagnose(s: &Snapshot) -> (String, Option<Sev>) {
         );
     }
     (
-        format!("{} model(s) serving, accelerators have headroom", serving),
+        format!(
+            "{} model(s) serving, measured accelerator utilization ≤80%",
+            serving
+        ),
         None,
     )
 }
@@ -1040,7 +1265,7 @@ mod tests {
     /// form_submit 후 확인 팝업(Pending::Apply)에 담긴 (title, yaml) 추출 — 테스트 헬퍼.
     fn submitted(a: &App) -> (String, String) {
         match a.confirm.as_ref() {
-            Some(Pending::Apply { title, yaml }) => (title.clone(), yaml.clone()),
+            Some(Pending::Apply { title, yaml, .. }) => (title.clone(), yaml.clone()),
             _ => panic!("expected Apply confirm after form_submit"),
         }
     }
@@ -1064,6 +1289,7 @@ mod tests {
     }
     fn pod(name: &str) -> PodRow {
         PodRow {
+            identity: None,
             name: name.into(),
             phase: "Running".into(),
             ready: "1/1".into(),
@@ -1081,6 +1307,26 @@ mod tests {
         };
         a.view = View::Overview; // flat model list + pivots live on Overview now
         a
+    }
+
+    #[test]
+    fn endpoint_decisions_preserve_missing_and_reject_nonfinite_metrics() {
+        let mut app = App::new();
+        app.snap.decisions = vec![("observed".into(), 0.0), ("invalid".into(), f64::NAN)];
+        app.snap.pod_queues = vec![
+            ("queue-only".into(), 2.0),
+            ("bad-queue".into(), f64::INFINITY),
+        ];
+        let rows = app.epp_endpoints();
+        let observed = rows.iter().find(|r| r.pod == "observed").unwrap();
+        assert_eq!(observed.picks, Some(0.0));
+        assert_eq!(observed.share, None);
+        let missing = rows.iter().find(|r| r.pod == "queue-only").unwrap();
+        assert_eq!(missing.picks, None);
+        assert_eq!(missing.share, None);
+        assert!(rows.iter().all(|r| r.picks.is_none_or(f64::is_finite)));
+        assert!(!rows.iter().any(|r| r.pod == "bad-queue"));
+        assert!(app.epp_decision_hint().is_none());
     }
 
     #[test]
@@ -1288,7 +1534,9 @@ mod tests {
         assert!(envs.contains(&"VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK"));
         // routing=llm-d(기본) → 게이트웨이 라우팅 리소스 동봉.
         assert!(
-            ddocs.iter().any(|d| d["kind"].as_str() == Some("InferencePool")),
+            ddocs
+                .iter()
+                .any(|d| d["kind"].as_str() == Some("InferencePool")),
             "generates InferencePool"
         );
         assert!(dyaml.contains("kind: HTTPRoute"), "generates HTTPRoute");
@@ -1402,6 +1650,31 @@ mod tests {
 
     // 스토어에 같은 모델·같은 target 산출물이 이미 있으면 preflight 에 재컴파일 경고(⚠, 블로커 아님).
     #[test]
+    fn compile_identity_distinguishes_batch_attention_and_field_order() {
+        let a = App::new();
+        let artifact = crate::collect::ModelArtifact {
+            source: "Qwen/Qwen2.5-0.5B-Instruct".into(),
+            ..Default::default()
+        };
+        let form = a.build_compile_form(&artifact, "rbln");
+        let target = form.target();
+        for key in ["batch", "attn", "kvpart", "quant"] {
+            let mut other = form.clone();
+            let field = other.fields.iter_mut().find(|f| f.key == key).unwrap();
+            field.value.push_str("-different");
+            assert_ne!(
+                target,
+                other.target(),
+                "{key} must identify a different build"
+            );
+        }
+        let mut reordered = form.clone();
+        reordered.fields.reverse();
+        assert_eq!(target, reordered.target());
+        assert!(compile_job_name("Qwen--Qwen2.5-0.5B-Instruct", &target).len() <= 56);
+    }
+
+    #[test]
     fn compile_preflight_flags_already_stored() {
         use crate::collect::{ModelArtifact, StoredModel};
         let mut a = App::new();
@@ -1436,6 +1709,11 @@ mod tests {
         a.selected = 0;
         a.compile_preview();
         let form = a.compile_form.clone().expect("rbln form");
+        a.snap.stored[0].compiled_for = form.target();
+        a.snap.stored[0].path = format!(
+            "compiled/KISTI-KONI--KONI-Llama3.1-8B-Instruct/rbln/{}/",
+            form.target()
+        );
         assert!(
             crate::app::compile::preflight::compile_already_stored(&a.snap.stored, &form).is_some(),
             "정확 일치 산출물 감지"
@@ -1472,7 +1750,8 @@ mod tests {
             f.value = "16384".into();
         }
         assert!(
-            crate::app::compile::preflight::compile_already_stored(&a.snap.stored, &form2).is_none(),
+            crate::app::compile::preflight::compile_already_stored(&a.snap.stored, &form2)
+                .is_none(),
             "옵션 다르면 재컴파일 아님"
         );
     }
@@ -1535,7 +1814,10 @@ mod tests {
 
         // 레시피는 마운트되는 에셋이고, fxb 호출은 그 안에 있다(커맨드라인 보간 없음).
         let recipe = cm["data"]["compile.sh"].as_str().expect("compile.sh");
-        assert!(recipe.contains("fxb build"), "furiosa recipe drives fxb build");
+        assert!(
+            recipe.contains("fxb build"),
+            "furiosa recipe drives fxb build"
+        );
         assert!(
             recipe.contains("\"$MODEL_ID\""),
             "recipe takes the model id from the environment, not interpolation"
@@ -1546,7 +1828,11 @@ mod tests {
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        assert_eq!(cmd, vec!["sh", "/scripts/compile.sh"], "runs the mounted recipe");
+        assert_eq!(
+            cmd,
+            vec!["sh", "/scripts/compile.sh"],
+            "runs the mounted recipe"
+        );
 
         assert_eq!(
             container["image"].as_str(),
@@ -1555,7 +1841,10 @@ mod tests {
         );
         // 컴파일은 AOT → 가속기 디바이스를 예약하지 않는다. cpu/mem 만.
         let req = &container["resources"]["requests"];
-        assert!(req["furiosa.ai/rngd"].is_null(), "compile is AOT — no device reservation");
+        assert!(
+            req["furiosa.ai/rngd"].is_null(),
+            "compile is AOT — no device reservation"
+        );
         assert!(
             container["resources"]["limits"].is_null(),
             "compile sets no device limits"
@@ -1621,9 +1910,14 @@ mod tests {
             .iter()
             .filter_map(|e| e["valueFrom"]["secretKeyRef"]["name"].as_str())
             .collect();
-        assert!(secrets.contains(&"hf-token"), "furiosa needs HF_TOKEN secret");
         assert!(
-            fc["resources"]["limits"]["furiosa.ai/rngd"].as_str().is_some(),
+            secrets.contains(&"hf-token"),
+            "furiosa needs HF_TOKEN secret"
+        );
+        assert!(
+            fc["resources"]["limits"]["furiosa.ai/rngd"]
+                .as_str()
+                .is_some(),
             "reserves RNGD devices"
         );
         let froute = fdocs
@@ -1647,7 +1941,9 @@ mod tests {
         let gc = &serving_deployment(&gdocs)["spec"]["template"]["spec"]["containers"][0];
         assert_eq!(gc["args"][0].as_str(), Some("serve"));
         assert!(
-            gc["resources"]["limits"]["nvidia.com/gpu"].as_str().is_some(),
+            gc["resources"]["limits"]["nvidia.com/gpu"]
+                .as_str()
+                .is_some(),
             "reserves GPUs"
         );
         let groute = gdocs
@@ -1677,10 +1973,40 @@ mod tests {
             .filter_map(|x| x["kind"].as_str().map(String::from))
             .collect();
         assert!(
-            !kinds.iter().any(|k| k == "InferencePool" || k == "HTTPRoute"),
+            !kinds
+                .iter()
+                .any(|k| k == "InferencePool" || k == "HTTPRoute"),
             "direct = no routing resources, got {:?}",
             kinds
         );
+    }
+
+    #[test]
+    fn deploy_preflight_reports_configured_image_without_claiming_runtime_health() {
+        let mut app = App::new();
+        app.img_furiosa = Some("registry.example/furiosa:pinned".into());
+        let form = deploy_form("furiosa", "1", "1", "any");
+        let checks = app.deploy_preflight(&form);
+        assert!(checks[0].1.contains("registry.example/furiosa:pinned"));
+        assert!(checks[0].1.contains("unverified"));
+        assert!(checks
+            .iter()
+            .any(|(_, text)| text.contains("capacity: unknown")));
+        assert!(!checks
+            .iter()
+            .any(|(_, text)| text.contains("will stay Pending")));
+        let mut selected = form.clone();
+        selected.place = "other-node".into();
+        app.snap.nodes.push(crate::collect::NodeInfo {
+            name: "driver-node".into(),
+            ready: true,
+            npu: "RNGD".into(),
+            ..Default::default()
+        });
+        assert!(app
+            .deploy_preflight(&selected)
+            .iter()
+            .any(|(ok, text)| !ok && text.contains("accelerator driver")));
     }
 
     #[test]
@@ -1707,22 +2033,16 @@ mod tests {
             a.selected = 0;
             a
         };
-        // 등록 furiosa 양자화 모델 → registry preflight 통과.
-        let mut a = mk("furiosa-ai/Qwen3-4B-FP8");
-        a.compile_preview();
-        let pf = a.compile_preflight(a.compile_form.as_ref().unwrap());
-        assert!(
-            pf.iter().any(|(ok, m)| *ok && m.starts_with("registry")),
-            "registered model passes registry check"
-        );
-        // 원본(미양자화) 모델 → registry preflight 실패(사전 경고).
-        let mut b = mk("Qwen/Qwen2.5-0.5B-Instruct");
-        b.compile_preview();
-        let pfb = b.compile_preflight(b.compile_form.as_ref().unwrap());
-        assert!(
-            pfb.iter().any(|(ok, m)| !*ok && m.starts_with("registry")),
-            "unregistered model flagged before compile"
-        );
+        // Neither organization nor a quantization suffix proves SDK compatibility.
+        for source in ["furiosa-ai/Qwen3-4B-FP8", "Qwen/Qwen2.5-0.5B-Instruct"] {
+            let mut app = mk(source);
+            app.compile_preview();
+            let checks = app.compile_preflight(app.compile_form.as_ref().unwrap());
+            assert!(checks
+                .iter()
+                .any(|(_, text)| text.contains("FXB compatibility unverified")));
+            assert!(!checks.iter().any(|(_, text)| text.starts_with("registry")));
+        }
     }
 
     #[test]
@@ -1748,7 +2068,10 @@ mod tests {
         a.selected = 0;
         // Serving = 운영 렌즈: Info/Logs/YAML/Scale/Restart/Objective. 컴파일·신규 배포는 Model List 로 이동.
         a.open_action_menu();
-        let m = a.action_menu.clone().expect("menu opens on Serving panel 0");
+        let m = a
+            .action_menu
+            .clone()
+            .expect("menu opens on Serving panel 0");
         let acts: Vec<Action> = m.items.iter().map(|i| i.action).collect();
         assert!(acts.contains(&Action::Info));
         assert!(acts.contains(&Action::Scale));
@@ -1759,8 +2082,14 @@ mod tests {
             !acts.iter().any(|x| matches!(x, Action::Compile(_))),
             "compile 은 Model List 로 이동"
         );
-        assert!(!acts.contains(&Action::Deploy), "deploy 는 Model List 로 이동");
-        assert!(!acts.contains(&Action::Stop), "미배포(models 없음)면 Stop 없음");
+        assert!(
+            !acts.contains(&Action::Deploy),
+            "deploy 는 Model List 로 이동"
+        );
+        assert!(
+            !acts.contains(&Action::Stop),
+            "미배포(models 없음)면 Stop 없음"
+        );
         assert_eq!(m.by_key('s'), Some(Action::Scale));
         assert_eq!(m.by_key('z'), None);
         // 같은 이름의 배포가 desired>0 이면 Stop 노출.
@@ -1824,6 +2153,11 @@ mod tests {
         use crate::collect::ModelArtifact;
         let mk = |source: &str| App {
             snap: Snapshot {
+                accel: vec![{
+                    let mut device = accel(crate::collect::AccelKind::Rbln, "etri-001", true, "");
+                    device.mem_total_gb = 15.7;
+                    device
+                }],
                 artifacts: vec![ModelArtifact {
                     model: "m".into(),
                     family: source.to_lowercase(),
@@ -1893,13 +2227,25 @@ mod tests {
                 opts: vec![],
             }],
             routes: vec![Route {
+                configuration: None,
+                match_summary: String::new(),
+                backend_summary: String::new(),
+                single_local_backend: true,
+                identity: None,
                 path: "/v1".into(),
-                backend: "m1".into(),
-                kind: "InferencePool".into(),
+                backend: "public-api".into(),
+                kind: "Service".into(),
                 route: "openai-route".into(),
             }],
             ..Default::default()
         };
+        crate::routing::fresh_relationship_sources(&mut a.snap);
+        a.snap
+            .service_bindings
+            .insert("m1".into(), vec!["public-api".into()]);
+        let mut similarly_named = a.snap.artifacts[0].clone();
+        similarly_named.model = "a-m1-extra".into();
+        a.snap.artifacts.push(similarly_named);
         a.view = View::Routing;
         a.selected = 0;
         // toggle_detail 은 상세 없는 Routing 에선 detail 을 켜지 않음(↑↓ 네비 잠김 방지).
@@ -1912,6 +2258,7 @@ mod tests {
         a.drill_route();
         assert_eq!(a.view, View::Serving);
         assert_eq!(a.filter, "m1");
+        assert_eq!(a.selected_artifact().unwrap().model, "m1");
         assert!(a.detail);
         // esc: 상세 닫기 → nav_back 으로 Flow 복귀.
         a.detail = false;
@@ -1937,6 +2284,8 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let mut a = App::new();
         a.confirm = Some(Pending::Apply {
+            reviewed: None,
+            required: Mode::Admin,
             title: "compile something".into(),
             yaml: "kind: Job\n".into(),
         });
@@ -1971,7 +2320,10 @@ mod tests {
                 }
             }
         }
-        assert!(text2.contains("confirm popup"), "the hint returns once the toast expires");
+        assert!(
+            text2.contains("confirm popup"),
+            "the hint returns once the toast expires"
+        );
     }
 
     /// The help overlay is a fixed-height box listing fixed content, so adding a line can
@@ -2002,8 +2354,23 @@ mod tests {
         let mut short = Terminal::new(TestBackend::new(120, 12)).unwrap();
         short.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
 
+        a.help_scroll = u16::MAX;
+        short.draw(|f| crate::ui::draw(f, &a, &mut fx)).unwrap();
+        let bottom: String = short
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            bottom.contains("util/mem/temp"),
+            "short help must reach final entry"
+        );
+        assert!(crate::ui::help_scroll_max(40, 12) > crate::ui::help_scroll_max(120, 40));
+
         for want in [
-            "0-6 / Tab",     // first entry
+            "0-6 / Tab", // first entry
             "scale / restart / stop",
             "V M r",         // the store actions, added last to the operations block
             "util/mem/temp", // the final block, which a too-short box would clip
@@ -2244,7 +2611,10 @@ mod tests {
             form.push(c);
         }
         a.secret_form = Some(form);
-        assert_eq!(crate::ui::Overlay::top(&a), Some(crate::ui::Overlay::SecretForm));
+        assert_eq!(
+            crate::ui::Overlay::top(&a),
+            Some(crate::ui::Overlay::SecretForm)
+        );
 
         let mut fx = crate::ui::FxState::disabled();
         let mut t = Terminal::new(TestBackend::new(120, 34)).unwrap();
@@ -2257,10 +2627,19 @@ mod tests {
             }
         }
         assert!(!text.contains(secret), "the value was rendered");
-        assert!(!text.contains("hf_ZZTOP"), "a prefix of the value was rendered");
-        assert!(!text.contains("secretVALUE"), "part of the value was rendered");
+        assert!(
+            !text.contains("hf_ZZTOP"),
+            "a prefix of the value was rendered"
+        );
+        assert!(
+            !text.contains("secretVALUE"),
+            "part of the value was rendered"
+        );
         // The mask and the destination are shown, so the operator knows what is happening.
-        assert!(text.contains('•'), "the masked value should be visible as dots");
+        assert!(
+            text.contains('•'),
+            "the masked value should be visible as dots"
+        );
         assert!(text.contains("hf-token"), "the destination secret is named");
     }
 
@@ -2275,9 +2654,17 @@ mod tests {
             value: "hf_ZZTOPsecretVALUE9876".into(),
         };
         let prompt = p.prompt();
-        assert!(!prompt.contains("hf_ZZTOP"), "prompt leaked the value: {}", prompt);
+        assert!(
+            !prompt.contains("hf_ZZTOP"),
+            "prompt leaked the value: {}",
+            prompt
+        );
         assert!(prompt.contains("hidden"), "and says so: {}", prompt);
-        assert!(prompt.contains("hf-token/token"), "names the destination: {}", prompt);
+        assert!(
+            prompt.contains("hf-token/token"),
+            "names the destination: {}",
+            prompt
+        );
     }
 
     #[test]
@@ -2322,7 +2709,10 @@ mod tests {
         // preview 가 logs 보다 위(PRECEDENCE 순서).
         assert_eq!(Overlay::top(&a), Some(Overlay::Preview));
         // confirm 은 preview/logs 보다 위.
-        a.confirm = Some(Pending::Stop { name: "m1".into() });
+        a.confirm = Some(Pending::Stop {
+            name: "m1".into(),
+            expected: None,
+        });
         assert_eq!(Overlay::top(&a), Some(Overlay::Confirm));
         // help 가 최상위.
         a.help = true;
@@ -2645,8 +3035,18 @@ mod tests {
         a.snap = Snapshot {
             artifacts: vec![
                 // 같은 family(llama3) · 서로 다른 version(source) 둘 → version 티어 노출.
-                art("llama-a", "llama3", "meta-llama/Llama-3.1-8B-Instruct", "vLLM-RBLN"),
-                art("llama-b", "llama3", "meta-llama/Llama-3.1-8B-Instruct-FP8", "vLLM"),
+                art(
+                    "llama-a",
+                    "llama3",
+                    "meta-llama/Llama-3.1-8B-Instruct",
+                    "vLLM-RBLN",
+                ),
+                art(
+                    "llama-b",
+                    "llama3",
+                    "meta-llama/Llama-3.1-8B-Instruct-FP8",
+                    "vLLM",
+                ),
                 // family 하나에 version 하나 → version 티어 접힘(적응형).
                 art("qwen-a", "qwen2.5", "Qwen/Qwen2.5-0.5B", "Furiosa-LLM"),
             ],
@@ -2704,7 +3104,7 @@ mod tests {
         };
         a.view = View::Library;
         a.panel_focus = 0; // 통합 배포 트리
-        // 통합 트리에서 스토어 빌드의 위치로 커서 이동(카탈로그가 먼저 나열됨).
+                           // 통합 트리에서 스토어 빌드의 위치로 커서 이동(카탈로그가 먼저 나열됨).
         a.selected = a
             .library_items()
             .iter()
@@ -2728,10 +3128,16 @@ mod tests {
         assert!(acts.contains(&Action::Deploy), "store build offers Deploy");
         // Deploy 폼 → 제출 → Furiosa Deployment 매니페스트.
         a.open_deploy_form();
-        assert!(a.deploy_form.is_some(), "deploy form opens from store build");
+        assert!(
+            a.deploy_form.is_some(),
+            "deploy form opens from store build"
+        );
         a.deploy_form_submit();
         let (_, yaml) = submitted(&a);
-        assert!(yaml.contains("kind: Deployment"), "generates Deployment\n{yaml}");
+        assert!(
+            yaml.contains("kind: Deployment"),
+            "generates Deployment\n{yaml}"
+        );
         assert!(
             yaml.to_lowercase().contains("furiosa") || yaml.contains("rngd"),
             "furiosa serving manifest\n{yaml}"
@@ -2812,8 +3218,14 @@ mod tests {
                 }
             }
         }
-        assert!(st.contains("compile options"), "스토어 상세: 옵션 섹션\n{st}");
-        assert!(st.contains("tensor-parallel"), "스토어 상세: TP 디코드\n{st}");
+        assert!(
+            st.contains("compile options"),
+            "스토어 상세: 옵션 섹션\n{st}"
+        );
+        assert!(
+            st.contains("tensor-parallel"),
+            "스토어 상세: TP 디코드\n{st}"
+        );
         assert!(st.contains("max-seq-len"), "스토어 상세: seq 디코드\n{st}");
     }
 
@@ -2896,12 +3308,15 @@ mod tests {
         let eps = a.epp_endpoints();
         assert_eq!(eps.len(), 2);
         assert_eq!(eps[0].pod, "podA");
-        assert!((eps[0].share - 75.0).abs() < 1e-6, "30/40 = 75%");
+        assert!((eps[0].share.unwrap() - 75.0).abs() < 1e-6, "30/40 = 75%");
         assert_eq!(eps[0].queue, Some(1.0));
         assert_eq!(eps[0].score, Some(0.82), "epp_endpoint_score 조인");
         assert_eq!(eps[0].kv, None, "kv 는 아직 미노출(스켈레톤)");
         let hint = a.epp_decision_hint().expect("hint present");
-        assert!(hint.contains("consistent"), "픽최다=큐최소 → 정합 힌트: {hint}");
+        assert!(
+            hint.contains("consistent"),
+            "픽최다=큐최소 → 정합 힌트: {hint}"
+        );
 
         // 픽 최다 ≠ 큐 최소 → cache/prefix locality 로 설명.
         let b = App {
@@ -2912,7 +3327,7 @@ mod tests {
             },
             ..App::new()
         };
-        assert!(b.epp_decision_hint().unwrap().contains("locality"));
+        assert!(b.epp_decision_hint().unwrap().contains("cause unverified"));
 
         // 큐만 있고 픽 없는 pod 도 후보로 포함(픽 0). 관측 라우팅 없으면 힌트 None.
         let c = App {
@@ -2924,8 +3339,139 @@ mod tests {
         };
         let eps = c.epp_endpoints();
         assert_eq!(eps.len(), 1);
-        assert_eq!(eps[0].picks, 0.0);
-        assert!(c.epp_decision_hint().is_none(), "관측된 픽 없음 → 힌트 없음");
+        assert_eq!(eps[0].picks, None);
+        assert!(
+            c.epp_decision_hint().is_none(),
+            "관측된 픽 없음 → 힌트 없음"
+        );
+    }
+
+    #[test]
+    fn deploy_fit_handles_partial_and_extreme_input_without_defaults() {
+        let app = App::new();
+        for (replicas, devices) in [
+            ("", "1"),
+            ("-1", "1"),
+            ("1", "0"),
+            ("1", ""),
+            ("9223372036854775807", "9223372036854775807"),
+        ] {
+            let fit = app.deploy_fit(&deploy_form("gpu", replicas, devices, "any"));
+            assert_eq!(fit.verdict, FitVerdict::Unknown);
+            assert!(!fit.input_valid);
+            assert!(fit.tips.iter().any(|t| t.contains("용량 계산 대기")));
+        }
+        let zero = app.deploy_fit(&deploy_form("gpu", "0", "1", "any"));
+        assert_eq!(zero.demand, 0);
+        assert_eq!(zero.verdict, FitVerdict::Fits);
+        let large = app.deploy_fit(&deploy_form("gpu", "2147483647", "2147483647", "any"));
+        assert_eq!(large.demand, 2147483647_i64 * 2147483647_i64);
+    }
+
+    #[test]
+    fn deploy_fit_respects_selected_and_schedulable_nodes() {
+        use crate::collect::{AccelKind::Gpu, NodeInfo};
+        let mut app = App::new();
+        app.snap.accel = vec![accel(Gpu, "n1", true, ""), accel(Gpu, "n2", true, "")];
+        app.snap.node_alloc = ["n1", "n2"]
+            .iter()
+            .map(|n| {
+                (
+                    n.to_string(),
+                    std::collections::BTreeMap::from([("nvidia.com/gpu".into(), 0)]),
+                )
+            })
+            .collect();
+        app.snap.node_capacity = ["n1", "n2"]
+            .iter()
+            .map(|n| {
+                (
+                    n.to_string(),
+                    std::collections::BTreeMap::from([("nvidia.com/gpu".into(), 1)]),
+                )
+            })
+            .collect();
+        app.snap.nodes = vec![
+            NodeInfo {
+                name: "n1".into(),
+                ready: true,
+                ..Default::default()
+            },
+            NodeInfo {
+                name: "n2".into(),
+                ready: true,
+                cordoned: true,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            app.deploy_fit(&deploy_form("gpu", "1", "1", "n2")).verdict,
+            FitVerdict::Oom
+        );
+        assert_eq!(
+            app.deploy_fit(&deploy_form("gpu", "1", "1", "n1")).verdict,
+            FitVerdict::Fits
+        );
+        assert_eq!(
+            app.deploy_fit(&deploy_form("gpu", "2", "1", "any")).verdict,
+            FitVerdict::Oom
+        );
+        let now = crate::collect::now_secs();
+        app.snap.sources.insert(
+            "inventory".into(),
+            crate::quality::SourceStatus::observed(now.saturating_sub(3600), 2, &[]),
+        );
+        assert_eq!(
+            app.deploy_fit(&deploy_form("gpu", "1", "1", "n1")).verdict,
+            FitVerdict::Unknown
+        );
+        app.snap.sources.insert(
+            "inventory".into(),
+            crate::quality::SourceStatus::observed(now, 2, &["timeout".into()]),
+        );
+        assert_eq!(
+            app.deploy_fit(&deploy_form("gpu", "1", "1", "n1")).verdict,
+            FitVerdict::Unknown
+        );
+        app.snap.sources.insert(
+            "inventory".into(),
+            crate::quality::SourceStatus::observed(now, 2, &[]),
+        );
+        // Scheduling counts survive an exporter outage and need not match metric rows.
+        app.snap.accel.clear();
+        assert_eq!(
+            app.deploy_fit(&deploy_form("gpu", "1", "1", "n1")).verdict,
+            FitVerdict::Fits
+        );
+        app.snap
+            .node_capacity
+            .get_mut("n1")
+            .unwrap()
+            .insert("nvidia.com/gpu".into(), 0);
+        assert_eq!(
+            app.deploy_fit(&deploy_form("gpu", "1", "1", "n1")).verdict,
+            FitVerdict::Oom
+        );
+        app.snap
+            .node_capacity
+            .get_mut("n1")
+            .unwrap()
+            .insert("nvidia.com/gpu".into(), 1);
+        app.snap.nodes[0].ready = false;
+        assert_eq!(
+            app.deploy_fit(&deploy_form("gpu", "1", "1", "any")).verdict,
+            FitVerdict::Oom
+        );
+        app.snap.nodes[0].ready = true;
+        app.snap.node_alloc.clear();
+        let missing = app.deploy_fit(&deploy_form("gpu", "1", "1", "n1"));
+        assert_eq!(missing.verdict, FitVerdict::Unknown);
+        assert!(missing.tips.iter().any(|t| t.contains("예약 정보 없음")));
+        app.snap.nodes.clear();
+        assert_eq!(
+            app.deploy_fit(&deploy_form("gpu", "1", "1", "any")).verdict,
+            FitVerdict::Unknown
+        );
     }
 
     #[test]
@@ -2933,6 +3479,37 @@ mod tests {
         use crate::collect::AccelKind::Gpu;
         let mk = |accel: Vec<crate::collect::Accel>, inv_free: i64| App {
             snap: Snapshot {
+                node_capacity: {
+                    let mut nodes = std::collections::BTreeMap::<
+                        String,
+                        std::collections::BTreeMap<String, i64>,
+                    >::new();
+                    for d in &accel {
+                        *nodes
+                            .entry(d.node.clone())
+                            .or_default()
+                            .entry("nvidia.com/gpu".into())
+                            .or_default() += 1;
+                    }
+                    nodes
+                },
+                node_alloc: accel
+                    .iter()
+                    .map(|d| {
+                        (
+                            d.node.clone(),
+                            std::collections::BTreeMap::from([("nvidia.com/gpu".into(), 0)]),
+                        )
+                    })
+                    .collect(),
+                nodes: accel
+                    .iter()
+                    .map(|d| crate::collect::NodeInfo {
+                        name: d.node.clone(),
+                        ready: true,
+                        ..Default::default()
+                    })
+                    .collect(),
                 accel,
                 inventory: vec![("nvidia.com/gpu".to_string(), inv_free, 0)],
                 ..Default::default()
@@ -2958,6 +3535,15 @@ mod tests {
         let b = App {
             snap: Snapshot {
                 accel: vec![accel(Gpu, "n1", true, ""), accel(Gpu, "n1", true, "")],
+                nodes: vec![crate::collect::NodeInfo {
+                    name: "n1".into(),
+                    ready: true,
+                    ..Default::default()
+                }],
+                node_capacity: std::collections::BTreeMap::from([(
+                    "n1".into(),
+                    std::collections::BTreeMap::from([("nvidia.com/gpu".into(), 2)]),
+                )]),
                 inventory: vec![("nvidia.com/gpu".to_string(), 2, 2)], // 클러스터 free = 0
                 node_alloc: std::collections::BTreeMap::from([(
                     "n1".to_string(),
@@ -2971,7 +3557,10 @@ mod tests {
         assert_eq!(bfit.verdict, FitVerdict::Oom);
         assert_eq!(bfit.free, 0, "노드별 총2−예약2 → 스케줄가능 0");
         assert_eq!(bfit.metric_free, 2, "metric idle 은 여전히 2");
-        assert!(bfit.tips.iter().any(|t| t.contains("예약")), "리소스 예약 부족 안내");
+        assert!(
+            bfit.tips.iter().any(|t| t.contains("예약")),
+            "리소스 예약 부족 안내"
+        );
         assert!(
             bfit.tips.iter().any(|t| t.contains("idle")),
             "metric idle ≠ 스케줄가능 불일치 안내"
@@ -3034,6 +3623,7 @@ mod tests {
         // pod 재시작 증가(델타) → 신규 알림.
         let before = a.alerts.len();
         let p = |restarts: i64| crate::collect::PodRow {
+            identity: None,
             name: "p1".into(),
             phase: "Running".into(),
             ready: "1/1".into(),
@@ -3062,6 +3652,7 @@ mod tests {
     fn deploy_phase_reflects_replicas_and_pods() {
         let mut a = App::new();
         let p = |name: &str, restarts: i64| crate::collect::PodRow {
+            identity: None,
             name: name.into(),
             phase: "Running".into(),
             ready: "1/1".into(),
@@ -3113,15 +3704,18 @@ mod tests {
         };
         let rows = a.activity_rows();
         assert!(
-            rows.iter().any(|r| r.kind == "compile" && r.target.contains('x')),
+            rows.iter()
+                .any(|r| r.kind == "compile" && r.target.contains('x')),
             "compile Job 이 피드에 있어야"
         );
         assert!(
-            rows.iter().any(|r| r.kind == "deploy" && r.target.contains("starting")),
+            rows.iter()
+                .any(|r| r.kind == "deploy" && r.target.contains("starting")),
             "시도 중(Starting) 배포 노출"
         );
         assert!(
-            rows.iter().any(|r| r.kind == "deploy" && r.target.contains("steady")),
+            rows.iter()
+                .any(|r| r.kind == "deploy" && r.target.contains("steady")),
             "서빙 중(Serving) 배포도 노출(어디서 도는지)"
         );
         assert!(
@@ -3134,7 +3728,8 @@ mod tests {
         let pv = dep.iter().position(|r| r.target.contains("steady"));
         assert!(ps < pv, "Starting 이 Serving 보다 먼저");
         assert!(
-            rows.iter().any(|r| r.running_compile && r.progress == Some(0.5)),
+            rows.iter()
+                .any(|r| r.running_compile && r.progress == Some(0.5)),
             "진행 중 compile 은 진행률을 싣는다"
         );
     }
@@ -3161,6 +3756,10 @@ mod tests {
                 accel(Rbln, "n-drv", true, ""),
             ],
             nodes: vec![node],
+            node_capacity: std::collections::BTreeMap::from([(
+                "n-drv".into(),
+                std::collections::BTreeMap::from([("rebellions.ai/ATOM".into(), 2)]),
+            )]),
             node_alloc: alloc,
             ..Default::default()
         };
@@ -3169,9 +3768,32 @@ mod tests {
         let p = a.place_picker.clone().expect("picker opens");
         assert_eq!(p.rows[0].value, "any");
         assert_eq!(p.rows[1].value, "spread");
-        let n = p.rows.iter().find(|r| r.value == "n-drv").expect("node row");
+        let n = p
+            .rows
+            .iter()
+            .find(|r| r.value == "n-drv")
+            .expect("node row");
         assert_eq!((n.total, n.free), (2, 1), "총 2 · 할당 1 → 유휴 1");
         assert!(n.schedulable, "ready + 드라이버 → 스케줄 가능");
+        a.snap.accel.clear();
+        a.open_place_picker();
+        let row = &a.place_picker.as_ref().unwrap().rows[2];
+        assert!(row.schedulable);
+        assert!(row.mem_used.is_nan());
+        a.snap.sources.insert(
+            "inventory".into(),
+            crate::quality::SourceStatus::observed(1, 1, &[]),
+        );
+        a.open_place_picker();
+        assert!(a
+            .place_picker
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .all(|r| !r.schedulable));
+        a.snap.sources.clear();
+        a.open_place_picker();
         // 노드 선택 → 배치 확정 + 매니페스트 생성(제출)까지. 피커·폼 닫힘, 확인 팝업에 nodeSelector 반영.
         a.place_picker.as_mut().unwrap().cursor = 2;
         a.place_pick_apply();
@@ -3232,9 +3854,9 @@ mod tests {
         let mut a = App::new();
         a.snap = Snapshot {
             compiles: vec![
-                mk("running", "Running", 100, None),      // 진행 중 → 유지
-                mk("fresh", "Complete", 200, Some(100)),  // 끝난 지 100s → 유지
-                mk("old", "Complete", 5000, Some(100)),   // 끝난 지 4900s(>30m) → 자동 감춤
+                mk("running", "Running", 100, None),     // 진행 중 → 유지
+                mk("fresh", "Complete", 200, Some(100)), // 끝난 지 100s → 유지
+                mk("old", "Complete", 5000, Some(100)),  // 끝난 지 4900s(>30m) → 자동 감춤
             ],
             ..Default::default()
         };
@@ -3250,5 +3872,92 @@ mod tests {
             !jobs.iter().any(|j| j == "old"),
             "오래 전 끝난 것은 자동 감춤"
         );
+    }
+}
+
+#[cfg(test)]
+mod log_request_tests {
+    use super::App;
+
+    #[test]
+    fn closed_or_superseded_logs_ignore_delayed_results() {
+        let mut app = App::new();
+        app.request_logs("first".into());
+        let (first, _) = app.logs_request.take().unwrap();
+        app.close_logs();
+        app.finish_logs(first, Ok(vec!["late".into()]));
+        assert!(!app.logs_mode);
+        app.request_logs("second".into());
+        let (second, _) = app.logs_request.take().unwrap();
+        app.finish_logs(first, Err("old failure".into()));
+        assert!(app.logs_loading);
+        app.finish_logs(second, Ok(vec!["new".into()]));
+        assert_eq!(app.logs, ["new"]);
+        assert!(!app.logs_loading);
+    }
+
+    #[test]
+    fn repeated_refresh_is_coalesced_and_failure_can_retry() {
+        let mut app = App::new();
+        app.request_logs("pod".into());
+        let (first, _) = app.logs_request.take().unwrap();
+        app.request_logs("pod".into());
+        assert!(app.logs_request.is_none());
+        app.finish_logs(first, Err("timeout".into()));
+        assert!(app.logs[0].contains("timeout"));
+        app.request_logs("pod".into());
+        let (retry, _) = app.logs_request.take().unwrap();
+        assert_ne!(first, retry);
+        app.finish_logs(retry, Ok(Vec::new()));
+        assert_eq!(app.logs, ["No log lines returned."]);
+    }
+}
+
+#[cfg(test)]
+mod perf_request_tests {
+    use super::{App, View};
+    use crate::collect::PerfDetail;
+
+    fn result(model: &str) -> PerfDetail {
+        PerfDetail {
+            model: model.into(),
+            ..PerfDetail::default()
+        }
+    }
+
+    #[test]
+    fn latency_results_cannot_reopen_closed_or_replaced_details() {
+        let mut app = App::new();
+        app.view = View::Perf;
+        app.request_perf_detail("first".into());
+        let (first, _, _) = app.perf_request.take().unwrap();
+        app.detail = false;
+        app.finish_perf_detail(first, result("first"));
+        assert!(!app.detail);
+        assert!(app.perf_detail.is_none());
+        app.request_perf_detail("second".into());
+        let (second, _, _) = app.perf_request.take().unwrap();
+        app.finish_perf_detail(first, result("first"));
+        assert_eq!(app.perf_loading.as_deref(), Some("second"));
+        app.finish_perf_detail(second, result("second"));
+        assert!(app.perf_loading.is_none());
+        assert_eq!(app.perf_detail.as_ref().unwrap().model, "second");
+    }
+
+    #[test]
+    fn repeated_enter_coalesces_and_navigation_invalidates_pending_work() {
+        let mut app = App::new();
+        app.view = View::Perf;
+        app.request_perf_detail("model".into());
+        let (generation, _, _) = app.perf_request.take().unwrap();
+        app.request_perf_detail("model".into());
+        assert!(app.perf_request.is_none());
+        app.view = View::Overview;
+        app.invalidate_perf_request();
+        app.view = View::Perf;
+        app.request_perf_detail("model".into());
+        app.finish_perf_detail(generation, result("model"));
+        assert!(app.perf_detail.is_none());
+        assert_eq!(app.perf_loading.as_deref(), Some("model"));
     }
 }

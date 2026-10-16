@@ -31,7 +31,53 @@ spec:
         command:
         - sh
         - -c
-        - "set -u\necho \"path: $DIR\"\nif [ ! -d \"$DIR\" ]; then echo \"MISSING: not a directory on this node\"; exit 0; fi\necho \"files:\"\nls -la \"$DIR\" 2>/dev/null | head -20\necho\n\nread_rbln() {\n  f=$1\n  v=$(grep -o '\"optimum_rbln_version\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' \"$f\" 2>/dev/null       | head -1 | sed 's/.*\"\\([^\"]*\\)\"$/\x01/')\n  echo \"built_with: optimum-rbln=${v:-unknown}   ($f)\"\n  grep -o '\"cls_name\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' \"$f\" 2>/dev/null | head -1\n  grep -o '\"dtype\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' \"$f\" 2>/dev/null | head -1\n}\n\nread_fxb() {\n  f=$1\n  v=$(tail -c 262144 \"$f\" 2>/dev/null | tr -c '[:print:]\n' '\n'       | awk '/\"furiosa_compiler\"/{f=1} f && /\"version\"/{ if (match($0,/[0-9][0-9.]*/)) { print substr($0,RSTART,RLENGTH); exit } }')\n  echo \"built_with: furiosa-compiler=${v:-unknown}   ($f)\"\n}\n\nfound=0\nif [ -f \"$DIR/rbln_config.json\" ]; then read_rbln \"$DIR/rbln_config.json\"; found=1\nelif [ -f \"$DIR/model.fxb\" ]; then read_fxb \"$DIR/model.fxb\"; found=1\nfi\n\n# Disaggregated builds keep one artifact per role (prefill/decode), so the config lives one\n# level down. Report every role rather than the first, since they can differ.\nif [ \"$found\" = 0 ]; then\n  for d in \"$DIR\"/*/; do\n    [ -d \"$d\" ] || continue\n    if [ -f \"$d/rbln_config.json\" ]; then read_rbln \"$d/rbln_config.json\"; found=1\n    elif [ -f \"$d/model.fxb\" ]; then read_fxb \"$d/model.fxb\"; found=1\n    fi\n  done\nfi\n\n[ \"$found\" = 0 ] && echo \"built_with: unknown (no rbln_config.json or model.fxb here or one level down)\"\nexit 0\n"
+        - |
+          set -u
+          echo "path: $DIR"
+          if [ ! -d "$DIR" ]; then echo "MISSING: not a directory on this node"; exit 0; fi
+          if [ -f "$DIR/lmd-build.json" ]; then
+            echo "lmd-top build provenance (recorded facts; compatibility not established):"
+            head -c 65536 "$DIR/lmd-build.json"
+            echo
+          fi
+          echo "files:"
+          ls -la "$DIR" 2>/dev/null | head -20
+          echo
+
+          read_rbln() {
+            f=$1
+            v=$(grep -o '"optimum_rbln_version"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null       | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+            echo "built_with: optimum-rbln=${v:-unknown}   ($f)"
+            grep -o '"cls_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null | head -1
+            grep -o '"dtype"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null | head -1
+          }
+
+          read_fxb() {
+            f=$1
+            v=$(tail -c 262144 "$f" 2>/dev/null | tr -c '[:print:]
+          ' '
+          '       | awk '/"furiosa_compiler"/{f=1} f && /"version"/{ if (match($0,/[0-9][0-9.]*/)) { print substr($0,RSTART,RLENGTH); exit } }')
+            echo "built_with: furiosa-compiler=${v:-unknown}   ($f)"
+          }
+
+          found=0
+          if [ -f "$DIR/rbln_config.json" ]; then read_rbln "$DIR/rbln_config.json"; found=1
+          elif [ -f "$DIR/model.fxb" ]; then read_fxb "$DIR/model.fxb"; found=1
+          fi
+
+          # Disaggregated builds keep one artifact per role (prefill/decode), so the config lives one
+          # level down. Report every role rather than the first, since they can differ.
+          if [ "$found" = 0 ]; then
+            for d in "$DIR"/*/; do
+              [ -d "$d" ] || continue
+              if [ -f "$d/rbln_config.json" ]; then read_rbln "$d/rbln_config.json"; found=1
+              elif [ -f "$d/model.fxb" ]; then read_fxb "$d/model.fxb"; found=1
+              fi
+            done
+          fi
+
+          [ "$found" = 0 ] && echo "built_with: unknown (no rbln_config.json or model.fxb here or one level down)"
+          exit 0
         env:
         - name: DIR
           value: /artifact

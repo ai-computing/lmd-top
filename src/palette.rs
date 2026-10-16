@@ -10,14 +10,19 @@ use crate::app::View;
 /// Actions the palette can run (observe/display only, no cluster mutation).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum PaletteAction {
-    Goto(View),  // jump to view (including hub sub-views)
-    Help,        // help overlay
-    Alerts,      // alert history
-    Theme,       // cycle theme
-    Pause,       // toggle update pause
-    Zoom,        // toggle focus (zoom)
-    Grafana,     // open Grafana in browser
-    ResetEnergy, // reset the session energy baseline
+    Goto(View), // jump to view (including hub sub-views)
+    Help,       // help overlay
+    Alerts,     // alert history
+    Theme,      // cycle theme
+    Pause,      // toggle update pause
+    Zoom,       // toggle focus (zoom)
+    Grafana,    // open Grafana in browser
+    PerformanceAssessment,
+    Workloads,
+    DataSources,
+    EppCapabilities, // built-in version-scoped feature reference
+    RoutingPolicy,   // open read-only policy planning form; writes use existing admin gate
+    ResetEnergy,     // reset the session energy baseline
 }
 
 /// A single palette entry — display label + extra hint + action to run.
@@ -62,6 +67,31 @@ impl Palette {
             v(View::Setup),
         ];
         items.extend([
+            PaletteItem {
+                label: "Performance assessment".into(),
+                hint: "SLO evidence / unavailable measurements",
+                action: PerformanceAssessment,
+            },
+            PaletteItem {
+                label: "Workload classification".into(),
+                hint: "model / prefill / decode / gateway / unknown",
+                action: Workloads,
+            },
+            PaletteItem {
+                label: "Data sources".into(),
+                hint: "freshness / collection errors",
+                action: DataSources,
+            },
+            PaletteItem {
+                label: "EPP capabilities".into(),
+                hint: "features / plugin development",
+                action: EppCapabilities,
+            },
+            PaletteItem {
+                label: "Routing policy".into(),
+                hint: "workspace / rollout preview",
+                action: RoutingPolicy,
+            },
             PaletteItem {
                 label: "Theme".into(),
                 hint: "cycle theme",

@@ -292,6 +292,7 @@ name = "lmd-top"
 version = "0.36.0"
 dependencies = [
  "anyhow",
+ "libc",
  "ratatui",
  "serde",
  "serde_json",

@@ -45,7 +45,7 @@ pub fn synthetic_artifact_for(
 /// Extract the pending apply plan (title and YAML), or return the descriptive error.
 pub fn take_apply_plan(app: &mut App) -> Result<(String, String), String> {
     match app.confirm.take() {
-        Some(Pending::Apply { title, yaml }) => {
+        Some(Pending::Apply { title, yaml, .. }) => {
             app.confirm_yes = false;
             Ok((title, yaml))
         }
@@ -79,6 +79,7 @@ pub fn plan_compile_for_model(
 ) -> Result<(String, String), String> {
     let a = synthetic_artifact_for(model_id, vendor, String::new(), overrides);
     let mut form = app.build_compile_form(&a, vendor);
+    super::fields::validate_overrides("compile", &[], &form.fields, overrides)?;
     apply_field_overrides(&mut form.fields, overrides);
     app.compile_form = Some(form);
     app.compile_form_submit();
@@ -99,13 +100,16 @@ pub fn plan_deploy_for_model(
                 let a = synthetic_artifact_for(model_id, vendor, String::new(), overrides);
                 let mut form = app.build_compile_form(&a, vendor);
                 apply_field_overrides(&mut form.fields, overrides);
+                if override_value(overrides, "mount").is_none() {
+                    if let Some(issue) = super::preflight::compile_param_issue(&form) {
+                        return Err(format!("invalid build selection: {issue}"));
+                    }
+                }
                 form.target()
             };
             format!("/mnt/store/compiled/{}/{}/{}", repo_dir, vendor, target)
         }
-        "furiosa" => {
-            override_value(overrides, "mount").unwrap_or_else(|| model_id.to_string())
-        }
+        "furiosa" => override_value(overrides, "mount").unwrap_or_else(|| model_id.to_string()),
         _ => model_id.to_string(),
     };
     let mount = override_value(overrides, "mount").unwrap_or(default_mount);
@@ -145,6 +149,17 @@ pub fn plan_deploy_for_model(
             got, model_id
         ));
     }
+    let mut accepted = form.fields.clone();
+    // RBLN compile options identify the existing build when no mount is supplied.
+    if vendor == "rbln" && override_value(overrides, "mount").is_none() {
+        let artifact = synthetic_artifact_for(model_id, vendor, String::new(), &[]);
+        for field in super::fields::vendor_compile_fields(vendor, &artifact) {
+            if !accepted.iter().any(|f| f.key == field.key) {
+                accepted.push(field);
+            }
+        }
+    }
+    super::fields::validate_overrides("deploy", &["mount"], &accepted, overrides)?;
     apply_field_overrides(&mut form.fields, overrides);
     app.deploy_form_submit();
     take_apply_plan(app)

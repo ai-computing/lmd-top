@@ -68,16 +68,15 @@ impl App {
                     && matches!(self.selected_lib_item(), Some(LibItem::Stored(_))) =>
             {
                 // 통합 트리의 스토어 컴파일본 — 물리적으로 존재하는 배포 가능 빌드. Info + Deploy.
-                let Some(s) = self.selected_stored().map(|s| {
-                    (
-                        s.repo.clone(),
-                        s.format.clone(),
-                        s.compiled_for.clone(),
-                    )
-                }) else {
+                let Some(s) = self
+                    .selected_stored()
+                    .map(|s| (s.repo.clone(), s.format.clone(), s.compiled_for.clone()))
+                else {
                     return;
                 };
-                items.push(ActionItem::info("build detail — format · target · size · path"));
+                items.push(ActionItem::info(
+                    "build detail — format · target · size · path",
+                ));
                 items.push(ActionItem::deploy(if s.1 == "hf" {
                     "serve source weights (GPU); Rebellions/Furiosa 는 먼저 컴파일 필요"
                 } else {
@@ -108,8 +107,8 @@ impl App {
                     let model_id = Self::placement_model_id(m, p);
                     // Offer a compile when the chosen placement's accelerator builds ahead of
                     // time, or when some other accelerator could build this model family.
-                    let placement_compiles = crate::accel::by_id(vendor)
-                        .is_some_and(|p| p.caps.compiles_ahead_of_time);
+                    let placement_compiles =
+                        crate::accel::by_id(vendor).is_some_and(|p| p.caps.compiles_ahead_of_time);
                     let alternatives = crate::compat::compilable_vendors(&model_id);
                     if let Some(cv) = if placement_compiles {
                         Some(vendor)
@@ -164,11 +163,23 @@ impl App {
                 let Some(node) = self.selected_node().map(|n| (n.name.clone(), n.cordoned)) else {
                     return;
                 };
-                items.push(ActionItem::info("node detail — devices, occupancy, capacity"));
+                items.push(ActionItem::info(
+                    "node detail — devices, occupancy, capacity",
+                ));
                 if node.1 {
-                    items.push(ActionItem::new('u', "Uncordon", "allow scheduling on this node", Action::Uncordon));
+                    items.push(ActionItem::new(
+                        'u',
+                        "Uncordon",
+                        "allow scheduling on this node",
+                        Action::Uncordon,
+                    ));
                 } else {
-                    items.push(ActionItem::new('C', "Cordon", "block new scheduling on this node", Action::Cordon));
+                    items.push(ActionItem::new(
+                        'C',
+                        "Cordon",
+                        "block new scheduling on this node",
+                        Action::Cordon,
+                    ));
                 }
                 (format!("node · {}", node.0), node.0)
             }
@@ -194,7 +205,12 @@ impl App {
                 items.push(ActionItem::info("pod detail"));
                 items.push(ActionItem::logs("tail pod logs"));
                 items.push(ActionItem::yaml("live Pod YAML (read-only)"));
-                items.push(ActionItem::new('r', "Drain", "relabel out of routing — stop new requests, finish in-flight streams", Action::Drain));
+                items.push(ActionItem::new(
+                    'r',
+                    "Drain",
+                    "relabel out of routing — stop new requests, finish in-flight streams",
+                    Action::Drain,
+                ));
                 items.push(ActionItem::delete("delete pod (reschedules)"));
                 (format!("actions · {}", p.name), p.name.clone())
             }
@@ -203,16 +219,37 @@ impl App {
                 let Some(r) = self.selected_route() else {
                     return;
                 };
-                items.push(ActionItem::new('i', "Backend", "jump to backend model detail", Action::Info));
-                items.push(ActionItem::new('r', "Rename", "change gateway path (/accel/model)", Action::RouteRename));
-                items.push(ActionItem::new('t', "Retarget", "point path at another pool/service", Action::RouteRetarget));
-                items.push(ActionItem::new('D', "Delete", "remove this route rule", Action::RouteDelete));
-                (format!("route · {}", r.path), r.path.clone())
+                items.push(ActionItem::new(
+                    'i',
+                    "Backend",
+                    "jump to backend model detail",
+                    Action::Info,
+                ));
+                items.push(ActionItem::new(
+                    'r',
+                    "Rename",
+                    "change gateway path (/accel/model)",
+                    Action::RouteRename,
+                ));
+                items.push(ActionItem::new(
+                    't',
+                    "Retarget",
+                    "point path at another pool/service",
+                    Action::RouteRetarget,
+                ));
+                items.push(ActionItem::new(
+                    'D',
+                    "Delete",
+                    "remove this route rule",
+                    Action::RouteDelete,
+                ));
+                (format!("route · {} · {}", r.route, r.path), r.path.clone())
             }
             _ => return,
         };
         items.extend(self.pivot_items()); // append "Go: …" cross-layer jumps (empty for views without pivots)
         self.action_menu = Some(ActionMenu {
+            route: self.selected_route(),
             title,
             subject,
             items,

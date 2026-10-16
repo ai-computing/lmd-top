@@ -122,11 +122,7 @@ pub fn in_use_by(path: &str, artifacts: &[ModelArtifact]) -> Vec<String> {
 /// Validate a move destination: the same rules as any store path, plus it must not already be
 /// an inventory entry (a move must not silently swallow another build) and must differ from the
 /// source.
-pub fn validate_dest(
-    dest: &str,
-    src: &str,
-    inventory: &[StoredModel],
-) -> Result<String, String> {
+pub fn validate_dest(dest: &str, src: &str, inventory: &[StoredModel]) -> Result<String, String> {
     let d = validate_path(dest).map_err(|e| e.to_string())?;
     let s = src.trim().trim_end_matches('/');
     if d == s {
@@ -239,8 +235,7 @@ pub fn delete_manifest(ns: &str, pvc: &str, path: &str, size: &str) -> Manifest 
         .note(format!("Store maintenance — delete {} ({})", path, size))
         .note("Irreversible: the artifact is removed from the shared store.".to_string())
         .note(
-            "Inventory is stale until discovery re-runs — use Rescan (r) to do it now."
-                .to_string(),
+            "Inventory is stale until discovery re-runs — use Rescan (r) to do it now.".to_string(),
         )
         .push(Doc::new(job).note(format!("rm -rf {}/{}", STORE_MOUNT, path)))
 }
@@ -279,8 +274,7 @@ pub fn move_manifest(ns: &str, pvc: &str, src: &str, dest: &str) -> Manifest {
         .note(format!("Store maintenance — move {} → {}", src, dest))
         .note("Deployments that reference the old path will stop resolving it.".to_string())
         .note(
-            "Inventory is stale until discovery re-runs — use Rescan (r) to do it now."
-                .to_string(),
+            "Inventory is stale until discovery re-runs — use Rescan (r) to do it now.".to_string(),
         )
         .push(Doc::new(job).note(format!("mv {} {}", from, to)))
 }
@@ -436,7 +430,12 @@ mod tests {
 
     #[test]
     fn delete_job_passes_the_path_as_argv_not_shell() {
-        let m = delete_manifest("llm-serving", "model-store", "compiled/org--n/rbln/tp4", "12G");
+        let m = delete_manifest(
+            "llm-serving",
+            "model-store",
+            "compiled/org--n/rbln/tp4",
+            "12G",
+        );
         let y = m.to_yaml();
         let v: serde_yaml::Value = serde_yaml::from_str(
             y.lines()
@@ -463,8 +462,7 @@ mod tests {
         // false, which is k8s's own default, so absent and `false` both mean writable — what
         // must never appear here is `true`.
         assert_ne!(
-            v["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]["readOnly"]
-                .as_bool(),
+            v["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]["readOnly"].as_bool(),
             Some(true)
         );
     }
@@ -495,7 +493,12 @@ mod tests {
             .collect();
         assert_eq!(
             init,
-            vec!["mkdir", "-p", "--", "/mnt/store/compiled/archive/org--n/rbln"]
+            vec![
+                "mkdir",
+                "-p",
+                "--",
+                "/mnt/store/compiled/archive/org--n/rbln"
+            ]
         );
         let mv: Vec<&str> = pod["containers"][0]["command"]
             .as_sequence()

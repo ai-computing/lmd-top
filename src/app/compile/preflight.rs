@@ -3,6 +3,54 @@
 use crate::collect::{NodeInfo, StoredModel};
 use crate::ops::CompileForm;
 
+/// Validate numeric input without silently replacing malformed values with defaults.
+/// Numeric choices are suggestions, not an exhaustive list of supported sizes.
+pub fn compile_param_issue(form: &CompileForm) -> Option<String> {
+    let profile = super::fields::compile_profile(form.vendor)?;
+    for field in profile.fields.iter().filter(|field| field.numeric) {
+        let value = form.get(field.key);
+        if field.key == "chunk" && value == "none" {
+            continue;
+        }
+        if !matches!(value.parse::<u32>(), Ok(n) if n > 0) {
+            return Some(format!(
+                "{} must be a positive integer; got {:?}",
+                field.label, value
+            ));
+        }
+    }
+    for field in profile.fields.iter().filter(|field| !field.numeric) {
+        let value = form.get(field.key);
+        if !field.choices.contains(&value.as_str()) {
+            return Some(format!(
+                "{} must be one of {}; got {:?}",
+                field.label,
+                field.choices.join("/"),
+                value
+            ));
+        }
+    }
+    if form.vendor == "furiosa" {
+        // Legacy fields do not have equivalents in the FXB recipe. Never publish
+        // a build pretending that a changed value was honored.
+        for (key, unchanged) in [
+            ("batch", "1"),
+            ("chunk", "none"),
+            ("block", "16"),
+            ("quant", "none"),
+        ] {
+            if form.get(key) != unchanged {
+                return Some(format!("Furiosa FXB recipe does not support overriding {key}; restore {unchanged}. Bucket and quantization settings are resolved by the installed SDK/model preset."));
+            }
+        }
+    }
+    if form.vendor == "rbln" {
+        rbln_param_issue(form)
+    } else {
+        None
+    }
+}
+
 /// Validate RBLN (optimum-rbln) parameter combinations before launching a Job.
 ///
 /// Returns an actionable error message with suggested remediation if invalid, or None if valid.
@@ -14,7 +62,7 @@ use crate::ops::CompileForm;
 ///     greater than `kvcache-partition` and an exact multiple of it.
 pub fn rbln_param_issue(form: &CompileForm) -> Option<String> {
     let getn = |k: &str| form.get(k).parse::<i64>().ok();
-    let tp = getn("tp").unwrap_or(1);
+    let tp = getn("tp").unwrap_or(0);
     if !matches!(tp, 1 | 2 | 4) {
         return Some(format!("tensor-parallel {} — RBLN-CA22 supports 1/2/4", tp));
     }
@@ -47,10 +95,7 @@ pub fn rbln_param_issue(form: &CompileForm) -> Option<String> {
 }
 
 /// Check if a compiled artifact matching this form's target already exists in the model store.
-pub fn compile_already_stored(
-    stored: &[StoredModel],
-    form: &CompileForm,
-) -> Option<String> {
+pub fn compile_already_stored(stored: &[StoredModel], form: &CompileForm) -> Option<String> {
     let repo_dir = form.model_id.replace('/', "--");
     let expected = format!("compiled/{}/{}/{}", repo_dir, form.vendor, form.target());
     stored
@@ -71,14 +116,16 @@ pub fn compile_preflight(
     form: &CompileForm,
 ) -> Vec<(bool, String)> {
     let mut out: Vec<(bool, String)> = Vec::new();
-    let mid = form.model_id.to_lowercase();
+    if let Some(issue) = compile_param_issue(form) {
+        out.push((false, issue));
+    }
 
-    // Warn if already compiled in store (not a blocker; recompile overwrites)
+    // Publication refuses to overwrite an existing build; retain it or choose a new configuration.
     if let Some(path) = compile_already_stored(stored, form) {
         out.push((
             true,
             format!(
-                "⚠ 이미 컴파일됨 — {} (재컴파일 시 덮어씀; 불필요하면 취소하고 Deploy)",
+                "⚠ 이미 컴파일됨 — {} (기존 빌드는 덮어쓰지 않음; Deploy 또는 명시적으로 이동/삭제 후 재컴파일)",
                 path
             ),
         ));
@@ -115,21 +162,11 @@ pub fn compile_preflight(
     }
 
     if form.vendor == "furiosa" {
-        // fxb build compiles checkpoints from the furiosa-ai org with quantization
-        let quant = ["fp8", "nvfp4", "-w8", "-w4", "awq", "gptq", "int4", "int8"]
-            .iter()
-            .any(|q| mid.contains(q));
-        let org = mid.starts_with("furiosa-ai/");
+        // FXB accepts supported architectures from any HF organization. A repository
+        // name is not evidence of compiler compatibility or checkpoint quantization.
         out.push((
-            org && quant,
-            if org && quant {
-                "registry: furiosa-ai 양자화 체크포인트 — fxb 등록 대상".into()
-            } else {
-                format!(
-                    "registry: fxb 는 furiosa-ai 양자화 모델만 빌드(예: furiosa-ai/Qwen3-4B-FP8) — '{}' 미등록 가능성",
-                    form.model_id
-                )
-            },
+            true,
+            format!("⚠ FXB compatibility unverified for {} — the installed SDK must resolve the architecture and quantization; repository organization is not a compatibility check", form.model_id),
         ));
         out.push((
             true,
@@ -141,13 +178,19 @@ pub fn compile_preflight(
         ));
         out.push((
             true,
-            "compile-only: rbln_create_runtimes=False — 디바이스 점유 없이 컴파일(서빙 중에도 OK)".into(),
+            "compile node: AOT — 가속기 불필요, 아무 노드(CPU 포함)에서 실행. 이미지에 toolchain 내장".into(),
+        ));
+    } else {
+        out.push((
+            true,
+            "compile-only: rbln_create_runtimes=False — 디바이스 점유 없이 컴파일(서빙 중에도 OK)"
+                .into(),
         ));
         let compat_ok = crate::compat::compilable_vendors(&form.model_id).contains(&"rbln");
         out.push((
             compat_ok,
             format!(
-                "registry: RBLN 지원 계열 {}",
+                "registry: RBLN catalog family {} (installed SDK compatibility unverified)",
                 if compat_ok {
                     "확인됨(npu-compat)"
                 } else {
@@ -155,11 +198,6 @@ pub fn compile_preflight(
                 }
             ),
         ));
-        out.push((
-            true,
-            "compile node: AOT — 가속기 불필요, 아무 노드(CPU 포함)에서 실행. 이미지에 toolchain 내장".into(),
-        ));
-    } else {
         // RBLN execution environment check: image or host rebel-compiler stack
         let host_node = nodes
             .iter()
@@ -168,7 +206,7 @@ pub fn compile_preflight(
         match (img_rbln.is_some(), host_node) {
             (true, _) => out.push((
                 true,
-                "compile node: LMD_COMPILE_IMAGE_RBLN 이미지로 실행(아무 노드)".into(),
+                "compile image: LMD_COMPILE_IMAGE_RBLN configured (pull, toolchain and node compatibility unverified)".into(),
             )),
             // Works, but inherits whatever the node's Python environment happens to be: an
             // unrelated pip install on that host silently changes the compile toolchain, which
@@ -185,7 +223,7 @@ pub fn compile_preflight(
             )),
             (false, None) => out.push((
                 false,
-                "compile node: rebel-compiler 이미지도, 그게 깔린 노드도 없음 — LMD_COMPILE_IMAGE_RBLN 지정 또는 RBLN 노드 필요".into(),
+                "compile node: configured compiler image and RBLN node label not observed — configure LMD_COMPILE_IMAGE_RBLN or inspect node/toolchain availability".into(),
             )),
         }
     }

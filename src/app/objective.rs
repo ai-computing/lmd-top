@@ -9,10 +9,11 @@ impl App {
         if let Some(o) = self.objectives.get(model) {
             return Some(o);
         }
-        self.objectives
-            .iter()
-            .find(|(k, _)| model.contains(k.as_str()) || k.contains(model))
-            .map(|(_, o)| o)
+        let mut candidates = self.objectives.iter().filter(|(k, _)| {
+            !k.is_empty() && !model.is_empty() && (model.contains(k.as_str()) || k.contains(model))
+        });
+        let first = candidates.next()?;
+        candidates.next().is_none().then_some(first.1)
     }
 
     /// Models 액션 메뉴 → Objective: 목표 편집 폼(기존 값 프리필).
@@ -83,18 +84,13 @@ impl App {
         let Some(form) = self.objective_form.take() else {
             return;
         };
-        let p = |s: String| -> Option<f64> {
-            if s.is_empty() || s == "none" {
-                None
-            } else {
-                s.parse::<f64>().ok()
+        let obj = match parse_objective(&form) {
+            Ok(obj) => obj,
+            Err(error) => {
+                self.objective_form = Some(form);
+                self.notify(error);
+                return;
             }
-        };
-        let obj = Objective {
-            ttft_ms: p(form.get("ttft")),
-            tpot_ms: p(form.get("tpot")),
-            e2e_ms: p(form.get("e2e")),
-            min_tps: p(form.get("tps")),
         };
         if obj.is_empty() {
             self.objectives.remove(&form.model);
@@ -107,94 +103,104 @@ impl App {
 
     /// 관측(PerfRow) vs 목표 판정 + 병목 기반 조정 제안(값싼 런타임 노브 중심).
     pub fn perf_advice(&self, row: &crate::collect::PerfRow) -> PerfAdvice {
-        let Some(o) = self.objective_for(&row.model) else {
-            return PerfAdvice {
-                has_obj: false,
-                checks: Vec::new(),
-                tips: Vec::new(),
-            };
-        };
-        let ms = |s: f64| s * 1000.0;
-        let mut checks: Vec<(&'static str, bool)> = Vec::new();
-        if let Some(t) = o.ttft_ms {
-            if !row.ttft_p95.is_nan() {
-                checks.push(("TTFT", ms(row.ttft_p95) <= t));
-            }
+        let fresh = self.snap.sources.get("performance").is_none_or(|status| {
+            matches!(
+                status.state(
+                    crate::collect::now_secs(),
+                    self.snap.stale_after_secs.max(10)
+                ),
+                crate::quality::Quality::Fresh
+            )
+        });
+        crate::performance::evaluate(row, self.objective_for(&row.model), fresh)
+    }
+}
+
+fn parse_objective(form: &ObjectiveForm) -> Result<Objective, String> {
+    let parse = |key: &str| -> Result<Option<f64>, String> {
+        let value = form.get(key);
+        let value = value.trim();
+        if value.is_empty() || value.eq_ignore_ascii_case("none") {
+            return Ok(None);
         }
-        if let Some(t) = o.tpot_ms {
-            if !row.tpot_p95.is_nan() {
-                checks.push(("TPOT", ms(row.tpot_p95) <= t));
-            }
-        }
-        if let Some(t) = o.e2e_ms {
-            if !row.e2e_p95.is_nan() {
-                checks.push(("E2E", ms(row.e2e_p95) <= t));
-            }
-        }
-        if let Some(t) = o.min_tps {
-            if !row.tps.is_nan() {
-                checks.push(("tok/s", row.tps >= t));
-            }
-        }
-        let mut tips: Vec<String> = Vec::new();
-        let violated = checks.iter().any(|(_, ok)| !ok);
-        if violated {
-            let q = row.queue_p95;
-            let pf = row.prefill_p95;
-            let dc = row.decode_p95;
-            if row.preempt > 0.0 {
-                tips.push(
-                    "KV/메모리 스래싱(preemption↑) — batch↓ 또는 max-seq-len↓, KV 여유 확보".into(),
-                );
-            }
-            if !q.is_nan() && q > 0.0 && q >= pf.max(dc) {
-                tips.push(format!(
-                    "스케줄 대기 지배적({:.0}ms) — replicas↑ 또는 배치 버킷↑",
-                    ms(q)
-                ));
-            } else if !pf.is_nan() && pf >= dc && pf > 0.0 {
-                tips.push(format!(
-                    "prefill 지배적({:.0}ms) — max-seq-len↓ 또는 chunked prefill",
-                    ms(pf)
-                ));
-            } else if !dc.is_nan() && dc > 0.0 {
-                tips.push(format!(
-                    "decode 지배적({:.0}ms) — TPOT 개선: 동시성 조정, 필요시 TP↑",
-                    ms(dc)
-                ));
-            }
-            if let Some(mt) = o.min_tps {
-                if !row.tps.is_nan() && row.tps < mt {
-                    // 이 모델을 점유한 디바이스 평균 util 로 방향 제시.
-                    let ut: Vec<f64> = self
-                        .snap
-                        .accel
-                        .iter()
-                        .filter(|a| {
-                            !a.busy_model.is_empty() && row.model.contains(&a.busy_model)
-                                || a.busy_model == row.model
-                        })
-                        .map(|a| a.util)
-                        .collect();
-                    let avg = if ut.is_empty() {
-                        f64::NAN
-                    } else {
-                        ut.iter().sum::<f64>() / ut.len() as f64
-                    };
-                    if !avg.is_nan() && avg > 70.0 {
-                        tips.push(
-                            "tok/s 미달 · util 높음 — compute-bound: TP↑ 또는 replica↑".into(),
-                        );
-                    } else {
-                        tips.push("tok/s 미달 · util 여유 — 동시성/배치↑ 로 처리량 확보".into());
-                    }
-                }
-            }
-        }
-        PerfAdvice {
-            has_obj: true,
-            checks,
-            tips,
+        value
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .map(Some)
+            .ok_or_else(|| format!("{key}: use a positive finite target or none"))
+    };
+    Ok(Objective {
+        ttft_ms: parse("ttft")?,
+        tpot_ms: parse("tpot")?,
+        e2e_ms: parse("e2e")?,
+        min_tps: parse("tps")?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ambiguous_objective_names_never_select_a_random_target() {
+        let mut app = App::new();
+        app.objectives.insert(
+            "qwen".into(),
+            Objective {
+                ttft_ms: Some(100.0),
+                ..Default::default()
+            },
+        );
+        app.objectives.insert(
+            "qwen-large".into(),
+            Objective {
+                ttft_ms: Some(500.0),
+                ..Default::default()
+            },
+        );
+        assert!(app.objective_for("serve-qwen-large").is_none());
+        assert_eq!(
+            app.objective_for("qwen-large").unwrap().ttft_ms,
+            Some(500.0)
+        );
+    }
+    #[test]
+    fn invalid_target_preserves_form_and_existing_objective() {
+        let mut app = App::new();
+        app.snap.models.push(crate::collect::ModelRow {
+            name: "m".into(),
+            ready: 1,
+            desired: 1,
+            status: String::new(),
+            route: String::new(),
+            engine: String::new(),
+            accel: String::new(),
+            running: None,
+            waiting: None,
+            tps: None,
+            kv: None,
+            ttft: None,
+        });
+        app.objectives.insert(
+            "m".into(),
+            Objective {
+                ttft_ms: Some(100.0),
+                ..Default::default()
+            },
+        );
+        for invalid in ["NaN", "inf", "-1", "0", "invalid"] {
+            app.open_objective_form();
+            app.objective_form
+                .as_mut()
+                .unwrap()
+                .fields
+                .iter_mut()
+                .find(|f| f.key == "ttft")
+                .unwrap()
+                .value = invalid.into();
+            app.objective_form_submit();
+            assert!(app.objective_form.is_some());
+            assert_eq!(app.objectives["m"].ttft_ms, Some(100.0));
         }
     }
 }

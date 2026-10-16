@@ -9,7 +9,7 @@ use serde::Serialize;
 
 /// Normalize NaN → null (None) so the agent clearly distinguishes "no value".
 fn opt(v: f64) -> Option<f64> {
-    if v.is_nan() {
+    if !v.is_finite() {
         None
     } else {
         Some(v)
@@ -27,25 +27,80 @@ fn sev_str(s: Sev) -> &'static str {
 struct AgentState {
     schema: &'static str,
     ts: u64,
+    sources: crate::quality::Sources,
+    source_states: std::collections::BTreeMap<String, crate::quality::Quality>,
+    warnings: Vec<String>,
+    kubernetes_context: Option<String>,
     namespace: String,
     prometheus: String,
     gateway: Gw,
     epp_in_path: bool,
+    route_configuration: crate::routing::Evidence,
+    routes: Vec<Route>,
+    epp_profiles: Vec<EppProfile>,
     cluster: Cluster,
+    store_scanned_at: Option<u64>,
+    resource_inventory: ResourceInventory,
     nodes: Vec<Node>,
     accelerators: Vec<Acc>,
     models: Vec<Mdl>,
+    workloads: Vec<crate::workload::Identity>,
     pods: Vec<Pod>,
     artifacts: Vec<Artifact>,
     /// Shared model store free space, or null when the discovery scan does not report it.
     store: Option<StoreCap>,
     stored: Vec<Stored>,
     compiles: Vec<Compile>,
+    /// LoRA training runs (npu-lora) with their latest step/loss/throughput.
+    trainings: Vec<Train>,
     pools: Vec<Pl>,
+    service_bindings: std::collections::BTreeMap<String, Vec<String>>,
+    pool_bindings: std::collections::BTreeMap<String, Vec<String>>,
     per_model_perf: Vec<Pm>,
     diagnosis: Diag,
     alerts: Vec<Alrt>,
     actions: Vec<Act>,
+}
+
+#[derive(Serialize)]
+struct Route {
+    name: String,
+    path: String,
+    uid: Option<String>,
+    resource_version: Option<String>,
+    configuration: Option<crate::routing::Configuration>,
+    verified_deployments: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct EppProfile {
+    name: String,
+    scorers: Vec<EppScorer>,
+    configured_picker: Option<String>,
+    unclassified_plugins: Vec<String>,
+}
+#[derive(Serialize)]
+struct EppScorer {
+    plugin_ref: String,
+    weight: f64,
+}
+
+/// Raw Kubernetes evidence, separate from utilization and scheduling guarantees.
+#[derive(Serialize)]
+struct ResourceInventory {
+    state: crate::quality::Quality,
+    last_success_at: Option<u64>,
+    allocatable_by_node:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>>,
+    requested_by_node: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>>,
+    totals: Vec<ResourceTotal>,
+}
+
+#[derive(Serialize)]
+struct ResourceTotal {
+    resource: String,
+    allocatable: i64,
+    requested: i64,
 }
 
 #[derive(Serialize)]
@@ -58,13 +113,13 @@ struct Gw {
 struct Cluster {
     nodes: usize,
     accelerators: usize,
-    busy: usize,
-    util_avg_pct: f64,
-    vram_used_gb: f64,
-    vram_total_gb: f64,
-    disk_used_gb: f64,
-    disk_total_gb: f64,
-    power_w: f64,
+    busy: Option<usize>,
+    util_avg_pct: Option<f64>,
+    vram_used_gb: Option<f64>,
+    vram_total_gb: Option<f64>,
+    disk_used_gb: Option<f64>,
+    disk_total_gb: Option<f64>,
+    power_w: Option<f64>,
     models_serving: usize,
     models_total: usize,
     req_per_s: Option<f64>,
@@ -120,6 +175,8 @@ struct Pl {
 
 #[derive(Serialize)]
 struct Pm {
+    service: Option<String>,
+    metric_families: Vec<crate::collect::LatencyFamily>,
     model: String,
     req_per_s: Option<f64>,
     tps: Option<f64>,
@@ -197,6 +254,22 @@ struct Pod {
     age_secs: Option<u64>,
 }
 
+/// LoRA training runs (npu-lora Jobs) joined with their npu_lora_* metrics.
+#[derive(Serialize)]
+struct Train {
+    job: String,
+    run: String,
+    model: String,
+    status: String,
+    age_s: u64,
+    step: Option<f64>,
+    steps_planned: Option<f64>,
+    progress: Option<f64>,
+    loss: Option<f64>,
+    tokens_per_s: Option<f64>,
+    out: String,
+}
+
 /// In-progress/recent compile Jobs (compile-*) — status, elapsed time, progress hints.
 #[derive(Serialize)]
 struct Compile {
@@ -232,22 +305,11 @@ struct Act {
 }
 
 fn build(s: &Snapshot, cfg: &Config) -> AgentState {
-    // Cluster summary (same aggregation as summary_bar).
-    let (mut busy, mut util_sum, mut mu, mut mt, mut pw) = (0usize, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
-    for a in &s.accel {
-        if a.util > 5.0 {
-            busy += 1;
-        }
-        util_sum += a.util;
-        mu += a.mem_used_gb;
-        mt += a.mem_total_gb;
-        pw += a.power;
-    }
-    let n = s.accel.len().max(1);
+    // Empty or incomplete populations do not establish measured totals.
+    let sum = crate::measurement::complete_sum;
+    let util_sum = sum(s.accel.iter().map(|a| opt(a.util)));
+    let busy = crate::measurement::busy_count(s.accel.iter().map(|a| a.util));
     let serving = s.serving_count();
-    let (disk_u, disk_t): (f64, f64) = s.nodes.iter().fold((0.0, 0.0), |(u, t), nd| {
-        (u + nd.disk_used_gb, t + nd.disk_total_gb)
-    });
 
     let nodes = s
         .nodes
@@ -347,6 +409,24 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
         })
         .collect();
 
+    let trainings = s
+        .trainings
+        .iter()
+        .map(|t| Train {
+            job: t.job.clone(),
+            run: t.run.clone(),
+            model: t.model.clone(),
+            status: t.status.clone(),
+            age_s: t.age_secs,
+            step: t.step,
+            steps_planned: t.steps_planned,
+            progress: t.progress(),
+            loss: t.loss,
+            tokens_per_s: t.tokens_per_s,
+            out: t.out.clone(),
+        })
+        .collect();
+
     let compiles = s
         .compiles
         .iter()
@@ -434,6 +514,12 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
         .perf_rows
         .iter()
         .map(|r| Pm {
+            service: s.perf_targets.get(&r.model).map(|t| t.service.clone()),
+            metric_families: s
+                .perf_targets
+                .get(&r.model)
+                .map(|t| t.families.iter().copied().collect())
+                .unwrap_or_default(),
             model: r.model.clone(),
             req_per_s: opt(r.req),
             tps: opt(r.tps),
@@ -556,6 +642,42 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
     AgentState {
         schema: "lmd-top/agent-state/v2",
         ts: s.ts,
+        sources: s.sources.clone(),
+        source_states: s
+            .sources
+            .iter()
+            .map(|(key, status)| {
+                (
+                    key.clone(),
+                    status.state(crate::collect::now_secs(), s.stale_after_secs.max(10)),
+                )
+            })
+            .collect(),
+        warnings: s.warnings.clone(),
+        kubernetes_context: crate::kube_session::context().map(str::to_owned),
+        store_scanned_at: s.store_scanned_at,
+        resource_inventory: ResourceInventory {
+            state: s
+                .sources
+                .get("inventory")
+                .map(|status| status.state(crate::collect::now_secs(), s.stale_after_secs.max(10)))
+                .unwrap_or(crate::quality::Quality::Unknown),
+            last_success_at: s
+                .sources
+                .get("inventory")
+                .and_then(|status| status.last_success_at),
+            allocatable_by_node: s.node_capacity.clone(),
+            requested_by_node: s.node_alloc.clone(),
+            totals: s
+                .inventory
+                .iter()
+                .map(|(resource, allocatable, requested)| ResourceTotal {
+                    resource: resource.clone(),
+                    allocatable: *allocatable,
+                    requested: *requested,
+                })
+                .collect(),
+        },
         namespace: cfg.ns.clone(),
         prometheus: cfg.prom.clone(),
         gateway: Gw {
@@ -563,16 +685,66 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
             ok: s.gw_ok,
         },
         epp_in_path: s.epp_in_path,
+        route_configuration: crate::routing::evidence(s),
+        routes: s
+            .routes
+            .iter()
+            .map(|route| Route {
+                name: route.route.clone(),
+                path: route.path.clone(),
+                uid: route.identity.as_ref().map(|id| id.uid.clone()),
+                resource_version: route.identity.as_ref().map(|id| id.version.clone()),
+                configuration: route.configuration.clone(),
+                verified_deployments: crate::routing::owners(s, route)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            })
+            .collect(),
+        epp_profiles: s
+            .epp
+            .as_ref()
+            .map(|config| {
+                config
+                    .entries
+                    .iter()
+                    .map(|profile| EppProfile {
+                        name: profile.profile.clone(),
+                        scorers: profile
+                            .scorers
+                            .iter()
+                            .map(|(name, weight)| EppScorer {
+                                plugin_ref: name.clone(),
+                                weight: *weight,
+                            })
+                            .collect(),
+                        configured_picker: (!profile.picker_refs.is_empty())
+                            .then(|| profile.picker_refs.join(", ")),
+                        unclassified_plugins: profile.other_plugins.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         cluster: Cluster {
             nodes: s.nodes.len(),
             accelerators: s.accel.len(),
             busy,
-            util_avg_pct: util_sum / n as f64,
-            vram_used_gb: mu,
-            vram_total_gb: mt,
-            disk_used_gb: disk_u,
-            disk_total_gb: disk_t,
-            power_w: pw,
+            util_avg_pct: opt(util_sum / s.accel.len() as f64),
+            vram_used_gb: opt(crate::measurement::complete_sum(
+                s.accel.iter().map(|a| opt(a.mem_used_gb)),
+            )),
+            vram_total_gb: opt(crate::measurement::complete_sum(
+                s.accel.iter().map(|a| opt(a.mem_total_gb)),
+            )),
+            disk_used_gb: opt(crate::measurement::complete_sum(
+                s.nodes.iter().map(|n| opt(n.disk_used_gb)),
+            )),
+            disk_total_gb: opt(crate::measurement::complete_sum(
+                s.nodes.iter().map(|n| opt(n.disk_total_gb)),
+            )),
+            power_w: opt(crate::measurement::complete_sum(
+                s.accel.iter().map(|a| opt(a.power)),
+            )),
             models_serving: serving,
             models_total: s.models.len(),
             req_per_s: opt(s.perf.req_rate),
@@ -581,12 +753,16 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
         nodes,
         accelerators,
         models,
+        workloads: s.workloads.clone(),
         artifacts,
         pods,
         store,
         stored,
         compiles,
+        trainings,
         pools,
+        service_bindings: s.service_bindings.clone(),
+        pool_bindings: s.pool_bindings.clone(),
         per_model_perf,
         diagnosis,
         alerts,
@@ -612,10 +788,162 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cluster_totals_distinguish_empty_partial_and_measured_zero() {
+        let mut snap = Snapshot::default();
+        let cluster = |s: &Snapshot| -> serde_json::Value {
+            serde_json::from_str::<serde_json::Value>(&to_json(s, &Config::default()).unwrap())
+                .unwrap()["cluster"]
+                .clone()
+        };
+        let empty = cluster(&snap);
+        for field in [
+            "busy",
+            "util_avg_pct",
+            "vram_used_gb",
+            "vram_total_gb",
+            "power_w",
+            "disk_used_gb",
+            "disk_total_gb",
+        ] {
+            assert!(empty[field].is_null(), "{field}");
+        }
+        snap.accel.push(crate::collect::Accel {
+            kind: crate::collect::AccelKind::Gpu,
+            model: "gpu".into(),
+            id: "0".into(),
+            node: "node".into(),
+            util: 0.0,
+            mem_used_gb: 0.0,
+            mem_total_gb: 80.0,
+            temp: 30.0,
+            power: 0.0,
+            busy_model: String::new(),
+            alive: true,
+            throttle: f64::NAN,
+            unified_mem: false,
+            mem_bw: f64::NAN,
+            clock_mhz: f64::NAN,
+            mem_temp: f64::NAN,
+            energy_mj: f64::NAN,
+        });
+        assert_eq!(cluster(&snap)["power_w"], 0.0);
+        assert_eq!(cluster(&snap)["busy"], 0);
+        let mut missing = snap.accel[0].clone();
+        missing.util = f64::NAN;
+        missing.power = f64::NAN;
+        missing.mem_used_gb = f64::NAN;
+        snap.accel.push(missing);
+        let partial = cluster(&snap);
+        for field in ["busy", "util_avg_pct", "power_w", "vram_used_gb"] {
+            assert!(partial[field].is_null());
+        }
+        assert_eq!(partial["vram_total_gb"], 160.0);
+    }
+
+    #[test]
+    fn routes_export_structured_matches_and_all_backends_without_runtime_claims() {
+        let object = serde_json::json!({"items":[{"metadata":{"name":"route","namespace":"ns","uid":"uid","resourceVersion":"9"},
+        "spec":{"rules":[{"matches":[{"method":"POST"}],"backendRefs":[
+            {"name":"primary","weight":90}, {"name":"canary","namespace":"other","weight":10}
+        ]}]}}]});
+        let mut snap = Snapshot::default();
+        (snap.routes, snap.epp_in_path) = crate::routing::rows(&object);
+        let value: serde_json::Value =
+            serde_json::from_str(&to_json(&snap, &Config::default()).unwrap()).unwrap();
+        let route = &value["routes"][0];
+        assert_eq!(route["uid"], "uid");
+        assert_eq!(route["resource_version"], "9");
+        assert_eq!(route["path"], "/");
+        assert_eq!(route["configuration"]["rule_index"], 0);
+        assert_eq!(route["configuration"]["implicit_path"], true);
+        assert_eq!(route["configuration"]["match_conditions"]["method"], "POST");
+        assert_eq!(
+            route["configuration"]["backend_refs"],
+            object["items"][0]["spec"]["rules"][0]["backendRefs"]
+        );
+        assert_eq!(route["verified_deployments"], serde_json::json!([]));
+        assert_eq!(value["route_configuration"]["state"], "unknown");
+    }
+
+    #[test]
+    fn epp_json_exports_all_profiles_without_inventing_default_picker() {
+        let snap = Snapshot {
+            epp: crate::epp_config::parse("schedulingProfiles:\n- name: one\n  plugins: [{pluginRef: queue-scorer, weight: 2}]\n- name: two\n  plugins: [{pluginRef: max-score-picker}, {pluginRef: custom-filter}]\n"),
+            ..Default::default()
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&to_json(&snap, &Config::default()).unwrap()).unwrap();
+        let profiles = value["epp_profiles"].as_array().unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0]["scorers"][0]["weight"], 2.0);
+        assert!(profiles[0]["configured_picker"].is_null());
+        assert_eq!(profiles[1]["configured_picker"], "max-score-picker");
+        assert!(profiles[1]["scorers"].as_array().unwrap().is_empty());
+        assert_eq!(
+            profiles[1]["unclassified_plugins"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn inventory_json_preserves_zero_and_marks_retained_data_stale() {
+        let mut snap = Snapshot::default();
+        snap.node_capacity
+            .insert("n1".into(), [("nvidia.com/gpu".into(), 4)].into());
+        snap.node_alloc
+            .insert("n1".into(), [("nvidia.com/gpu".into(), 0)].into());
+        snap.inventory.push(("nvidia.com/gpu".into(), 4, 0));
+        let status = crate::quality::SourceStatus::observed(100, 1, &[]);
+        snap.sources.insert("inventory".into(), status);
+        let value: serde_json::Value =
+            serde_json::from_str(&to_json(&snap, &Config::default()).unwrap()).unwrap();
+        let inv = &value["resource_inventory"];
+        assert_eq!(inv["state"], "stale");
+        assert_eq!(inv["last_success_at"], 100);
+        assert_eq!(inv["allocatable_by_node"]["n1"]["nvidia.com/gpu"], 4);
+        assert_eq!(inv["requested_by_node"]["n1"]["nvidia.com/gpu"], 0);
+        assert_eq!(inv["totals"][0]["requested"], 0);
+        let empty: serde_json::Value =
+            serde_json::from_str(&to_json(&Snapshot::default(), &Config::default()).unwrap())
+                .unwrap();
+        assert_eq!(empty["resource_inventory"]["state"], "unknown");
+        assert!(empty["resource_inventory"]["last_success_at"].is_null());
+        assert!(empty["resource_inventory"]["requested_by_node"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn collection_failure_is_visible_without_claiming_freshness() {
+        let good = crate::quality::SourceStatus::observed(100, 2, &[]);
+        let failed = crate::quality::SourceStatus::observed(110, 0, &["Forbidden".into()])
+            .after(Some(&good));
+        let snap = Snapshot {
+            ts: 110,
+            sources: [("workloads".into(), failed)].into(),
+            ..Default::default()
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&to_json(&snap, &Config::default()).unwrap()).unwrap();
+        assert_eq!(value["sources"]["workloads"]["last_success_at"], 100);
+        assert_eq!(value["source_states"]["workloads"], "stale");
+        assert!(value["diagnosis"]
+            .to_string()
+            .contains("collection degraded"));
+        assert_eq!(opt(f64::INFINITY), None);
+        assert_eq!(opt(f64::NAN), None);
+    }
+
+    #[test]
     fn json_contract_schema_and_keys() {
         // Synthetic snapshot → agent JSON → verify the contract (schema version, core keys). Cluster-agnostic.
         let mut snap = Snapshot::default();
         snap.nodes.push(crate::collect::NodeInfo {
+            identity: None,
             name: "node-a".into(),
             load1: 0.5,
             mem_used_gb: 10.0,
@@ -634,6 +962,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&s).expect("valid json");
         // Contract: schema version v2, top-level keys, node.npu field exposed.
         assert_eq!(v["schema"], "lmd-top/agent-state/v2");
+        assert_eq!(v["route_configuration"]["state"], "unknown");
+        assert!(v["route_configuration"]["inference_pool_backend_observed"].is_null());
+        assert_eq!(v["route_configuration"]["runtime_verified"], false);
         for k in ["cluster", "nodes", "artifacts", "stored", "models", "pods"] {
             assert!(v.get(k).is_some(), "top-level key '{}' present", k);
         }
@@ -648,6 +979,7 @@ mod tests {
         use crate::collect::PodRow;
         let mut snap = Snapshot::default();
         snap.pods.push(PodRow {
+            identity: None,
             name: "vllm-rbln-koni-abc123".into(),
             phase: "Running".into(),
             ready: "1/1".into(),
@@ -656,6 +988,7 @@ mod tests {
             age_secs: 3600,
         });
         snap.pods.push(PodRow {
+            identity: None,
             name: "no-timestamp".into(),
             phase: "Pending".into(),
             ready: "0/1".into(),

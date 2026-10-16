@@ -7,7 +7,7 @@ use super::*;
 impl App {
     pub fn order(&self) -> Vec<usize> {
         use crate::collect::{Accel, ModelRow, PodRow};
-        use std::cmp::Ordering::Equal;
+        use crate::measurement::compare;
         let mut idx = match self.view {
             // ── 컬럼 기반 정렬(o=컬럼 순환 · O=방향 토글). 비교는 오름차순으로 쓰고 desc 면 reverse. ──
             View::Accel => {
@@ -17,17 +17,21 @@ impl App {
                 idx.sort_by(|&a, &b| {
                     let (x, y): (&Accel, &Accel) = (&v[a], &v[b]);
                     let asc = match self.sort {
-                        0 => x.util.partial_cmp(&y.util).unwrap_or(Equal),
-                        1 => x.temp.partial_cmp(&y.temp).unwrap_or(Equal),
-                        2 => x.mem_used_gb.partial_cmp(&y.mem_used_gb).unwrap_or(Equal),
-                        3 => x.power.partial_cmp(&y.power).unwrap_or(Equal),
+                        0 => compare(Some(x.util), Some(y.util), desc),
+                        1 => compare(Some(x.temp), Some(y.temp), desc),
+                        2 => compare(Some(x.mem_used_gb), Some(y.mem_used_gb), desc),
+                        3 => compare(Some(x.power), Some(y.power), desc),
                         _ => (x.kind.rank(), x.node.as_str(), x.id.as_str()).cmp(&(
                             y.kind.rank(),
                             y.node.as_str(),
                             y.id.as_str(),
                         )),
                     };
-                    let asc = if desc { asc.reverse() } else { asc };
+                    let asc = if desc && self.sort > 3 {
+                        asc.reverse()
+                    } else {
+                        asc
+                    };
                     asc.then_with(|| {
                         (x.node.as_str(), x.id.as_str()).cmp(&(y.node.as_str(), y.id.as_str()))
                     })
@@ -37,11 +41,7 @@ impl App {
             View::Overview => {
                 let v = &self.snap.models;
                 let desc = self.sort_desc;
-                let oc = |a: Option<f64>, b: Option<f64>| {
-                    a.unwrap_or(f64::NEG_INFINITY)
-                        .partial_cmp(&b.unwrap_or(f64::NEG_INFINITY))
-                        .unwrap_or(Equal)
-                };
+                let oc = |a, b| compare(a, b, desc);
                 let mut idx: Vec<usize> = (0..v.len()).collect();
                 idx.sort_by(|&a, &b| {
                     let (x, y): (&ModelRow, &ModelRow) = (&v[a], &v[b]);
@@ -54,7 +54,11 @@ impl App {
                         6 => x.accel.cmp(&y.accel),
                         _ => x.name.cmp(&y.name),
                     };
-                    let asc = if desc { asc.reverse() } else { asc };
+                    let asc = if desc && !matches!(self.sort, 3..=5) {
+                        asc.reverse()
+                    } else {
+                        asc
+                    };
                     asc.then_with(|| x.name.cmp(&y.name)) // 동점은 이름 오름차순(안정)
                 });
                 idx
@@ -84,13 +88,17 @@ impl App {
                 idx.sort_by(|&a, &b| {
                     let (x, y) = (&v[a], &v[b]);
                     let asc = match self.sort {
-                        1 => x.cpu_pct.partial_cmp(&y.cpu_pct).unwrap_or(Equal),
-                        2 => x.mem_used_gb.partial_cmp(&y.mem_used_gb).unwrap_or(Equal),
-                        3 => x.disk_used_gb.partial_cmp(&y.disk_used_gb).unwrap_or(Equal),
-                        4 => x.load1.partial_cmp(&y.load1).unwrap_or(Equal),
+                        1 => compare(Some(x.cpu_pct), Some(y.cpu_pct), desc),
+                        2 => compare(Some(x.mem_used_gb), Some(y.mem_used_gb), desc),
+                        3 => compare(Some(x.disk_used_gb), Some(y.disk_used_gb), desc),
+                        4 => compare(Some(x.load1), Some(y.load1), desc),
                         _ => x.name.cmp(&y.name),
                     };
-                    let asc = if desc { asc.reverse() } else { asc };
+                    let asc = if desc && !matches!(self.sort, 1..=4) {
+                        asc.reverse()
+                    } else {
+                        asc
+                    };
                     asc.then_with(|| x.name.cmp(&y.name))
                 });
                 idx
@@ -138,14 +146,15 @@ impl App {
                             .rank()
                             .cmp(&self.deploy_phase(&ay.model, dy, ry).rank()),
                         2 => rx.cmp(&ry),
-                        3 => tx
-                            .unwrap_or(f64::NEG_INFINITY)
-                            .partial_cmp(&ty.unwrap_or(f64::NEG_INFINITY))
-                            .unwrap_or(Equal),
+                        3 => compare(tx, ty, desc),
                         4 => ax.node.cmp(&ay.node),
                         _ => ax.model.cmp(&ay.model),
                     };
-                    let asc = if desc { asc.reverse() } else { asc };
+                    let asc = if desc && self.sort != 3 {
+                        asc.reverse()
+                    } else {
+                        asc
+                    };
                     asc.then_with(|| ax.model.cmp(&ay.model))
                 });
                 idx
@@ -154,18 +163,10 @@ impl App {
             View::Library if self.panel_focus == 1 => (0..self.activity_rows().len()).collect(),
             View::Library => (0..self.library_items().len()).collect(),
             View::Epp if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
-            View::Epp => {
-                (0..self.snap.epp.as_ref().map(|e| e.scorers.len()).unwrap_or(0)).collect()
-            }
+            View::Epp => (0..self.selected_epp().map(|e| e.scorers.len()).unwrap_or(0)).collect(),
             View::Perf if self.panel_focus == 1 => (0..self.snap.pod_queues.len()).collect(),
             // Perf 는 다지표 전용 정렬(perf_rows_order, 기본 best-first=내림). O 로 역순.
-            View::Perf => {
-                let mut o = self.perf_rows_order();
-                if !self.sort_desc {
-                    o.reverse();
-                }
-                o
-            }
+            View::Perf => self.perf_rows_order(),
             View::Routing if self.panel_focus == 1 => (0..self.snap.pools.len()).collect(),
             View::Routing => (0..self.snap.routes.len()).collect(),
             View::Topo => Vec::new(), // 맵 뷰 — 리스트 선택 없음
@@ -204,6 +205,7 @@ impl App {
     /// 필터가 있으면 보이는 행만, 없으면 전체. 없으면 None.
     pub fn agg_summary(&self) -> Option<String> {
         use crate::collect::{Accel, ModelRow, NodeInfo, PerfRow};
+        use crate::measurement::{complete_sum, Metric};
         let order = self.order();
         if order.is_empty() {
             return None;
@@ -230,7 +232,13 @@ impl App {
                 let busy = d.iter().filter(|x| !x.busy_model.is_empty()).count();
                 Some(format!(
                     "Σ{} {}dev · {}busy · util {:.0}% · VRAM {:.0}/{:.0}G · {:.0}W",
-                    scope, n, busy, util, mu, mt, pw
+                    scope,
+                    n,
+                    busy,
+                    Metric(util),
+                    Metric(mu),
+                    Metric(mt),
+                    Metric(pw)
                 ))
             }
             View::Overview => {
@@ -243,12 +251,18 @@ impl App {
                 }
                 let ready: i64 = m.iter().map(|x| x.ready).sum();
                 let desired: i64 = m.iter().map(|x| x.desired).sum();
-                let run: f64 = m.iter().filter_map(|x| x.running).sum();
-                let wait: f64 = m.iter().filter_map(|x| x.waiting).sum();
-                let tps: f64 = m.iter().filter_map(|x| x.tps).sum();
+                let run = complete_sum(m.iter().map(|x| x.running));
+                let wait = complete_sum(m.iter().map(|x| x.waiting));
+                let tps = complete_sum(m.iter().map(|x| x.tps));
                 Some(format!(
                     "Σ{} {}mdl · {}/{}ready · run {:.0} wait {:.0} · {:.0}tok/s",
-                    scope, n, ready, desired, run, wait, tps
+                    scope,
+                    n,
+                    ready,
+                    desired,
+                    Metric(run),
+                    Metric(wait),
+                    Metric(tps)
                 ))
             }
             View::Nodes => {
@@ -270,11 +284,11 @@ impl App {
                     scope,
                     n,
                     ready,
-                    cpu,
-                    mu,
-                    mt,
-                    du / 1024.0,
-                    dt / 1024.0
+                    Metric(cpu),
+                    Metric(mu),
+                    Metric(mt),
+                    Metric(du / 1024.0),
+                    Metric(dt / 1024.0)
                 ))
             }
             View::Perf => {
@@ -285,10 +299,7 @@ impl App {
                 if p.is_empty() {
                     return None;
                 }
-                let tps: f64 = p
-                    .iter()
-                    .filter_map(|x| if x.tps.is_nan() { None } else { Some(x.tps) })
-                    .sum();
+                let tps = complete_sum(p.iter().map(|x| Some(x.tps)));
                 let e2e: Vec<f64> = p
                     .iter()
                     .map(|x| x.e2e_p95)
@@ -305,11 +316,82 @@ impl App {
                     format!("{:.0}ms", e2e_avg * 1000.0)
                 };
                 Some(format!(
-                    "Σ{} {}active · E2E p95 {} · {:.0}tok/s",
-                    scope, n, e2e_s, tps
+                    "Σ{} {}active · mean endpoint p95 {} · {:.0}tok/s",
+                    scope,
+                    n,
+                    e2e_s,
+                    Metric(tps)
                 ))
             }
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn performance_visible_order_matches_selection_and_filter_in_both_directions() {
+        let mut app = App::new();
+        app.view = View::Perf;
+        app.panel_focus = 0;
+        for (model, value) in [("missing", f64::NAN), ("high", 9.0), ("low", 1.0)] {
+            app.snap.perf_rows.push(crate::collect::PerfRow {
+                model: model.into(),
+                req: 1.0,
+                tps: value,
+                ttft_p95: value,
+                tpot_p95: value,
+                e2e_p95: value,
+                in_tok_p95: value,
+                out_tok_p95: value,
+                queue_p95: value,
+                prefill_p95: value,
+                decode_p95: value,
+                preempt: value,
+            });
+        }
+        for column in 0..4 {
+            app.sort = column;
+            for (desc, expected) in [(true, vec![1, 2, 0]), (false, vec![2, 1, 0])] {
+                app.sort_desc = desc;
+                assert_eq!(app.perf_rows_order(), expected);
+                assert_eq!(app.order(), expected);
+            }
+        }
+        app.filter = "HIGH".into();
+        assert_eq!(app.perf_rows_order(), [1]);
+        assert_eq!(app.order(), [1]);
+        app.selected = 0;
+        assert_eq!(app.selected_perf_model().as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn node_metric_sort_keeps_missing_rows_last_in_both_directions() {
+        let mut app = App::new();
+        app.view = View::Nodes;
+        for (name, value) in [
+            ("a", f64::NAN),
+            ("b", 9.0),
+            ("c", 1.0),
+            ("d", f64::INFINITY),
+        ] {
+            app.snap.nodes.push(crate::collect::NodeInfo {
+                name: name.into(),
+                cpu_pct: value,
+                mem_used_gb: value,
+                disk_used_gb: value,
+                load1: value,
+                ..Default::default()
+            });
+        }
+        for column in 1..=4 {
+            app.sort = column;
+            app.sort_desc = false;
+            assert_eq!(app.order(), [2, 1, 0, 3]);
+            app.sort_desc = true;
+            assert_eq!(app.order(), [1, 2, 0, 3]);
         }
     }
 }

@@ -6,7 +6,7 @@
 //! [`crate::advisor`] able to recommend anything at all.
 //!
 //! Format is JSON Lines: appended under a lock, tolerant of a truncated final line, and
-//! readable with `tail`/`jq`. One record per terminal Job outcome, deduplicated by job name so
+//! readable with `tail`/`jq`. One record per terminal Job outcome, deduplicated by Job UID so
 //! a completed Job observed on ten collect ticks is recorded once.
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,8 @@ pub struct Record {
     pub ts: u64,
     /// `compile` | `serve`.
     pub kind: String,
-    /// Job or deployment name — the dedup key.
+    /// Job execution identity (namespace/name/UID), or serving observation key.
+    /// Legacy records retain their name-only IDs.
     pub id: String,
     /// HuggingFace source id when known, else the display model name.
     pub model: String,
@@ -72,8 +73,20 @@ impl Record {
 pub fn family_key(model: &str) -> String {
     let name = model.rsplit('/').next().unwrap_or(model).to_lowercase();
     let drop = [
-        "-fp8", "-fp16", "-bf16", "-awq", "-gptq", "-int8", "-int4", "-w8a8", "-w4a16",
-        "-instruct", "-chat", "-rbln", "-rngd", "-npu",
+        "-fp8",
+        "-fp16",
+        "-bf16",
+        "-awq",
+        "-gptq",
+        "-int8",
+        "-int4",
+        "-w8a8",
+        "-w4a16",
+        "-instruct",
+        "-chat",
+        "-rbln",
+        "-rngd",
+        "-npu",
     ];
     let mut out = name;
     let mut changed = true;
@@ -108,7 +121,11 @@ pub fn append(rec: &Record) {
     let Ok(line) = serde_json::to_string(rec) else {
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+    {
         let _ = writeln!(f, "{}", line);
     }
 }
@@ -123,6 +140,15 @@ pub fn load() -> Vec<Record> {
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<Record>(l).ok())
         .collect()
+}
+
+/// UID distinguishes a recreated Job from the previous execution and across clusters.
+/// Without a UID we cannot safely deduplicate, so do not persist an ambiguous observation.
+pub fn job_execution_id(ns: &str, metadata: &serde_json::Value) -> String {
+    match (metadata["name"].as_str(), metadata["uid"].as_str()) {
+        (Some(name), Some(uid)) if !uid.is_empty() => format!("job:{ns}/{name}/{uid}"),
+        _ => String::new(),
+    }
 }
 
 /// Ids already recorded, so a terminal Job seen on every tick is written once.
@@ -310,5 +336,19 @@ mod tests {
         // Genuinely different models must not collide.
         assert_ne!(family_key("Qwen/Qwen3-4B"), family_key("Qwen/Qwen3-8B"));
         assert_ne!(family_key("Qwen/Qwen3-4B"), family_key("Qwen/Qwen2-4B"));
+    }
+}
+
+#[cfg(test)]
+mod execution_tests {
+    use super::*;
+    #[test]
+    fn recreated_jobs_and_namespaces_have_distinct_history_keys() {
+        let first = serde_json::json!({"name":"compile-model", "uid":"first"});
+        let retry = serde_json::json!({"name":"compile-model", "uid":"retry"});
+        assert_ne!(job_execution_id("a", &first), job_execution_id("a", &retry));
+        assert_ne!(job_execution_id("a", &first), job_execution_id("b", &first));
+        assert_ne!(job_execution_id("a", &first), "compile-model");
+        assert!(job_execution_id("a", &serde_json::json!({"name":"compile-model"})).is_empty());
     }
 }

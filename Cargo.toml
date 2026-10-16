@@ -6,6 +6,7 @@ description = "Terminal observability & operations tool for llm-d clusters"
 license = "Apache-2.0"
 repository = "https://github.com/gspark-etri/lmd-top"
 readme = "README.md"
+exclude = [".claude/**", ".codex/**", ".orca/**"]
 keywords = ["tui", "kubernetes", "llm", "observability", "monitoring"]
 categories = ["command-line-utilities"]
 
@@ -15,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 # 순수 Rust만 (이 빌드 환경엔 C 컴파일러 없음 → ring/openssl 계열 금지)
-ratatui = "0.29"            # crossterm 0.28 재export 포함 (ratatui::crossterm 사용)
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }            # crossterm 0.28 재export 포함 (ratatui::crossterm 사용)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "sync", "net", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -23,6 +24,9 @@ serde_yaml = "0.9"         # 순수 Rust(unsafe-libyaml) — EPP ConfigMap 파�
 anyhow = "1"
 unicode-width = "0.2"      # CJK 등 표시 폭 정확 계산(절단/정렬 깨짐 방지)
 tachyonfx = "=0.16.0"      # 순수 Rust TUI 이펙트. 0.16 이 ratatui 0.29(모놀리식) 마지막 호환(이후는 ratatui-core 0.30 계열)
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 opt-level = 2

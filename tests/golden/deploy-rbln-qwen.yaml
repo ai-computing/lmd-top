@@ -103,7 +103,7 @@ spec:
         - containerPort: 8000
         env:
         - name: MOUNT
-          value: /mnt/store/compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/rbln-ca22-tp4-s8192
+          value: /mnt/store/compiled/Qwen--Qwen2.5-0.5B-Instruct/rbln/rbln-ca22-tp4-s8192-7da5effc0a0e
         - name: SERVED
           value: Qwen/Qwen2.5-0.5B-Instruct
         - name: PORT
