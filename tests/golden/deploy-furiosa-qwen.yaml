@@ -3,7 +3,7 @@
 # Serving model furiosa-ai/Qwen3-4B-FP8. Engine: Furiosa-LLM.
 # Placement: any. Total device demand = 1 x 1.
 # If the image contains a TODO- placeholder, set LMD_SERVING_IMAGE before applying.
-# Furiosa: furiosa-llm serve. Store-backed artifacts use the HF id plus --fxb so config/tokenizer still come from HF. Serving TP is PE count; resource devices are RNGD count.
+# Furiosa: furiosa-llm serve. Store-backed artifacts use the HF id plus --fxb so config/tokenizer still come from HF. Serving TP is PE count (passed only to images before 2026.4, which fix it in the artifact); resource devices are RNGD count.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,7 +28,7 @@ spec:
         emptyDir: {}
       containers:
       - name: server
-        image: furiosaai/furiosa-llm:latest
+        image: furiosaai/furiosa-llm:2026.3.0
         args:
         - serve
         - furiosa-ai/Qwen3-4B-FP8

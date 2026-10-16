@@ -80,7 +80,7 @@ fn app() -> App {
     std::env::remove_var("LMD_COMPILE_ENV");
     // Pin the image inputs — otherwise LMD_*_IMAGE in the environment would change the goldens.
     a.img_rbln = None;
-    a.img_furiosa = Some("furiosaai/furiosa-llm:latest".into());
+    a.img_furiosa = Some(crate::accel::furiosa::DEFAULT_IMAGE.into());
     a.img_serving = None;
     a.apply(fixture());
     a

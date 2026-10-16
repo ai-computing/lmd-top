@@ -247,7 +247,7 @@ spec:
         emptyDir: {}
       containers:
       - name: compile
-        image: furiosaai/furiosa-llm:latest
+        image: furiosaai/furiosa-llm:2026.3.0
         command:
         - sh
         - /scripts/compile.sh
@@ -271,7 +271,7 @@ spec:
         - name: LMD_BUILD_VENDOR
           value: furiosa
         - name: LMD_BUILD_IMAGE
-          value: furiosaai/furiosa-llm:latest
+          value: furiosaai/furiosa-llm:2026.3.0
         - name: LMD_BUILD_OPTIONS
           value: '{"batch":"1","block":"16","chunk":"none","concurrency":"8","devices":"1","max-len":"8192","optim":"O3","pp":"1","quant":"none","tp":"8"}'
         - name: HF_HOME

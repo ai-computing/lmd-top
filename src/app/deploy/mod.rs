@@ -626,7 +626,7 @@ impl App {
                     "configured: {} (pull/runtime unverified)",
                     self.img_furiosa
                         .as_deref()
-                        .unwrap_or("furiosaai/furiosa-llm:latest")
+                        .unwrap_or(crate::accel::furiosa::DEFAULT_IMAGE)
                 ),
             ),
             "gpu" => {

@@ -130,7 +130,7 @@ pub fn build_compile_manifest(
     } else {
         img_furiosa
             .map(str::to_string)
-            .unwrap_or_else(|| "furiosaai/furiosa-llm:latest".into())
+            .unwrap_or_else(|| crate::accel::furiosa::DEFAULT_IMAGE.into())
     };
 
     // nodeSelector is omitted entirely when unconstrained — the device resource request is what

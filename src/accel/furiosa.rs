@@ -7,6 +7,30 @@
 use super::*;
 use crate::collect::AccelKind;
 
+/// Default furiosa-llm image for compile, serve and training Jobs. Pinned rather than `:latest`:
+/// 2026.4 removed `serve --tensor-parallel-size` and legacy artifacts, so a floating tag would
+/// silently change both the CLI and the artifact format under existing deployments.
+pub const DEFAULT_IMAGE: &str = "furiosaai/furiosa-llm:2026.3.0";
+
+/// Whether `furiosa-llm serve` accepts `--tensor-parallel-size` in this image.
+///
+/// From 2026.4 the parallelism is fixed when the FXB artifact is built and the flag is rejected
+/// ("unrecognized arguments"). Tags that do not parse as a release (`latest`, digests, custom
+/// builds) are assumed to follow the newest CLI, since that is what `:latest` will become.
+pub fn serve_takes_tp_flag(image: &str) -> bool {
+    let tag = image
+        .rsplit_once('@')
+        .map_or(image, |(name, _)| name)
+        .rsplit_once(':')
+        .map(|(_, t)| t)
+        .filter(|t| !t.contains('/'));
+    let mut parts = tag.unwrap_or("").split('.').map(str::parse::<u32>);
+    match (parts.next(), parts.next()) {
+        (Some(Ok(year)), Some(Ok(minor))) => (year, minor) < (2026, 4),
+        _ => false,
+    }
+}
+
 pub static PACK: Pack = Pack {
     id: "furiosa",
     aliases: &["rngd"],
@@ -95,3 +119,21 @@ pub static PACK: Pack = Pack {
         route_segment: "rngd",
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tp_flag_follows_the_release_that_removed_it() {
+        assert!(serve_takes_tp_flag(DEFAULT_IMAGE));
+        assert!(serve_takes_tp_flag("furiosaai/furiosa-llm:2025.3.1"));
+        assert!(serve_takes_tp_flag("registry:5000/furiosa-llm:2026.3.0"));
+        assert!(!serve_takes_tp_flag("furiosaai/furiosa-llm:2026.4.0"));
+        assert!(!serve_takes_tp_flag("furiosaai/furiosa-llm:2027.1.0"));
+        assert!(!serve_takes_tp_flag("furiosaai/furiosa-llm:latest"));
+        assert!(!serve_takes_tp_flag("furiosaai/furiosa-llm"));
+        assert!(!serve_takes_tp_flag("registry:5000/furiosa-llm"));
+        assert!(!serve_takes_tp_flag("furiosaai/furiosa-llm@sha256:37a8"));
+    }
+}

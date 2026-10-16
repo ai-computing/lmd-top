@@ -504,7 +504,7 @@ pub struct App {
     /// Kept in `App` so the compile form can advise without touching the filesystem per frame.
     pub history: Vec<crate::history::Record>,
     pub img_rbln: Option<String>, // LMD_COMPILE_IMAGE_RBLN — placeholder if absent
-    pub img_furiosa: Option<String>, // LMD_COMPILE_IMAGE_FURIOSA — default furiosaai/furiosa-llm:latest
+    pub img_furiosa: Option<String>, // LMD_COMPILE_IMAGE_FURIOSA — default accel::furiosa::DEFAULT_IMAGE
     pub img_serving: Option<String>, // LMD_SERVING_IMAGE — placeholder if absent
     pub hist: HashMap<String, VecDeque<u64>>, // accel util history
     pub toast: Option<String>,
@@ -704,7 +704,7 @@ impl App {
             history: crate::history::load(),
             img_rbln: env("LMD_COMPILE_IMAGE_RBLN"),
             img_furiosa: env("LMD_COMPILE_IMAGE_FURIOSA")
-                .or_else(|| Some("furiosaai/furiosa-llm:latest".into())),
+                .or_else(|| Some(crate::accel::furiosa::DEFAULT_IMAGE.into())),
             img_serving: env("LMD_SERVING_IMAGE"),
             hist: HashMap::new(),
             toast: None,
@@ -1866,7 +1866,7 @@ mod tests {
 
         assert_eq!(
             container["image"].as_str(),
-            Some("furiosaai/furiosa-llm:latest"),
+            Some(crate::accel::furiosa::DEFAULT_IMAGE),
             "default furiosa image"
         );
         // 컴파일은 AOT → 가속기 디바이스를 예약하지 않는다. cpu/mem 만.
@@ -1919,7 +1919,7 @@ mod tests {
         let fc = &fserve["spec"]["template"]["spec"]["containers"][0];
         assert_eq!(
             fc["image"].as_str(),
-            Some("furiosaai/furiosa-llm:latest"),
+            Some(crate::accel::furiosa::DEFAULT_IMAGE),
             "default furiosa image"
         );
         let fargs: Vec<&str> = fc["args"]
@@ -1934,6 +1934,26 @@ mod tests {
             "serve subcommand + model positional"
         );
         assert!(fargs.contains(&"--tensor-parallel-size"));
+        // 2026.4 rejects the flag (TP is fixed in the FXB artifact); a newer image must omit it.
+        let mut fa4 = mk("Furiosa-LLM", "furiosa-ai/Qwen3-4B-FP8");
+        fa4.img_furiosa = Some("furiosaai/furiosa-llm:2026.4.0".into());
+        fa4.open_deploy_form();
+        fa4.deploy_form_submit();
+        let (_, fy4) = submitted(&fa4);
+        let fdocs4 = docs_of(&fy4);
+        let fc4 = &serving_deployment(&fdocs4)["spec"]["template"]["spec"]["containers"][0];
+        assert_eq!(
+            fc4["image"].as_str(),
+            Some("furiosaai/furiosa-llm:2026.4.0")
+        );
+        assert!(
+            !fc4["args"]
+                .as_sequence()
+                .expect("args")
+                .iter()
+                .any(|v| v.as_str() == Some("--tensor-parallel-size")),
+            "2026.4 serve has no --tensor-parallel-size"
+        );
         let secrets: Vec<&str> = fc["env"]
             .as_sequence()
             .expect("env")
