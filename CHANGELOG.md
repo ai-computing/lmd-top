@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Accelerator coverage: unknown is not zero (2026-10-16)
+- A Prometheus outage no longer reads as an empty or idle fleet. Overview shows `accel unknown` with the cause, aggregates render as `–` instead of `util 0% temp 0°C ⚡0W`, the Status band and `--snapshot` say the state is unknown, not idle.
+- Devices a node declares (feature-discovery `*.npu.count`/`nvidia.com/gpu.count` labels, plus allocatable) are compared with exporter samples. A shortfall is shown in the accelerator panel, the Status band, alerts, `--snapshot` and `--json` (`accelerator_coverage.gaps`) with its likely cause: node NotReady, node pressure (evicted vendor pods), device plugin not advertising, or exporter not reporting. Families whose metrics source is itself failing are reported as unknown, not as missing devices.
+- Collector errors that share one cause are collapsed (`prometheus unreachable … ×51 queries (first: …)`) instead of being listed per query.
+- Accelerator packs gain an optional `count_label` (also accepted in runtime pack YAML).
+- Regression tests replay the 2026-10-14 incidents: Prometheus down, and RBLN exporter/device plugin evicted under DiskPressure while RNGD keeps reporting.
+
 ### Operation correctness (2026-09-28)
 - Compile history keys include namespace/name/Job UID; recreated Jobs are recorded separately and log Pods are matched by owner UID.
 - HTTPRoute edits preserve sibling matches, filters and backend weights, resolve Service ports, reject ambiguous edits, and use resourceVersion conflicts instead of forced ownership changes.

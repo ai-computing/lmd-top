@@ -41,7 +41,7 @@ impl SourceStatus {
             attempted_at: at,
             last_success_at: errors.is_empty().then_some(at),
             samples,
-            error: (!errors.is_empty()).then(|| errors.join("; ")),
+            error: (!errors.is_empty()).then(|| summarize(errors)),
             unsupported: false,
         }
     }
@@ -80,9 +80,63 @@ impl SourceStatus {
     }
 }
 
+/// Join collector errors, collapsing repeats of one cause.
+///
+/// When Prometheus is down every query fails with the same message, and listing all of them
+/// (one source had ~100) buried the only fact that mattered. Errors are grouped by the text
+/// after a `prom[query]: ` prefix; a repeated cause is shown once with its count and the
+/// first query it hit, so the root cause leads and nothing is silently dropped.
+pub fn summarize(errors: &[String]) -> String {
+    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    for error in errors {
+        let (query, cause) = match error
+            .strip_prefix("prom[")
+            .and_then(|r| r.split_once("]: "))
+        {
+            Some((query, cause)) => (query, cause),
+            None => ("", error.as_str()),
+        };
+        match groups.iter_mut().find(|(c, _)| *c == cause) {
+            Some((_, queries)) => queries.push(query),
+            None => groups.push((cause, vec![query])),
+        }
+    }
+    groups
+        .iter()
+        .map(|(cause, queries)| match queries.as_slice() {
+            [""] => cause.to_string(),
+            [query] => format!("prom[{query}]: {cause}"),
+            ["", ..] => format!("{cause} ×{}", queries.len()),
+            [first, ..] => format!("{cause} ×{} queries (first: {first})", queries.len()),
+            [] => unreachable!("a group always holds the error that created it"),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repeated_cause_is_reported_once_with_its_count() {
+        let down = |q: &str| format!("prom[{q}]: prometheus unreachable (probe failed this cycle)");
+        let errors = vec![
+            down("node_load1"),
+            down("node_memory_MemTotal_bytes"),
+            "prom[node_cpu_seconds_total]: timeout".to_string(),
+            down("node_filesystem_size_bytes"),
+            "inventory unavailable: forbidden".to_string(),
+        ];
+        assert_eq!(
+            summarize(&errors),
+            "prometheus unreachable (probe failed this cycle) ×3 queries (first: node_load1); \
+             prom[node_cpu_seconds_total]: timeout; inventory unavailable: forbidden"
+        );
+        assert_eq!(
+            summarize(&errors[2..3]),
+            "prom[node_cpu_seconds_total]: timeout"
+        );
+    }
     #[test]
     fn outage_keeps_original_age_recovery_and_empty_are_distinct() {
         let good = SourceStatus::observed(100, 3, &[]);

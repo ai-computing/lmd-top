@@ -86,6 +86,7 @@ pub static PACK: Pack = Pack {
     scheduling: Scheduling {
         resource_key: "rebellions.ai/ATOM",
         product_label: Some(("rebellions.ai/npu.product", "RBLN-CA22")),
+        count_label: Some("rebellions.ai/npu.count"),
         route_segment: "atom",
     },
 };

@@ -28,6 +28,8 @@ fn fixture() -> Snapshot {
         cordoned: false,
         pressure: false,
         version: "v1.31.14".into(),
+        pressure_kinds: Vec::new(),
+        devices: Vec::new(),
         npu: npu.into(),
     };
     let dev = |kind: AccelKind, id: &str, node: &str| Accel {
