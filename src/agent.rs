@@ -43,6 +43,10 @@ struct AgentState {
     resource_inventory: ResourceInventory,
     nodes: Vec<Node>,
     accelerators: Vec<Acc>,
+    /// Whether `accelerators` is the whole fleet: why it cannot be trusted (null when it can),
+    /// and devices nodes declare that no exporter reports. An empty `accelerators` with a
+    /// non-null `unknown` means "not observed", never "no devices".
+    accelerator_coverage: Coverage,
     models: Vec<Mdl>,
     workloads: Vec<crate::workload::Identity>,
     pods: Vec<Pod>,
@@ -60,6 +64,12 @@ struct AgentState {
     diagnosis: Diag,
     alerts: Vec<Alrt>,
     actions: Vec<Act>,
+}
+
+#[derive(Serialize)]
+struct Coverage {
+    unknown: Option<String>,
+    gaps: Vec<crate::coverage::Gap>,
 }
 
 #[derive(Serialize)]
@@ -653,6 +663,10 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
                 )
             })
             .collect(),
+        accelerator_coverage: Coverage {
+            unknown: crate::coverage::unknown_reason(s, crate::collect::now_secs()),
+            gaps: crate::coverage::gaps(s, crate::collect::now_secs()),
+        },
         warnings: s.warnings.clone(),
         kubernetes_context: crate::kube_session::context().map(str::to_owned),
         store_scanned_at: s.store_scanned_at,
@@ -955,6 +969,8 @@ mod tests {
             cordoned: false,
             pressure: false,
             version: "v1.30".into(),
+            pressure_kinds: Vec::new(),
+            devices: Vec::new(),
             npu: "Furiosa RNGD drv2026.3.0".into(),
         });
         let cfg = Config::default();
@@ -965,6 +981,8 @@ mod tests {
         assert_eq!(v["route_configuration"]["state"], "unknown");
         assert!(v["route_configuration"]["inference_pool_backend_observed"].is_null());
         assert_eq!(v["route_configuration"]["runtime_verified"], false);
+        assert!(v["accelerator_coverage"]["unknown"].is_null());
+        assert_eq!(v["accelerator_coverage"]["gaps"], serde_json::json!([]));
         for k in ["cluster", "nodes", "artifacts", "stored", "models", "pods"] {
             assert!(v.get(k).is_some(), "top-level key '{}' present", k);
         }

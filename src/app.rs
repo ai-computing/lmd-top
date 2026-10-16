@@ -1110,6 +1110,14 @@ impl App {
 pub fn snapshot_alerts(snap: &Snapshot) -> Vec<Alert> {
     let now = snap.ts;
     let mut out: Vec<Alert> = Vec::new();
+    for gap in crate::coverage::gaps(snap, crate::collect::now_secs()) {
+        out.push(Alert {
+            ts: now,
+            sev: Sev::Bad,
+            key: format!("coverage:{}:{}", gap.node, gap.family),
+            msg: crate::coverage::gap_line(&gap),
+        });
+    }
     for a in &snap.accel {
         let base = format!("{}/{}/{}", a.disp(), a.node, a.id);
         if !a.alive {
@@ -1187,7 +1195,29 @@ pub fn snapshot_alerts(snap: &Snapshot) -> Vec<Alert> {
 
 /// 크로스레이어 1줄 진단 → (문구, 심각도). None = 정상(healthy). UI diagnosis 와 agent JSON 공유.
 pub fn diagnose(s: &Snapshot) -> (String, Option<Sev>) {
-    let degraded = s.degraded_sources(crate::collect::now_secs());
+    let now = crate::collect::now_secs();
+    // Coverage first: a vanished data source or vendor stack is the root of most other
+    // symptoms, and the generic "collection degraded" list below does not say which matters.
+    if s.accel.is_empty() {
+        if let Some(reason) = crate::coverage::unknown_reason(s, now) {
+            return (
+                format!("{reason} — accelerator state unknown, not idle"),
+                Some(Sev::Bad),
+            );
+        }
+    }
+    let gaps = crate::coverage::gaps(s, now);
+    if let Some(first) = gaps.first() {
+        let more = match gaps.len() {
+            1 => String::new(),
+            n => format!(" (+{} more)", n - 1),
+        };
+        return (
+            format!("{}{more}", crate::coverage::gap_line(first)),
+            Some(Sev::Bad),
+        );
+    }
+    let degraded = s.degraded_sources(now);
     if !degraded.is_empty() {
         return (
             format!(

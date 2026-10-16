@@ -91,6 +91,7 @@ pub static PACK: Pack = Pack {
     scheduling: Scheduling {
         resource_key: "furiosa.ai/rngd",
         product_label: Some(("furiosa.ai/npu.product", "rngd")),
+        count_label: Some("furiosa.ai/npu.count"),
         route_segment: "rngd",
     },
 };

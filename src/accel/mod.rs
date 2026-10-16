@@ -155,6 +155,11 @@ pub struct Scheduling {
     pub resource_key: &'static str,
     /// Node label identifying this product, when placement should prefer it.
     pub product_label: Option<(&'static str, &'static str)>,
+    /// Node label (set by the vendor's feature discovery) stating how many devices the node
+    /// carries. It is the *declared* side of device coverage: the label outlives the device
+    /// plugin and the exporter, so when either is evicted the shortfall is still measurable
+    /// instead of the devices silently vanishing from the fleet.
+    pub count_label: Option<&'static str>,
     /// URL path segment for generated routes (`/atom/…`, `/rngd/…`, `/gpu/…`).
     pub route_segment: &'static str,
 }
@@ -295,6 +300,8 @@ struct PackFile {
     resource_key: String,
     #[serde(default)]
     product_label: Option<(String, String)>,
+    #[serde(default)]
+    count_label: Option<String>,
     #[serde(default)]
     route_segment: String,
     #[serde(default)]
@@ -501,6 +508,7 @@ impl PackFile {
                     self.resource_key
                 }),
                 product_label: self.product_label.map(|(k, v)| (intern(k), intern(v))),
+                count_label: self.count_label.map(intern),
                 route_segment: intern(if self.route_segment.is_empty() {
                     id.to_string()
                 } else {

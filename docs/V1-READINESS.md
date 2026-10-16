@@ -40,6 +40,21 @@ synthetic demos or narrowly scoped tests cannot prove real inference compatibili
 
 ## Progress log
 
+- Accelerator coverage (data-correctness gate). Replayed the 2026-10-14 live incidents:
+  with Prometheus unreachable the Overview card read "0 accel │ util 0% temp 0°C ⚡0W"
+  and `--snapshot` "[accelerators] 0"; with the RBLN exporter and device plugin evicted
+  by DiskPressure the four ATOM devices vanished with no trace. New `src/coverage.rs`
+  answers both from existing data — accel source quality, and node feature-discovery
+  count labels (which survive eviction) against exporter samples — and every renderer
+  (Overview card/LED line, accelerator panel, Status band, alerts, `--snapshot`, `--json`
+  `accelerator_coverage`) asks it instead of interpreting an empty list. Repeated collector
+  errors collapse to one cause with a query count. Live read-only check on the cluster:
+  healthy state reports 11 devices and no gaps (no false positives; etri-001 RNGD label 3,
+  reporting 3); `LMD_PROM=127.0.0.1:1` renders "accel unknown" with dashes and one-line
+  errors. The eviction case is covered by unit and render tests only — reproducing it live
+  means evicting vendor pods. Full suite: 424 unit + 11 CLI passed; strict Clippy and
+  formatting pass.
+
 - Performance table display and selection now share the same direction-aware,
   filtered row order. Previously the renderer used perf_rows_order directly,
   while selection reversed that result and applied a separate filter, so reversed

@@ -110,6 +110,7 @@ pub static PACK: Pack = Pack {
     scheduling: Scheduling {
         resource_key: "nvidia.com/gpu",
         product_label: None,
+        count_label: Some("nvidia.com/gpu.count"),
         route_segment: "gpu",
     },
 };

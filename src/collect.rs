@@ -119,6 +119,47 @@ pub struct NodeInfo {
     pub pressure: bool, // Memory/Disk/PID pressure 중 하나라도
     pub version: String,
     pub npu: String, // NPU 드라이버/SDK 요약(노드 라벨 기반, 예: "RNGD drv2026.3.0 · RBLN drv3.0.0"). 컴파일 가능 노드 판별용.
+    /// Pressure conditions currently True, by name — `pressure` says whether, this says which.
+    pub pressure_kinds: Vec<String>,
+    /// Devices the node declares per accelerator family (labels + allocatable), from the
+    /// Kubernetes API. Compared against the exporters to tell "absent" from "not reporting".
+    pub devices: Vec<DeviceExpectation>,
+}
+
+/// One accelerator family's presence on a node, as Kubernetes sees it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceExpectation {
+    /// Pack label (`RBLN`, `RNGD`, `GPU`) — the same key `AccelKind::label` yields.
+    pub label: &'static str,
+    /// Count from the feature-discovery label. Survives device-plugin/exporter eviction.
+    pub declared: u32,
+    /// `status.allocatable[resource_key]`; `None` when the node does not list the resource.
+    pub allocatable: Option<u32>,
+}
+
+/// Read every pack's declared device count off one node object.
+fn device_expectations(node: &serde_json::Value) -> Vec<DeviceExpectation> {
+    let labels = &node["metadata"]["labels"];
+    let allocatable = &node["status"]["allocatable"];
+    crate::accel::packs()
+        .iter()
+        .filter_map(|pack| {
+            let declared = labels[pack.scheduling.count_label?]
+                .as_str()?
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|n| *n > 0)?;
+            let allocatable = allocatable[pack.scheduling.resource_key]
+                .as_str()
+                .and_then(|v| v.trim().parse::<u32>().ok());
+            Some(DeviceExpectation {
+                label: pack.label,
+                declared,
+                allocatable,
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, Default)]
@@ -1126,7 +1167,7 @@ async fn collect_nodes(p: &str) -> (Vec<NodeInfo>, Vec<String>) {
         let dav = n_da.get(inst.as_str()).map(|x| x.value).unwrap_or(f64::NAN);
         let meta = node_meta.get(&name).cloned().unwrap_or_default();
         nodes.push(NodeInfo {
-            identity: meta.4,
+            identity: meta.identity,
             load1: load_by.get(&name).copied().unwrap_or(f64::NAN),
             mem_used_gb: to_gb(mt - ma),
             mem_total_gb: to_gb(mt),
@@ -1136,10 +1177,12 @@ async fn collect_nodes(p: &str) -> (Vec<NodeInfo>, Vec<String>) {
                 .unwrap_or(f64::NAN),
             disk_used_gb: to_gb(dsz - dav),
             disk_total_gb: to_gb(dsz),
-            ready: meta.0,
-            cordoned: meta.1,
-            pressure: meta.2,
-            version: meta.3,
+            ready: meta.ready,
+            cordoned: meta.cordoned,
+            pressure: !meta.pressure.is_empty(),
+            pressure_kinds: meta.pressure,
+            version: meta.version,
+            devices: meta.devices,
             name,
             npu: String::new(), // collect_node_npu 가 라벨에서 채움(full tier)
         });
@@ -1689,13 +1732,17 @@ async fn collect_inventory(
     }
 }
 
-type NodeMeta = (
-    bool,
-    bool,
-    bool,
-    String,
-    Option<crate::resource_guard::Identity>,
-);
+/// What the Kubernetes API says about a node, independent of Prometheus.
+#[derive(Clone, Default)]
+struct NodeMeta {
+    ready: bool,
+    cordoned: bool,
+    /// Pressure conditions currently True (`DiskPressure`, …).
+    pressure: Vec<String>,
+    version: String,
+    identity: Option<crate::resource_guard::Identity>,
+    devices: Vec<DeviceExpectation>,
+}
 
 async fn node_kube() -> anyhow::Result<(BTreeMap<String, String>, BTreeMap<String, NodeMeta>)> {
     let value = kube::get_json(&["get", "nodes", "-o", "json"]).await?;
@@ -1733,27 +1780,30 @@ fn parse_node_list(
             .unwrap_or("")
             .to_string();
         let cordoned = it["spec"]["unschedulable"].as_bool().unwrap_or(false);
-        let (mut ready, mut pressure) = (false, false);
+        let (mut ready, mut pressure) = (false, Vec::new());
         if let Some(cs) = it["status"]["conditions"].as_array() {
             for c in cs {
                 let t = c["type"].as_str().unwrap_or("");
                 let st = c["status"] == "True";
                 match t {
                     "Ready" => ready = st,
-                    "MemoryPressure" | "DiskPressure" | "PIDPressure" if st => pressure = true,
+                    "MemoryPressure" | "DiskPressure" | "PIDPressure" if st => {
+                        pressure.push(t.to_string())
+                    }
                     _ => {}
                 }
             }
         }
         meta.insert(
             name,
-            (
+            NodeMeta {
                 ready,
                 cordoned,
                 pressure,
-                ver,
-                crate::resource_guard::Identity::read(it),
-            ),
+                version: ver,
+                identity: crate::resource_guard::Identity::read(it),
+                devices: device_expectations(it),
+            },
         );
     }
     Ok((ip, meta))
@@ -3303,9 +3353,26 @@ mod node_list_tests {
         let (addresses, nodes) = parse_node_list(&value).unwrap();
         assert_eq!(addresses["192.0.2.2"], "worker");
         let node = &nodes["worker"];
-        assert!(node.0 && node.1);
-        assert_eq!(node.4.as_ref().unwrap().uid, "uid-1");
-        assert_eq!(node.4.as_ref().unwrap().version, "42");
+        assert!(node.ready && node.cordoned);
+        assert_eq!(node.identity.as_ref().unwrap().uid, "uid-1");
+        assert_eq!(node.identity.as_ref().unwrap().version, "42");
+    }
+    #[test]
+    fn node_declares_devices_from_labels_even_when_the_plugin_is_gone() {
+        // etri-001 during the 2026-10-14 DiskPressure eviction: feature-discovery labels stay,
+        // the RBLN device plugin is evicted so ATOM drops out of allocatable entirely.
+        let value = json!({"items":[{"metadata":{"name":"etri-001","labels":{
+                "rebellions.ai/npu.count":"4","furiosa.ai/npu.count":"3","unrelated.count":"9"}},
+            "status":{"allocatable":{"furiosa.ai/rngd":"3","cpu":"64"},
+                "conditions":[{"type":"Ready","status":"True"},{"type":"DiskPressure","status":"True"}]}}]});
+        let (_, nodes) = parse_node_list(&value).unwrap();
+        let node = &nodes["etri-001"];
+        assert_eq!(node.pressure, vec!["DiskPressure".to_string()]);
+        let rbln = node.devices.iter().find(|d| d.label == "RBLN").unwrap();
+        assert_eq!((rbln.declared, rbln.allocatable), (4, None));
+        let rngd = node.devices.iter().find(|d| d.label == "RNGD").unwrap();
+        assert_eq!((rngd.declared, rngd.allocatable), (3, Some(3)));
+        assert_eq!(node.devices.len(), 2);
     }
 }
 

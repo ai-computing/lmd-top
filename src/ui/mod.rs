@@ -2070,16 +2070,29 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
             pw += a.power;
             tsum += a.temp;
         }
+        // No devices means no measurement, not a measured zero: averages and sums stay NaN so
+        // they render as "–" (an empty fleet used to read "util 0% temp 0°C ⚡0W").
+        if s.accel.is_empty() {
+            (usum, mu, mt, pw, tsum) = (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN);
+        }
         let ncnt = s.accel.len().max(1);
         let avg = usum / ncnt as f64;
         let avg_temp = tsum / ncnt as f64;
         let mempct = percent(mu, mt);
         let ready = s.serving_count();
+        let unknown = crate::coverage::unknown_reason(s, crate::collect::now_secs());
         // 인벤토리 라벨(GB10×2 …) + 라벨된 집계(util·temp·VRAM·W·models). req/s·TTFT 는 상단바에 있어 생략.
-        let mut sp = vec![Span::styled(
-            format!("{} accel  ", s.accel.len()),
-            Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
-        )];
+        let mut sp = vec![if s.accel.is_empty() && unknown.is_some() {
+            Span::styled(
+                "accel unknown  ",
+                Style::default().fg(C_WARN()).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(
+                format!("{} accel  ", s.accel.len()),
+                Style::default().fg(C_HEAD()).add_modifier(Modifier::BOLD),
+            )
+        }];
         for (k, (c, col, _)) in &kinds {
             sp.push(Span::styled(
                 format!("{}×{} ", k, c),
@@ -2202,11 +2215,16 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
                 break;
             }
         }
-        if led_lines.is_empty() {
-            led_lines.push(Line::from(Span::styled(
-                "(no accelerators)",
+        match (&unknown, led_lines.is_empty()) {
+            (Some(reason), _) => led_lines.push(Line::from(Span::styled(
+                format!("⚠ {reason} — missing values are unknown, not zero"),
+                Style::default().fg(C_WARN()),
+            ))),
+            (None, true) => led_lines.push(Line::from(Span::styled(
+                "(no accelerators reported)",
                 Style::default().fg(C_DIM()),
-            )));
+            ))),
+            (None, false) => {}
         }
         cluster_lines.extend(led_lines);
     }
@@ -2309,11 +2327,30 @@ fn view_overview(f: &mut Frame, area: Rect, app: &App) {
         sp.push(Span::styled(trend, Style::default().fg(util_color(util))));
         al.push(Line::from(sp));
     }
+    // Devices the nodes declare but nothing reports (evicted exporter/plugin): listed with the
+    // fleet so a vendor cannot vanish from this panel without a trace.
+    let now = crate::collect::now_secs();
+    for gap in crate::coverage::gaps(s, now) {
+        al.push(Line::from(vec![
+            Span::styled(
+                format!("✗ {:<5} {:<16} ", gap.family, gap.node),
+                Style::default().fg(C_BAD()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "{}/{} reporting — {}",
+                    gap.reporting, gap.declared, gap.cause
+                ),
+                Style::default().fg(C_BAD()),
+            ),
+        ]));
+    }
     if al.is_empty() {
-        al.push(Line::from(Span::styled(
-            "  (no accelerator metrics)",
-            Style::default().fg(C_DIM()),
-        )));
+        let text = match crate::coverage::unknown_reason(s, now) {
+            Some(reason) => format!("  ⚠ {reason}"),
+            None => "  (no accelerators reported)".into(),
+        };
+        al.push(Line::from(Span::styled(text, Style::default().fg(C_DIM()))));
     }
     // 무언의 잘림 방지: (종류,노드) 그룹이 패널보다 많으면 마지막 줄을 "+N more" 로.
     let acap = (rows[2].height as usize).saturating_sub(2);

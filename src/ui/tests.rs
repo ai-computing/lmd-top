@@ -408,3 +408,68 @@ fn nonfinite_hardware_metrics_never_render_as_numbers_in_any_view() {
         }
     }
 }
+
+/// Prometheus outage: the Overview must say the fleet is unknown, never draw a measured zero.
+/// (2026-10-14: the card read "0 accel │ util 0% temp 0°C ⚡0W" while the cluster had 11 devices.)
+#[test]
+fn prometheus_outage_overview_says_unknown_not_zero() {
+    let _guard = RENDER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut app = App::new();
+    app.snap.ts = crate::collect::now_secs();
+    app.snap.stale_after_secs = 30;
+    let down =
+        "prom[RBLN_DEVICE_STATUS:UTILIZATI]: prometheus unreachable (probe failed this cycle)";
+    for id in ["rbln", "furiosa", "gpu"] {
+        app.snap.sources.insert(
+            format!("accel/{id}"),
+            crate::quality::SourceStatus::observed(app.snap.ts, 0, &[down.into()]),
+        );
+    }
+    let text = render(&app, 140, 40);
+    assert!(text.contains("accel unknown"), "{text}");
+    assert!(text.contains("prometheus unreachable"), "{text}");
+    assert!(
+        !text.contains("util 0%"),
+        "unknown must not render as 0%:\n{text}"
+    );
+    assert!(
+        !text.contains("0°C"),
+        "unknown must not render as 0°C:\n{text}"
+    );
+}
+
+/// Exporter evicted under DiskPressure: the vendor's devices are listed as not reporting.
+#[test]
+fn evicted_vendor_devices_are_listed_not_dropped() {
+    let _guard = RENDER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut app = App::new();
+    app.snap.ts = crate::collect::now_secs();
+    app.snap.stale_after_secs = 30;
+    for id in ["rbln", "furiosa", "gpu"] {
+        app.snap.sources.insert(
+            format!("accel/{id}"),
+            crate::quality::SourceStatus::observed(app.snap.ts, 0, &[]),
+        );
+    }
+    app.snap.nodes.push(NodeInfo {
+        name: "etri-001".into(),
+        ready: true,
+        pressure: true,
+        pressure_kinds: vec!["DiskPressure".into()],
+        devices: vec![crate::collect::DeviceExpectation {
+            label: "RBLN",
+            declared: 4,
+            allocatable: None,
+        }],
+        ..Default::default()
+    });
+    let text = render(&app, 140, 40);
+    assert!(
+        text.contains("etri-001: RBLN 0/4 devices reporting — DiskPressure"),
+        "status band names the gap and its cause:\n{text}"
+    );
+    assert!(
+        text.contains("0/4 reporting"),
+        "accelerator panel lists it:\n{text}"
+    );
+}

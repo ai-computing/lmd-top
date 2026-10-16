@@ -103,7 +103,14 @@ pub fn render(s: &collect::Snapshot, cfg: &Config, hist: &[crate::history::Recor
             dashp(n.mem_total_gb, 0)
         );
     }
-    line!("\n[accelerators] {}", s.accel.len());
+    match crate::coverage::unknown_reason(s, now) {
+        Some(reason) if s.accel.is_empty() => line!("\n[accelerators] unknown — {reason}"),
+        Some(reason) => line!("\n[accelerators] {} (partial: {reason})", s.accel.len()),
+        None => line!("\n[accelerators] {}", s.accel.len()),
+    }
+    for gap in crate::coverage::gaps(s, now) {
+        line!("  ✗ {}", crate::coverage::gap_line(&gap));
+    }
     for a in &s.accel {
         line!(
             "  {:<5} {:<6} {:<16} util {:>5}%  mem {}/{}G  {}°C {}W  {}",

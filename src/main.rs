@@ -13,6 +13,7 @@ mod catalog;
 mod collect;
 mod compat;
 mod config;
+mod coverage;
 mod diagnose;
 mod doctor;
 mod drain;
