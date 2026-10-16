@@ -18,3 +18,6 @@ docs/demo.cast
 
 # 릴리즈 산출물(태그별 재생성)
 /dist/
+
+# Python installer regression tests
+__pycache__/

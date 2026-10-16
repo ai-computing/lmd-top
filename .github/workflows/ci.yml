@@ -1,0 +1,72 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Exact source ref to check (release tag when called by release)
+        required: false
+        type: string
+        default: ''
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - name: Rust toolchain
+        run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests (no cluster required)
+        run: cargo test --locked
+      - name: Installer and compiler recipe regression tests (offline)
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Terminal lifecycle and pending-read responsiveness (offline)
+        run: |
+          cargo build --locked
+          python3 scripts/check-terminal.py
+          python3 scripts/check-terminal.py --slow-zoo
+          python3 scripts/check-terminal.py --manifest-review success
+          python3 scripts/check-terminal.py --manifest-review conflict
+      - name: Build extracted source package (isolated target directory)
+        run: cargo package --locked --offline --target-dir target/package-check
+      - name: Rust dependency inventory
+        run: python3 scripts/build-inventory.py --output /tmp/lmd-build-inventory.json
+      - name: Shell syntax
+        run: |
+          bash -n install.sh scripts/validate-golden.sh scripts/check-release.sh
+          for recipe in assets/recipes/*.sh; do sh -n "$recipe"; done
+
+  epp-plugin:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - name: Rust toolchain
+        run: rustup update stable && rustup default stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: contrib/epp-score-observer/go.mod
+          cache-dependency-path: contrib/epp-score-observer/go.sum
+      - name: Rust policy rendering matches the tested EPP fixture
+        run: |
+          cargo run --locked -- --policy render --file contrib/epp-score-observer/policy.yaml --base contrib/epp-score-observer/examples/base-epp.yaml > /tmp/rendered-epp.yaml
+          diff -u contrib/epp-score-observer/examples/rendered-epp.yaml /tmp/rendered-epp.yaml
+      - name: Test pinned EPP adapter and loader
+        working-directory: contrib/epp-score-observer
+        run: go test -mod=readonly ./...
+      - name: Replay synthetic GPU/NPU scenarios
+        working-directory: contrib/epp-score-observer
+        run: go run -mod=readonly ./cmd/replay examples/parameters.json examples/requests.json
+      - name: Build plugin binary
+        working-directory: contrib/epp-score-observer
+        run: CGO_ENABLED=0 go build -mod=readonly -trimpath -o /tmp/epp-policy .

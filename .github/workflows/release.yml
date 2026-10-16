@@ -1,49 +1,115 @@
 name: release
-
-# 태그(v*)를 밀면 플랫폼별 사전 빌드 바이너리 tarball + sha256 을 GitHub Release 로 올린다.
-# 설치 용이성용: krew 매니페스트 · install.sh · cargo-binstall 이 이 자산을 가리킨다.
-# 기능은 그대로(동일 바이너리) — 배포 방식만 쉬워질 뿐.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-
+    inputs:
+      tag:
+        description: Existing version tag to build (vX.Y.Z)
+        required: true
+        type: string
 permissions:
-  contents: write
-
+  contents: read
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+      - name: Validate release identity
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re, subprocess
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?', tag):
+              raise SystemExit('Expected a version tag vX.Y.Z')
+          version = re.search(r'^version = "([^"]+)"', open('Cargo.toml').read(), re.M)[1]
+          if tag != 'v' + version:
+              raise SystemExit('Tag must match Cargo.toml version')
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD']).strip()
+          tagged = subprocess.check_output(['git', 'rev-parse', 'refs/tags/' + tag + '^{commit}']).strip()
+          if head != tagged:
+              raise SystemExit('Checkout must match the existing tag')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('tag=' + tag + '\n')
+          PY
+  quality:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+    with:
+      source_ref: ${{ needs.validate.outputs.tag }}
   build:
+    needs: [validate, quality]
     name: build ${{ matrix.arch }}-${{ matrix.os_name }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-latest,     target: x86_64-unknown-linux-gnu,  arch: x86_64,  os_name: linux }
-          - { runner: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu, arch: aarch64, os_name: linux }
-          - { runner: macos-latest,      target: aarch64-apple-darwin,      arch: aarch64, os_name: darwin }
-          - { runner: macos-13,          target: x86_64-apple-darwin,       arch: x86_64,  os_name: darwin }
+          - { runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu, arch: x86_64, os_name: linux }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, arch: aarch64, os_name: linux }
+          - { runner: macos-15, target: aarch64-apple-darwin, arch: aarch64, os_name: darwin }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, arch: x86_64, os_name: darwin }
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
       - name: Install Rust
-        run: rustup update stable && rustup default stable && rustup target add ${{ matrix.target }}
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-      - name: Package
-        id: pkg
-        shell: bash
+        run: rustup update stable && rustup default stable && rustup component add rustfmt clippy && rustup target add ${{ matrix.target }}
+      - name: Check and test release source
         run: |
-          ver="${GITHUB_REF_NAME}"
-          name="lmd-top-${ver}-${{ matrix.arch }}-${{ matrix.os_name }}"
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          name="lmd-top-${RELEASE_TAG}-${{ matrix.arch }}-${{ matrix.os_name }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/lmd-top" "dist/$name/lmd-top"
-          cp README.md LICENSE "dist/$name/" 2>/dev/null || true
+          cp README.md LICENSE "dist/$name/"
+          python3 scripts/build-inventory.py --target '${{ matrix.target }}' --output "dist/$name/DEPENDENCIES.json"
+          "dist/$name/lmd-top" --version
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
-          echo "tarball=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
-      - name: Upload to release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}-${{ matrix.os_name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+  publish:
+    needs: [validate, quality, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Publish after every platform passes
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            ${{ steps.pkg.outputs.tarball }}
-            ${{ steps.pkg.outputs.tarball }}.sha256
+            dist/*.tar.gz
+            dist/*.sha256
