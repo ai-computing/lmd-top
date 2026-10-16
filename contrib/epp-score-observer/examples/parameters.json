@@ -1,0 +1,29 @@
+{
+  "maxMetricAgeSeconds": 15,
+  "classes": [
+    {
+      "name": "gpu",
+      "selector": {
+        "lmd.ai/capacity-class": "gpu-demo"
+      },
+      "models": [
+        "demo-model"
+      ],
+      "capacity": 8,
+      "waitingMetric": "vllm:num_requests_waiting",
+      "runningMetric": "vllm:num_requests_running"
+    },
+    {
+      "name": "npu",
+      "selector": {
+        "lmd.ai/capacity-class": "npu-demo"
+      },
+      "models": [
+        "demo-model"
+      ],
+      "capacity": 4,
+      "waitingMetric": "vllm:num_requests_waiting",
+      "runningMetric": "vllm:num_requests_running"
+    }
+  ]
+}

@@ -17,6 +17,7 @@ import (
 	"github.com/llm-d/llm-d-router/cmd/epp/runner"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 
+	"github.com/etri/epp-score-observer/pkg/heterogeneous"
 	"github.com/etri/epp-score-observer/pkg/scoreobserver"
 )
 
@@ -25,6 +26,8 @@ func main() {
 	// The runner's own registerAllPlugins() populates the same global registry; order is
 	// irrelevant as long as both run before config parsing (they do — this is before Run).
 	fwkplugin.Register(scoreobserver.PluginType, scoreobserver.Factory)
+	fwkplugin.Register(heterogeneous.PluginType, heterogeneous.Factory)
+	fwkplugin.Register(heterogeneous.ExtractorType, heterogeneous.ExtractorFactory)
 
 	ctx := ctrl.SetupSignalHandler()
 	if err := runner.NewRunner().Run(ctx); err != nil {

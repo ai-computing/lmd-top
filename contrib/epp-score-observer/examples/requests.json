@@ -1,0 +1,7 @@
+[
+ {"request":{"model":"demo-model","inputTokens":512},"candidates":[
+   {"name":"gpu-0","labels":{"lmd.ai/capacity-class":"gpu-demo"},"waiting":8,"running":8,"metricAgeSeconds":1},
+   {"name":"npu-0","labels":{"lmd.ai/capacity-class":"npu-demo"},"waiting":0,"running":1,"metricAgeSeconds":1},
+   {"name":"npu-stale","labels":{"lmd.ai/capacity-class":"npu-demo"},"waiting":0,"running":0,"metricAgeSeconds":99}
+ ]}
+]
