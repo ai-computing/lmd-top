@@ -570,7 +570,7 @@ mod tests {
             .build()
             .unwrap();
         let t0 = std::time::Instant::now();
-        let r = rt.block_on(query("192.0.2.7:9", "vector(1)"));
+        let r = rt.block_on(query("192.0.2.1:9", "vector(1)"));
         assert!(r.is_err());
         assert!(
             t0.elapsed() < std::time::Duration::from_millis(200),

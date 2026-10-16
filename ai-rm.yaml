@@ -1,0 +1,21 @@
+name: lmd-top
+layer: l5-ops
+kind: tool
+summary: llm-d 클러스터의 가속기·서빙·EPP 라우팅·SLO를 한 화면에서 보고 조정하는 터미널 관측·운영 콘솔(ai-rm 관측 콘솔)
+maturity: prototype
+hardware: [A100, ATOM, RNGD, GB10]   # 대상 가속기를 관측·배포한다. lmd-top 자체는 가속기 없이 돈다
+install:
+  - cargo install --locked --path .
+test:
+  - cargo test --locked
+  - python3 -m unittest discover -s tests -p 'test_*.py'
+deploy:
+  target: none                # control-plane 호스트에서 kubectl + Prometheus 로 붙는 CLI. 클러스터에 상주하지 않는다
+  manifests: null
+  image: null                 # contrib/epp-score-observer/Dockerfile 로 EPP 플러그인 이미지를 만들 수 있으나 게시 이미지는 없다
+config:
+  env_example: cluster.example.env
+interfaces:
+  provides: [Metrics, Placement]          # --json 상태·KPI 관측, heterogeneous-capacity EPP 정책(contrib/epp-score-observer)
+  uses: [Metrics, Accelerator, Workload, Placement]   # Prometheus 지표, 가속기 팩·device plugin 리소스, serving/학습 Job, InferencePool/EPP
+kpi: [이종자원수, SLO, 전력효율]

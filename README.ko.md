@@ -100,7 +100,7 @@ lmd-top --json               # 기계가 읽는 agent 상태(JSON) 출력
 lmd-top --doctor             # Prometheus 전수조사: exporter, 지표 커버리지, 누락
 lmd-top --audit              # 적용한 변경 작업 감사 로그 출력
 lmd-top --snapshot | --render | --cast   # 헤드리스 텍스트 / CI 렌더 / 데모 asciicast
-LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # 다른 클러스터 지정
+LMD_PROM=192.0.2.10:30090 LMD_NS=my-ns lmd-top   # 다른 클러스터 지정
 ```
 
 **권한 모드**(`--mode`, 헤더에 배지로 표시) 는 액션을 단계적으로 잠급니다.

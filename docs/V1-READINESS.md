@@ -964,7 +964,7 @@ synthetic demos or narrowly scoped tests cannot prove real inference compatibili
   Requires PyYAML; documented command in manifests/README-model-store.md. This is
   offline scanner evidence, not validation of the live container image or PVC.
 - Read-only live JSON validation against llm-serving with Prometheus
-  192.0.2.5:30090 completed successfully using the rebuilt binary. Source states
+  <prometheus-host>:30090 completed successfully using the rebuilt binary. Source states
   fresh: nodes 8, events 54, jobs 1, gateway 1, epp_config 1, model_store 4,
   inventory 8, workloads 29. No collection warnings. store_scanned_at was null,
   correctly distinguishing the legacy scanner from a recently fetched ConfigMap.

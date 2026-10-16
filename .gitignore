@@ -21,3 +21,6 @@ docs/demo.cast
 
 # Python installer regression tests
 __pycache__/
+
+# ai-rm site values (copy of cluster.example.env with real addresses)
+cluster.local.env
