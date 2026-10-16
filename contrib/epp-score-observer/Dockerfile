@@ -1,4 +1,4 @@
-# Builds a drop-in EPP image that adds the endpoint-score-observer picker plugin.
+# Builds a drop-in EPP image that adds score observation and heterogeneous capacity policy plugins.
 # Mirrors upstream llm-d Dockerfile.epp (distroless/static:nonroot, same ports/entrypoint),
 # but builds THIS module's main.go, which blank-registers our plugin then runs the stock runner.
 #
@@ -17,7 +17,7 @@ COPY main.go main.go
 COPY pkg/ pkg/
 ARG LDFLAGS="-s -w"
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
-    -ldflags="${LDFLAGS}" -o bin/epp .
+    -mod=readonly -trimpath -buildvcs=false -ldflags="${LDFLAGS}" -o bin/epp .
 FROM ${BASE_IMAGE}
 WORKDIR /
 COPY --from=go-builder /workspace/bin/epp /app/epp

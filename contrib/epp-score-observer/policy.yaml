@@ -1,0 +1,28 @@
+# Example capacities only: replace with measurements for the same workload.
+deployment: llmd-router-epp
+container: epp
+configMap: llmd-router-epp
+configKey: default-plugins.yaml
+image: TODO-registry/epp-policy:v1
+profile: default
+metricsSource: metrics-data-source
+weight: 3
+parameters:
+  maxMetricAgeSeconds: 15
+  classes:
+  - name: gpu
+    selector:
+      lmd.ai/capacity-class: gpu-demo
+    models:
+    - demo-model
+    capacity: 8
+    waitingMetric: vllm:num_requests_waiting
+    runningMetric: vllm:num_requests_running
+  - name: npu
+    selector:
+      lmd.ai/capacity-class: npu-demo
+    models:
+    - demo-model
+    capacity: 4
+    waitingMetric: vllm:num_requests_waiting
+    runningMetric: vllm:num_requests_running

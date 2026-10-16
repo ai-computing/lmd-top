@@ -1,0 +1,63 @@
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+dataLayer:
+  sources:
+  - extractors:
+    - pluginRef: core-metrics-extractor
+    - pluginRef: heterogeneous-load-extractor
+    pluginRef: metrics-data-source
+kind: EndpointPickerConfig
+plugins:
+- type: metrics-data-source
+- type: core-metrics-extractor
+- type: max-score-picker
+- parameters:
+    classes:
+    - capacity: 8.0
+      maxInputTokens: 0
+      models:
+      - demo-model
+      name: gpu
+      runningMetric: vllm:num_requests_running
+      selector:
+        lmd.ai/capacity-class: gpu-demo
+      waitingMetric: vllm:num_requests_waiting
+    - capacity: 4.0
+      maxInputTokens: 0
+      models:
+      - demo-model
+      name: npu
+      runningMetric: vllm:num_requests_running
+      selector:
+        lmd.ai/capacity-class: npu-demo
+      waitingMetric: vllm:num_requests_waiting
+    maxMetricAgeSeconds: 15.0
+  type: heterogeneous-capacity
+- parameters:
+    classes:
+    - capacity: 8.0
+      maxInputTokens: 0
+      models:
+      - demo-model
+      name: gpu
+      runningMetric: vllm:num_requests_running
+      selector:
+        lmd.ai/capacity-class: gpu-demo
+      waitingMetric: vllm:num_requests_waiting
+    - capacity: 4.0
+      maxInputTokens: 0
+      models:
+      - demo-model
+      name: npu
+      runningMetric: vllm:num_requests_running
+      selector:
+        lmd.ai/capacity-class: npu-demo
+      waitingMetric: vllm:num_requests_waiting
+    maxMetricAgeSeconds: 15.0
+  type: heterogeneous-load-extractor
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: max-score-picker
+  - pluginRef: heterogeneous-capacity
+    weight: 3.0
+

@@ -4,6 +4,13 @@ A drop-in **EPP (llm-d endpoint-picker) plugin** that exposes the router's real
 **per-endpoint scheduler score** as a Prometheus metric, so tools like `lmd-top`
 can answer "why did the router pick *this* pod?" from live data.
 
+## Policy development extension (unreleased)
+
+This binary now also registers `heterogeneous-capacity` and `heterogeneous-load-extractor`.
+They are enabled only when explicitly included in the EPP config. See [DEVELOPMENT.md](DEVELOPMENT.md)
+for the pure policy, offline replay, framework tests and image build. The new policy has been
+validated locally against the pinned router; its live cluster rollout is not yet tested.
+
 ## What it does
 
 The llm-d EPP scores every candidate endpoint each request (queue / kv-cache /
