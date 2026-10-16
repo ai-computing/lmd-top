@@ -859,7 +859,7 @@ mod secret_tests {
             assert_eq!(base64(input.as_bytes()), want, "base64({:?})", input);
         }
         // A realistic HF token shape round-trips through a decoder.
-        let tok = "hf_ABCdefGHIjklMNOpqrSTUvwxYZ0123456789";
+        let tok = "hf_EXAMPLEnotARealTokenXXXXXXXXXXXXXX";
         let enc = base64(tok.as_bytes());
         assert!(!enc.contains('\n'), "no wrapping — k8s wants one line");
         assert_eq!(enc.len() % 4, 0, "padded to a multiple of 4");

@@ -3349,9 +3349,9 @@ mod node_list_tests {
     fn node_observation_retains_identity_and_scheduling_conditions() {
         let value = json!({"items":[{"metadata":{"name":"worker","uid":"uid-1","resourceVersion":"42"},
             "spec":{"unschedulable":true},"status":{"conditions":[{"type":"Ready","status":"True"}],
-            "addresses":[{"type":"InternalIP","address":"192.0.2.2"}]}}]});
+            "addresses":[{"type":"InternalIP","address":"192.0.2.1"}]}}]});
         let (addresses, nodes) = parse_node_list(&value).unwrap();
-        assert_eq!(addresses["192.0.2.2"], "worker");
+        assert_eq!(addresses["192.0.2.1"], "worker");
         let node = &nodes["worker"];
         assert!(node.ready && node.cordoned);
         assert_eq!(node.identity.as_ref().unwrap().uid, "uid-1");

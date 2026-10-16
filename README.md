@@ -107,7 +107,7 @@ lmd-top --json               # print machine-readable agent state (JSON; include
 lmd-top --doctor             # survey Prometheus: exporters, metric coverage, gaps
 lmd-top --audit              # print the audit log of applied mutations
 lmd-top --snapshot | --render | --cast   # headless text / CI render / demo asciicast
-LMD_PROM=192.0.2.3:30090 LMD_NS=my-ns lmd-top   # point at another cluster
+LMD_PROM=192.0.2.10:30090 LMD_NS=my-ns lmd-top   # point at another cluster
 ```
 
 **Permission modes** (`--mode`, shown as a header badge) gate actions:
@@ -207,6 +207,35 @@ since shipped; see Highlights.) See [ROADMAP.md](ROADMAP.md) and [CHANGELOG.md](
 
 Verified against a live heterogeneous cluster (8 nodes; GB10, RBLN, and RNGD accelerators;
 EPP, routes, and models live). It's experimental (0.x), so interfaces may still change.
+
+## ai-rm
+
+이 레포는 [ai-rm](https://github.com/ai-computing/ai-rm)(AI 반도체 통합 자원관리)의 **`l5-ops` 계층, kind `tool`** 구성요소이며, ai-rm의 **관측 콘솔**이다. 가속기(A100·GB10·RBLN ATOM·Furiosa RNGD)와 노드, 모델 서버, InferencePool·EPP 라우팅, TTFT/TPOT/SLO를 한 화면에서 보고, 권한 모드(`--mode`)와 감사 로그 아래에서 scale·drain·route 편집·NPU 컴파일/배포 같은 운영 액션을 실행한다. 메타데이터는 루트의 `ai-rm.yaml`에 있다.
+
+예전 rm_monitor의 역할은 나뉘었다. 모니터링 스택(Prometheus, exporter, Grafana 대시보드)은 `llm-d-setup/monitoring/`(l4-cluster)으로, 부하 도구는 `rm-bench`(l5-ops)로 옮겼다. lmd-top은 그 스택이 모은 지표를 읽어 상관 분석하는 콘솔이고, 자체 데이터 저장소는 없다.
+
+**k8s + llm-d 연결.** 클러스터에 상주하지 않는다. control-plane 등 `kubectl`이 되는 호스트에서 돌며, Kubernetes는 `kubectl`로(Deployment, Pod, HTTPRoute, Gateway, InferencePool, EPP ConfigMap), 지표는 Prometheus HTTP API(`LMD_PROM`)로 읽는다. 쓰기 액션도 같은 `kubectl` 경로로 적용한다. EPP 라우팅 정책 플러그인(`heterogeneous-capacity` filter/scorer, `epp_endpoint_score` 내보내기)은 `contrib/epp-score-observer/`에 있고, 이미지 빌드·배포는 아직 하지 않았다.
+
+**설치·테스트.** 가속기나 클러스터 없이 돈다.
+
+```bash
+cargo install --locked --path .                         # lmd-top 바이너리 설치
+cargo test --locked                                     # Rust 단위·골든 테스트
+python3 -m unittest discover -s tests -p 'test_*.py'    # 설치 스크립트 회귀 테스트
+(cd contrib/epp-score-observer && go test ./...)        # EPP 정책 플러그인 (Go)
+```
+
+**인터페이스.** 제공: `Metrics`(`--json` agent 상태 `lmd-top/agent-state/v2`, `--doctor` 지표 커버리지), `Placement`(heterogeneous-capacity EPP 정책, `--policy render/plan/replay`). 사용: `Metrics`(DCGM·RBLN·Furiosa·vLLM·EPP Prometheus 지표), `Accelerator`(가속기 팩 `src/accel/`, 노드 device plugin 리소스), `Workload`(serving Deployment, NPU 컴파일 Job, npu-lora 학습 Job `--plan train`), `Placement`(InferencePool·EPP·HTTPRoute).
+
+**KPI.** 이종자원수(GPU·RBLN·RNGD를 한 콘솔에서 관측·배포), SLO(TTFT/TPOT/E2E p95, 큐·KV 상태), 전력효율(가속기 전력 지표 표시).
+
+**사이트 설정 (`cluster.local.env`).** 실제 주소는 커밋하지 않는다. `cp cluster.example.env cluster.local.env`(untracked) 후 값을 채우고 `set -a; . ./cluster.local.env; set +a`로 내보낸 뒤 실행한다. 환경 변수가 없으면 `~/.config/lmd-top/lmd-top.yaml`, 그다음 localhost 기본값을 쓴다.
+
+| 변수 | 뜻 |
+|---|---|
+| `LMD_PROM` | Prometheus `host:port` (평문 HTTP, NodePort 또는 port-forward) |
+| `LMD_NS` | 모델 서버·EPP가 있는 네임스페이스 (기본 `llm-serving`) |
+| `LMD_GRAFANA` | Grafana 기본 URL (`:graf` 명령) |
 
 ## Contributing & license
 

@@ -2656,7 +2656,7 @@ mod tests {
             "HuggingFace token",
             "huggingface.co/settings/tokens",
         );
-        let secret = "hf_ZZTOPsecretVALUE9876";
+        let secret = "hf_EXAMPLEsecretVALUE9876";
         for c in secret.chars() {
             form.push(c);
         }
@@ -2678,7 +2678,7 @@ mod tests {
         }
         assert!(!text.contains(secret), "the value was rendered");
         assert!(
-            !text.contains("hf_ZZTOP"),
+            !text.contains("hf_EXAMPLE"),
             "a prefix of the value was rendered"
         );
         assert!(
@@ -2701,11 +2701,11 @@ mod tests {
             name: "hf-token".into(),
             key: "token".into(),
             purpose: "HuggingFace token".into(),
-            value: "hf_ZZTOPsecretVALUE9876".into(),
+            value: "hf_EXAMPLEsecretVALUE9876".into(),
         };
         let prompt = p.prompt();
         assert!(
-            !prompt.contains("hf_ZZTOP"),
+            !prompt.contains("hf_EXAMPLE"),
             "prompt leaked the value: {}",
             prompt
         );
