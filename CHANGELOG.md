@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### ai-rm placement document (2026-10-19)
+- The ai-rm placement panel reads llm-d-setup's documented `airm-placement` layout: key `decisions.json` with a `decisions` list (shown as `<pool>/<kind>`). The one-key-per-workload layout is still read. An empty `decisions` list shows nothing.
+- `LMD_AIRM_NS` defaults to `LMD_NS` (llm-d-setup writes the ConfigMap into the llm-d namespace) instead of `llm-d`.
+
 ### ai-rm protocol v0.1 (read-only, 2026-10-19)
 - Infra ▸ Devices shows an ai-rm panel when the cluster has any ai-rm source: `AcceleratorProfile` (`airm.ai-computing.io/v1alpha1`) vendor·model·memory·peak with its source (the selected device's profile is marked), `airm_*` Prometheus series with rm-core v0.1 names and units (vendor-derived `tok_s`/`req_s`/`power_w`/`accelerators` shown as `[vendor]` when no airm series exists), and the decisions in ConfigMap `airm-placement` (`LMD_AIRM_NS`, default `llm-d`). The device PWR column prefers `airm_power_w{scope="card"}`. Without the CRD, series and ConfigMap the view is unchanged and nothing is warned. Write actions are unchanged.
 
