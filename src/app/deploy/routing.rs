@@ -12,8 +12,13 @@ use crate::manifest::{args, s, seq, Doc, Manifest};
 use crate::ymap;
 use serde_yaml::Value;
 
-/// EPP image — the llm-d router endpoint picker.
-const EPP_IMAGE: &str = "ghcr.io/llm-d/llm-d-router-endpoint-picker-dev:main";
+/// EPP image — the llm-d router endpoint picker, pinned by digest.
+///
+/// Upstream publishes only a moving `:main` tag. On 2026-10-14 a rebuild under that tag stopped
+/// registering EndpointPickerConfig under `inference.networking.x-k8s.io/v1alpha1` and every
+/// EPP restarted into CrashLoopBackOff. This digest is the build the cluster's EPPs run and the
+/// config this module emits (`llm-d.ai/v1alpha1`) was verified against; move it deliberately.
+const EPP_IMAGE: &str = "ghcr.io/llm-d/llm-d-router-endpoint-picker-dev@sha256:c0d60804102f84ed751a86200de380b90cd1dad271054b6e33fa6ab6683ac93d";
 
 /// Scorers and their weights in the default scheduling profile.
 const SCORERS: &[(&str, u32)] = &[
@@ -288,4 +293,14 @@ pub fn routing_docs(ns: &str, name: &str, vendor: &str, served: &str) -> Manifes
                 }]),
             },
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn epp_image_is_pinned_by_digest() {
+        // A moving tag let an upstream rebuild crash-loop every EPP (2026-10-14).
+        assert!(super::EPP_IMAGE.contains("@sha256:"));
+        assert_eq!(crate::pod_health::floating_tag(super::EPP_IMAGE), None);
+    }
 }
