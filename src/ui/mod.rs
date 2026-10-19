@@ -1109,6 +1109,17 @@ fn footer(f: &mut Frame, area: Rect, app: &App) {
 
 // ── Accel ──────────────────────────────────────────────
 fn view_accel(f: &mut Frame, area: Rect, app: &App) {
+    // ai-rm v0.1 panel only when the cluster has an ai-rm source; otherwise the view is unchanged.
+    let area = if app.snap.airm.present() {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(6), Constraint::Length(10)])
+            .split(area);
+        airm_panel(f, split[1], app);
+        split[0]
+    } else {
+        area
+    };
     let order = app.order();
     let rows: Vec<Row> = order
         .iter()
@@ -1167,7 +1178,14 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
                     format!("{:.0}°C", Metric(a.temp)),
                     Style::default().fg(temp_color(a.temp)),
                 )),
-                cellw(format!("{:.0}W", Metric(a.power)), 5),
+                // airm_power_w{scope=card} for this device when reported, else the vendor reading.
+                cellw(
+                    format!(
+                        "{:.0}W",
+                        Metric(app.snap.airm.card_power(a).unwrap_or(a.power))
+                    ),
+                    5,
+                ),
                 Cell::from(Span::styled(trend, Style::default().fg(util_color(a.util)))), // 인라인 트렌드(all-smi식)
                 Cell::from(Span::styled(model_cell, Style::default().fg(C_DIM()))),
             ])
@@ -1209,6 +1227,127 @@ fn view_accel(f: &mut Frame, area: Rect, app: &App) {
         order.len(),
         app.sort_header_label(),
         app.sort_arrow(),
+    );
+}
+
+/// ai-rm (read-only): AcceleratorProfiles, `airm_*` metrics (vendor fallback marked), placement.
+fn airm_panel(f: &mut Frame, area: Rect, app: &App) {
+    let airm = &app.snap.airm;
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Percentage(32),
+            Constraint::Percentage(28),
+        ])
+        .split(area);
+    let dim = Style::default().fg(C_DIM());
+    let selected = app
+        .order()
+        .get(app.selected)
+        .and_then(|&i| app.snap.accel.get(i))
+        .and_then(|a| airm.profile_for(a))
+        .map(|p| p.id.clone());
+
+    let profiles: Vec<Line> = match &airm.profiles {
+        None => vec![Line::styled("AcceleratorProfile CRD not installed", dim)],
+        Some(ps) if ps.is_empty() => vec![Line::styled("no AcceleratorProfile published", dim)],
+        Some(ps) => ps
+            .iter()
+            .map(|p| {
+                let mark = if selected.as_deref() == Some(p.id.as_str()) {
+                    "▶ "
+                } else {
+                    "  "
+                };
+                let peak = p.peak_label();
+                Line::from(vec![
+                    Span::raw(mark),
+                    Span::styled(truncw(&p.id, 24), Style::default().fg(C_ACC())),
+                    Span::raw(format!(
+                        " {} {} {:.0}GB {}",
+                        p.vendor,
+                        p.model,
+                        p.memory_gb(),
+                        p.memory_kind
+                    )),
+                    Span::styled(
+                        if peak.is_empty() {
+                            " peak ?".to_string()
+                        } else {
+                            format!(" {peak}")
+                        },
+                        dim,
+                    ),
+                ])
+            })
+            .collect(),
+    };
+    f.render_widget(
+        Paragraph::new(profiles).block(block("ai-rm · AcceleratorProfile")),
+        cols[0],
+    );
+
+    let rows = crate::airm::metric_rows(airm, &app.snap);
+    let metrics: Vec<Line> = if rows.is_empty() {
+        vec![Line::styled("no airm_* series", dim)]
+    } else {
+        rows.iter()
+            .map(|r| {
+                Line::from(vec![
+                    Span::raw(if r.unit == "count" {
+                        format!("{} {:.0}", r.name, r.value)
+                    } else {
+                        format!("{} {:.1} {}", r.name, r.value, r.unit)
+                    }),
+                    Span::styled(
+                        if r.tags.is_empty() {
+                            format!(" [{}]", r.source)
+                        } else {
+                            format!(" {} [{}]", r.tags, r.source)
+                        },
+                        dim,
+                    ),
+                ])
+            })
+            .collect()
+    };
+    f.render_widget(
+        Paragraph::new(metrics)
+            .wrap(Wrap { trim: true })
+            .block(block("ai-rm · metrics")),
+        cols[1],
+    );
+
+    let decisions: Vec<Line> = match &airm.placement {
+        None => vec![Line::styled("no airm-placement ConfigMap", dim)],
+        Some(ds) if ds.is_empty() => vec![Line::styled("no placement decisions", dim)],
+        Some(ds) => ds
+            .iter()
+            .map(|d| {
+                let ids = if d.accelerator_ids.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    d.accelerator_ids.join(",")
+                };
+                let kv = if d.kv_transport.is_empty() {
+                    String::new()
+                } else {
+                    format!(" kv={}", d.kv_transport)
+                };
+                Line::from(vec![
+                    Span::styled(d.workload.clone(), Style::default().fg(C_ACC())),
+                    Span::raw(format!(" → {ids}{kv}")),
+                    Span::styled(format!(" — {}", d.reason), dim),
+                ])
+            })
+            .collect(),
+    };
+    f.render_widget(
+        Paragraph::new(decisions)
+            .wrap(Wrap { trim: true })
+            .block(block("ai-rm · placement (read-only)")),
+        cols[2],
     );
 }
 

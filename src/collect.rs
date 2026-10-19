@@ -402,6 +402,7 @@ pub struct Snapshot {
     pub prom_ok: bool, // Prometheus 도달 가능 여부(false 면 "가속기 없음"이 아니라 연결 문제)
     pub setup: SetupProbe, // 플랫폼 부트스트랩 전제조건(Setup 뷰)
     pub pvcs: Vec<String>, // 대상 ns 에 실존하는 PVC 이름들 — prefetch/compile 대상 검증에 사용(빈 벡터=미관측)
+    pub airm: crate::airm::Airm, // ai-rm v0.1 AcceleratorProfile·airm_* 지표·배치 결정(읽기 전용, 없으면 빈 값)
 }
 
 impl Snapshot {
@@ -1602,6 +1603,7 @@ pub async fn collect(cfg: &Config) -> Snapshot {
 
     // ---------- kube: deployments / pods / routes / gateway / epp ----------
     collect_kube(cfg, &mut snap, &vllm, &mut warn).await;
+    snap.airm = collect_airm(cfg, snap.prom_ok).await;
 
     // per-model perf: 런칭된 모든 모델(snap.models)을 seed 로 → 트래픽 없어도 표(–)에 표시.
     // Join deployment rows only through declared Service selector relationships.
@@ -2356,6 +2358,41 @@ async fn collect_node_npu(nodes: &mut [NodeInfo]) {
 }
 
 /// k8s/llm-d 이벤트(최근 40) → snap.events. collect_kube 에서 분리된 leaf 파서.
+/// ai-rm v0.1 sources (read-only). Each is optional: a missing CRD, ConfigMap or series is the
+/// normal state of a cluster without ai-rm and produces no warning.
+async fn collect_airm(cfg: &Config, prom_ok: bool) -> crate::airm::Airm {
+    use crate::airm;
+    let metrics_q = format!("{{__name__=~\"{}.+\"}}", airm::PROM_PREFIX);
+    let profile_args = ["get", airm::PROFILE_RESOURCE, "-o", "json"];
+    let placement_args = [
+        "get",
+        "configmap",
+        airm::PLACEMENT_CONFIGMAP,
+        "-n",
+        &cfg.airm_ns,
+        "--ignore-not-found",
+        "-o",
+        "json",
+    ];
+    let (profiles, placement, metrics) = tokio::join!(
+        kube::get_json(&profile_args),
+        kube::get_json(&placement_args),
+        async {
+            if prom_ok {
+                prom::query(&cfg.prom, &metrics_q).await.ok()
+            } else {
+                None
+            }
+        },
+    );
+    airm::Airm {
+        profiles: profiles.ok().map(|v| airm::parse_profiles(&v)),
+        // --ignore-not-found prints nothing for an absent ConfigMap → JSON parse error → None.
+        placement: placement.ok().map(|v| airm::parse_placement(&v)),
+        metrics: metrics.map(airm::parse_metrics).unwrap_or_default(),
+    }
+}
+
 async fn collect_events(cfg: &Config, snap: &mut Snapshot, warn: &mut Vec<String>) {
     let result = tracked_json(
         snap,
@@ -2603,6 +2640,12 @@ async fn collect_trainings(cfg: &Config, snap: &mut Snapshot, warn: &mut Vec<Str
                 metric.insert((m, sr.l("run").to_string()), sr.value);
             }
         }
+        // ai-rm v0.1: throughput under the shared name, keyed by run_id; preferred over the deprecated series.
+        if let Ok(rs) = prom::query(&cfg.prom, AIRM_TRAIN_TOK_S).await {
+            for sr in rs {
+                metric.insert(("airm_tok_s", sr.l("run_id").to_string()), sr.value);
+            }
+        }
     }
     let now = now_secs();
     for j in jobs["items"].as_array().into_iter().flatten() {
@@ -2643,12 +2686,15 @@ async fn collect_trainings(cfg: &Config, snap: &mut Snapshot, warn: &mut Vec<Str
             step: get("npu_lora_step"),
             steps_planned: get("npu_lora_steps_planned"),
             loss: get("npu_lora_loss"),
-            tokens_per_s: get("npu_lora_tokens_per_second"),
+            tokens_per_s: get("airm_tok_s").or(get("npu_lora_tokens_per_second")),
             run,
         });
     }
     snap.trainings.sort_by_key(|t| t.age_secs);
 }
+
+/// npu-lora training throughput under the rm-core v0.1 name (`npu_lora_tokens_per_second` is its deprecated alias).
+const AIRM_TRAIN_TOK_S: &str = r#"airm_tok_s{component="npu-lora"}"#;
 
 /// 진행/최근 컴파일 Job(`compile-*`)과 프리페치 Job(`prefetch-*`) → snap.compiles. 없으면 빈 값.
 /// 상태·경과·(완료 시)소요 + 활성 Job 은 파드 로그 마지막 줄을 진행 힌트로.

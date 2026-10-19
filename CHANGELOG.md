@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### ai-rm protocol v0.1 (read-only, 2026-10-19)
+- Infra ▸ Devices shows an ai-rm panel when the cluster has any ai-rm source: `AcceleratorProfile` (`airm.ai-computing.io/v1alpha1`) vendor·model·memory·peak with its source (the selected device's profile is marked), `airm_*` Prometheus series with rm-core v0.1 names and units (vendor-derived `tok_s`/`req_s`/`power_w`/`accelerators` shown as `[vendor]` when no airm series exists), and the decisions in ConfigMap `airm-placement` (`LMD_AIRM_NS`, default `llm-d`). The device PWR column prefers `airm_power_w{scope="card"}`. Without the CRD, series and ConfigMap the view is unchanged and nothing is warned. Write actions are unchanged.
+
 ### Failing containers explain themselves (2026-10-19)
 - Containers that are crash-looping, failing to pull, OOMKilled, or restarted in the last 10 minutes are found cluster-wide (from the pod list the inventory already reads) and shown with the line that explains them: the waiting message, the termination message, or — for a few pods per cycle, cached per restart — `logs --previous`. Fatal/panic lines win over later noise; logfmt `msg=… error=…` is reduced to its message.
 - Known causes get a fix: image without a build for the node's architecture (`exec format error`), inotify instances exhausted, disk full, config apiVersion or CLI flag rejected by the image (noting a floating tag), the node unable to reach the API server, OOMKilled, missing tag / denied pull. Failures on a NotReady node blame the node and sort last.
