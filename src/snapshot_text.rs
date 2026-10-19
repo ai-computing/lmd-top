@@ -173,6 +173,15 @@ pub fn render(s: &collect::Snapshot, cfg: &Config, hist: &[crate::history::Recor
                 .join(", ")
         );
     }
+    if !s.pod_problems.is_empty() {
+        line!("\n[failing containers] {}", s.pod_problems.len());
+        for p in &s.pod_problems {
+            line!("  ✗ {}", p.line());
+        }
+    }
+    for d in &s.image_drift {
+        line!("  ⚠ {}", d.line());
+    }
     line!("\n[pods] {}", s.pods.len());
     for p in &s.pods {
         line!(

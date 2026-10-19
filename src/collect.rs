@@ -371,6 +371,10 @@ pub struct Snapshot {
     pub compiles: Vec<CompileJob>, // 진행/최근 컴파일 Job(compile-*) — Deploy 뷰 모니터 패널
     pub trainings: Vec<TrainRun>,  // LoRA 학습 Job(npu-lora) + npu_lora_* 지표
     pub pods: Vec<PodRow>,
+    /// Failing containers cluster-wide, with the log line that explains them (`pod_health`).
+    pub pod_problems: Vec<crate::pod_health::PodProblem>,
+    /// Floating image tags running as more than one build.
+    pub image_drift: Vec<crate::pod_health::ImageDrift>,
     pub events: Vec<EventRow>,
     pub routes: Vec<Route>,
     pub objectives: Vec<Objective>,
@@ -1645,13 +1649,17 @@ pub async fn collect(cfg: &Config) -> Snapshot {
 
     // ---------- 가속기 재고(런처 솔버용) ----------
     let mut inventory_errors = Vec::new();
-    collect_inventory(
+    let health = collect_inventory(
         &mut snap.inventory,
         &mut snap.node_alloc,
         &mut snap.node_capacity,
         &mut inventory_errors,
     )
     .await;
+    if let Some((problems, drift, nodes)) = health {
+        snap.pod_problems = explain_with_logs(problems, &nodes).await;
+        snap.image_drift = drift;
+    }
 
     snap.sources.insert(
         "inventory".into(),
@@ -1714,7 +1722,7 @@ async fn collect_inventory(
     node_alloc: &mut BTreeMap<String, BTreeMap<String, i64>>,
     node_capacity: &mut BTreeMap<String, BTreeMap<String, i64>>,
     warn: &mut Vec<String>,
-) {
+) -> Option<PodHealth> {
     inv.clear();
     node_alloc.clear();
     node_capacity.clear();
@@ -1722,6 +1730,18 @@ async fn collect_inventory(
         kube::get_json(&["get", "nodes", "-o", "json"]),
         kube::get_json(&["get", "pods", "-A", "-o", "json"]),
     );
+    // The same cluster-wide lists answer "which containers are failing, and why".
+    let health = match (&nodes, &pods) {
+        (Ok(nodes), Ok(pods)) => {
+            let facts = crate::pod_health::node_facts(nodes);
+            Some((
+                crate::pod_health::problems(pods, &facts, now_secs()),
+                crate::pod_health::drift(pods),
+                facts,
+            ))
+        }
+        _ => None,
+    };
     match nodes.and_then(|nodes| pods.and_then(|pods| crate::inventory::from_json(&nodes, &pods))) {
         Ok((totals, allocations, capacity)) => {
             *inv = totals;
@@ -1730,6 +1750,64 @@ async fn collect_inventory(
         }
         Err(error) => warn.push(format!("inventory unavailable: {error}")),
     }
+    health
+}
+
+type PodHealth = (
+    Vec<crate::pod_health::PodProblem>,
+    Vec<crate::pod_health::ImageDrift>,
+    BTreeMap<String, crate::pod_health::NodeFacts>,
+);
+
+/// Log lines already read, per container and restart count: a crash loop restarts every few
+/// minutes, and re-reading the same `--previous` log every cycle would multiply kubectl calls.
+static CRASH_CAUSES: std::sync::Mutex<BTreeMap<CrashKey, Option<String>>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Namespace, pod, container, restart count.
+type CrashKey = (String, String, String, i64);
+
+/// Logs fetched per cycle at most; the rest wait for later cycles (or come from the cache).
+const CRASH_LOG_FETCHES: usize = 4;
+
+/// Fill in causes the pod status did not carry, from `kubectl logs --previous`.
+async fn explain_with_logs(
+    mut problems: Vec<crate::pod_health::PodProblem>,
+    nodes: &BTreeMap<String, crate::pod_health::NodeFacts>,
+) -> Vec<crate::pod_health::PodProblem> {
+    let mut fetched = 0;
+    for p in problems.iter_mut().filter(|p| p.wants_log(nodes)) {
+        let key = (
+            p.namespace.clone(),
+            p.pod.clone(),
+            p.container.clone(),
+            p.cause_at_restart,
+        );
+        let cached = CRASH_CAUSES.lock().ok().and_then(|c| c.get(&key).cloned());
+        let cause = match cached {
+            Some(cause) => cause,
+            None if fetched < CRASH_LOG_FETCHES => {
+                fetched += 1;
+                let cause = kube::previous_log(&p.namespace, &p.pod, &p.container, 80)
+                    .await
+                    .as_deref()
+                    .and_then(crate::pod_health::cause_line);
+                if let Ok(mut c) = CRASH_CAUSES.lock() {
+                    if c.len() > 512 {
+                        c.clear();
+                    }
+                    c.insert(key, cause.clone());
+                }
+                cause
+            }
+            None => None,
+        };
+        if cause.is_some() {
+            p.cause = cause;
+            p.hint = crate::pod_health::hint(p, nodes.get(&p.node));
+        }
+    }
+    problems
 }
 
 /// What the Kubernetes API says about a node, independent of Prometheus.
@@ -2460,7 +2538,7 @@ fn parse_inventory(txt: &str) -> Vec<StoredModel> {
 
 /// k8s RFC3339 타임스탬프("2026-07-03T12:34:56Z")를 epoch 초로. 실패 시 None.
 /// chrono 의존 없이 고정 포맷만 파싱(k8s 는 항상 UTC 'Z').
-fn parse_k8s_ts(s: &str) -> Option<u64> {
+pub(crate) fn parse_k8s_ts(s: &str) -> Option<u64> {
     let s = s.trim_end_matches('Z');
     let (date, time) = s.split_once('T')?;
     let mut d = date.split('-');
