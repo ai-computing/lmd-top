@@ -1,6 +1,6 @@
 //! `--cast` — emit synthetic animation frames as asciicast v2 (no external recorder needed).
 //! Pipeline: keep the real snapshot structure, animate only the values with a sin waveform to render frames →
-*Demo recording omitted from the public export.*
+//! serialize per-cell ANSI (SGR) → asciicast events. Convert to a GIF with `agg <file>.cast <file>.gif`.
 //! Effects (tachyonfx) are off in the render path, so the GIF shows "data motion + view transitions".
 
 use crate::app::{App, View};
@@ -104,7 +104,7 @@ pub async fn run(cfg: &Config, out: &str) {
     let doc = format!("{}{}", header, events);
     match std::fs::write(out, &doc) {
         Ok(_) => eprintln!(
-*Demo recording omitted from the public export.*
+            "wrote {} ({} frames, {:.1}s) → agg {} <out>.gif",
             out,
             (t / DT) as u64,
             t,
