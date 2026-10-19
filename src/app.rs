@@ -1118,6 +1118,22 @@ pub fn snapshot_alerts(snap: &Snapshot) -> Vec<Alert> {
             msg: crate::coverage::gap_line(&gap),
         });
     }
+    for p in &snap.pod_problems {
+        out.push(Alert {
+            ts: now,
+            sev: Sev::Bad,
+            key: format!("pod:{}/{}/{}", p.namespace, p.pod, p.container),
+            msg: p.line(),
+        });
+    }
+    for d in &snap.image_drift {
+        out.push(Alert {
+            ts: now,
+            sev: Sev::Warn,
+            key: format!("image-drift:{}", d.image),
+            msg: d.line(),
+        });
+    }
     for a in &snap.accel {
         let base = format!("{}/{}/{}", a.disp(), a.node, a.id);
         if !a.alive {
@@ -1216,6 +1232,20 @@ pub fn diagnose(s: &Snapshot) -> (String, Option<Sev>) {
             format!("{}{more}", crate::coverage::gap_line(first)),
             Some(Sev::Bad),
         );
+    }
+    // A failing container on a healthy node is a fix to make; its log line says which.
+    // (Problems on NotReady nodes sort last and are the node's symptom, not the lead.)
+    let actionable: Vec<_> = s
+        .pod_problems
+        .iter()
+        .filter(|p| !p.hint.as_deref().is_some_and(|h| h.contains("NotReady")))
+        .collect();
+    if let Some(first) = actionable.first() {
+        let more = match actionable.len() {
+            1 => String::new(),
+            n => format!(" (+{} more failing)", n - 1),
+        };
+        return (format!("{}{more}", first.line()), Some(Sev::Bad));
     }
     let degraded = s.degraded_sources(now);
     if !degraded.is_empty() {

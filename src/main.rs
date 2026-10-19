@@ -32,6 +32,7 @@ mod metrics;
 mod mutation;
 mod performance;
 mod permissions;
+mod pod_health;
 use mutation::{run_mutation, MutationOutcome};
 mod ops;
 mod palette;

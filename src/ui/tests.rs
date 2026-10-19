@@ -505,3 +505,39 @@ fn devices_view_shows_airm_panel_only_when_airm_present() {
     assert!(screen.contains("accelerators 1 model=H100 [vendor]"));
     assert!(screen.contains("only free device"));
 }
+
+/// A crash-looping system pod outside the serving namespace: the status band and the Pods view
+/// show the log line and the fix, not a restart count.
+#[test]
+fn crash_loop_shows_its_cause_and_fix() {
+    let _guard = RENDER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut app = App::new();
+    app.snap.ts = crate::collect::now_secs();
+    app.snap.pod_problems.push(crate::pod_health::PodProblem {
+        namespace: "rbln-system".into(),
+        pod: "rbln-npu-operator-controller-manager-x".into(),
+        container: "manager".into(),
+        init: false,
+        node: "gb10-node-2".into(),
+        state: "CrashLoopBackOff".into(),
+        restarts: 40,
+        exit_code: Some(255),
+        image: "rebellions/rbln-npu-operator:v0.2.0".into(),
+        floating_tag: None,
+        cause: Some("exec /manager: exec format error".into()),
+        hint: Some("image has no arm64 build — pin nodeSelector kubernetes.io/arch".into()),
+        cause_at_restart: 40,
+    });
+    let status = render(&app, 160, 40);
+    assert!(
+        status.contains("CrashLoopBackOff ×40 — exec /manager: exec format error"),
+        "status band leads with the failing container:\n{status}"
+    );
+    app.view = View::Pods;
+    let pods = render(&app, 200, 40);
+    assert!(
+        pods.contains("Failing containers (all namespaces)")
+            && pods.contains("image has no arm64 build"),
+        "Pods view lists it with the fix:\n{pods}"
+    );
+}
