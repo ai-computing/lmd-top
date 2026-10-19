@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Failing containers explain themselves (2026-10-19)
+- Containers that are crash-looping, failing to pull, OOMKilled, or restarted in the last 10 minutes are found cluster-wide (from the pod list the inventory already reads) and shown with the line that explains them: the waiting message, the termination message, or — for a few pods per cycle, cached per restart — `logs --previous`. Fatal/panic lines win over later noise; logfmt `msg=… error=…` is reduced to its message.
+- Known causes get a fix: image without a build for the node's architecture (`exec format error`), inotify instances exhausted, disk full, config apiVersion or CLI flag rejected by the image (noting a floating tag), the node unable to reach the API server, OOMKilled, missing tag / denied pull. Failures on a NotReady node blame the node and sort last.
+- Floating image tags (`:latest`, `:main`, untagged …) running as more than one digest are reported as image drift.
+- Shown in the Status band (actionable failures only), a Pods view panel covering all namespaces, alerts, `--snapshot` (`[failing containers]`) and `--json` (`failing_containers`, `image_drift`). Regression tests replay the 2026-10-14 EPP, inotify and arm64-operator incidents and the 2026-10-19 cilium/NotReady case.
+
 ### Furiosa SDK 2026.4 readiness (2026-10-16)
 - The default furiosa-llm image for compile, serve and training Jobs is pinned to `furiosaai/furiosa-llm:2026.3.0` (`accel::furiosa::DEFAULT_IMAGE`) instead of `:latest`. 2026.4 removed `serve --tensor-parallel-size` and legacy artifacts, so a floating tag would break existing manifests on their next restart.
 - Furiosa serve manifests pass `--tensor-parallel-size` only to images before 2026.4; for 2026.4+ (and unversioned tags, which will become 2026.4) TP comes from the FXB artifact. Measured on one RNGD with Qwen3-4B-FP8: 2026.4 serves +27–29% tok/s over 2026.3 (106→137 c1, 1146→1459 c16), so moving to it is a matter of setting `LMD_COMPILE_IMAGE_FURIOSA` once a 2026.4 image is published.

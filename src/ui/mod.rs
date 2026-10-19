@@ -1321,6 +1321,47 @@ fn models_table<'a>(app: &'a App, title: &'a str) -> Table<'static> {
 
 // ── Pods ───────────────────────────────────────────────
 fn view_pods(f: &mut Frame, area: Rect, app: &App) {
+    // Failing containers anywhere in the cluster, with the line that explains them: the
+    // operator, exporter or CNI pod that broke usually lives outside the serving namespace.
+    let failing = app.snap.pod_problems.len() + app.snap.image_drift.len();
+    let area = if failing == 0 {
+        area
+    } else {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(6),
+                Constraint::Length((failing as u16).min(8) + 2),
+            ])
+            .split(area);
+        let mut lines: Vec<Line> = app
+            .snap
+            .pod_problems
+            .iter()
+            .map(|p| {
+                let on_down_node = p.hint.as_deref().is_some_and(|h| h.contains("NotReady"));
+                Line::from(Span::styled(
+                    format!("✗ {}", p.line()),
+                    Style::default().fg(if on_down_node { C_WARN() } else { C_BAD() }),
+                ))
+            })
+            .collect();
+        lines.extend(app.snap.image_drift.iter().map(|d| {
+            Line::from(Span::styled(
+                format!("⚠ {}", d.line()),
+                Style::default().fg(C_WARN()),
+            ))
+        }));
+        f.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" Failing containers (all namespaces) · {failing} ")),
+            ),
+            split[1],
+        );
+        split[0]
+    };
     let order = app.order();
     let rows: Vec<Row> = order
         .iter()

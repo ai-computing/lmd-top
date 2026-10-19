@@ -183,6 +183,29 @@ pub async fn log_tail(ns: &str, pod: &str, lines: u32) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Log of a container's previous (crashed) instance, for explaining a crash loop.
+pub async fn previous_log(ns: &str, pod: &str, container: &str, lines: u32) -> Option<String> {
+    let mut cmd = command().ok()?;
+    cmd.args([
+        "logs",
+        pod,
+        "-n",
+        ns,
+        "-c",
+        container,
+        "--previous",
+        &format!("--tail={}", lines),
+        "--request-timeout=6s",
+    ]);
+    let out = run(cmd, "logs --previous", Duration::from_secs(10))
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Container exit code of a Job's pod, when it has terminated.
 pub async fn pod_exit_code(ns: &str, pod: &str) -> Option<i32> {
     let v = get_json(&["get", "pod", pod, "-n", ns, "-o", "json"])
