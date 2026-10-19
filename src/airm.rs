@@ -192,13 +192,13 @@ pub struct Decision {
 }
 
 /// Parse ConfigMap `airm-placement`. Two layouts are read:
-/// - llm-d-setup's documented one: key `decisions.json` holding
+/// - hetero-llm-d's documented one: key `decisions.json` holding
 ///   `{protocol, generation, placement, decisions: [{pool, workload: {kind, ...}, acceleratorIds,
 ///   kvTransport, reason}]}`; each decision is shown as `<pool>/<kind>`.
 /// - one key per workload whose value is a `PlacementDecision`
 ///   `{accelerator_ids, kv_transport, reason}` (camelCase accepted too).
 ///
-/// An empty ConfigMap or an empty `decisions` list (the v0.1 llm-d-setup default) yields no
+/// An empty ConfigMap or an empty `decisions` list (the v0.1 hetero-llm-d default) yields no
 /// decisions. A value that does not parse is kept with the parse failure as its reason, so a bad
 /// write stays visible.
 pub fn parse_placement(cm: &serde_json::Value) -> Vec<Decision> {

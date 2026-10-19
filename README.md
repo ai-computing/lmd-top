@@ -276,7 +276,7 @@ project, and `:Routing policy` opens the configuration and rollout preview form.
 
 lmd-top is the **`l5-ops` layer, kind `tool`** of [ai-rm](https://github.com/ai-computing/ai-rm) and its observation
 console; metadata is in [`ai-rm.yaml`](ai-rm.yaml). The old rm_monitor role was split: the monitoring stack
-(Prometheus, exporters, Grafana dashboards) moved to [llm-d-setup](https://github.com/ai-computing/llm-d-setup)
+(Prometheus, exporters, Grafana dashboards) moved to [hetero-llm-d](https://github.com/ai-computing/hetero-llm-d)
 `monitoring/` (L4) and load generation to rm-bench (L5). lmd-top reads what that stack collects; it does not import
 rm-core, it reads rm-core formats.
 
