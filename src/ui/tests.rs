@@ -474,6 +474,38 @@ fn evicted_vendor_devices_are_listed_not_dropped() {
     );
 }
 
+#[test]
+fn devices_view_shows_airm_panel_only_when_airm_present() {
+    let _guard = RENDER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut app = missing_metrics();
+    app.view = View::Accel;
+    let plain = render(&app, 160, 40);
+    assert!(!plain.contains("ai-rm"), "no ai-rm source → view unchanged");
+
+    let profiles = serde_json::json!({"items": [{"spec": {
+        "id": "node-a/nvidia:0", "node": "node-a", "vendor": "nvidia", "model": "H100",
+        "memoryBytes": 80000000000u64, "memoryKind": "hbm",
+        "peakTflops": {"bf16": "989"}, "peakSource": "datasheet"
+    }}]});
+    app.snap.airm = crate::airm::Airm {
+        profiles: Some(crate::airm::parse_profiles(&profiles)),
+        metrics: Vec::new(),
+        placement: Some(crate::airm::parse_placement(&serde_json::json!({"data": {
+            "decode": r#"{"accelerator_ids": ["node-a/nvidia:0"], "reason": "only free device"}"#
+        }}))),
+    };
+    let screen = render(&app, 160, 40);
+    assert!(screen.contains("ai-rm · AcceleratorProfile"));
+    assert!(
+        screen.contains("▶ node-a/nvidia:0"),
+        "selected device's profile is marked"
+    );
+    assert!(screen.contains("bf16 989 TF (datasheet)"));
+    // no airm_* series → vendor-derived value, marked as such
+    assert!(screen.contains("accelerators 1 model=H100 [vendor]"));
+    assert!(screen.contains("only free device"));
+}
+
 /// A crash-looping system pod outside the serving namespace: the status band and the Pods view
 /// show the log line and the fix, not a restart count.
 #[test]
