@@ -16,9 +16,8 @@ Kubernetes; it stores no data of its own.
 
 ## Demo
 
-*Demo recording omitted from the public history.*
-
-*Demo recording omitted from the public export.*
+Record a demo locally with `lmd-top --cast && agg docs/demo.cast lmd-top.gif` (soft theme, live braille
+timelines and cross-layer drill-down, rendered from synthetic data).
 
 ## Highlights
 

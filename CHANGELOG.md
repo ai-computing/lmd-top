@@ -121,7 +121,7 @@
 ## [0.21.0]
 ### Added — 모델 상세 pivot 미리보기 + 데모 asciicast 생성
 - **pivot 미리보기**: 모델 상세에서 pivot(p/i/r/e)이 이제 키 힌트뿐 아니라 **대상의 핵심 정보를 인라인 preview**로 — pods(수/running/이름), infra(디바이스·util), route, epp 경유 여부. 키 누르면 이동.
-*Demo recording omitted from the public export.*
+- **`--cast [out.cast]`**: 합성으로 값이 움직이는 프레임을 asciicast v2 로 출력(외부 녹화 도구 불필요). soft 테마·실측 구조 기반. `agg out.cast out.gif` 로 GIF 변환.
 - Model 상세 텍스트 패널 높이를 내용에 맞춰 가변화.
 
 ## [0.20.0]
