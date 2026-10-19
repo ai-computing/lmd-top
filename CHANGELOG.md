@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### ai-rm protocol v0.1 (read-only, 2026-10-19)
+- Infra ▸ Devices shows an ai-rm panel when the cluster has any ai-rm source: `AcceleratorProfile` (`airm.ai-computing.io/v1alpha1`) vendor·model·memory·peak with its source (the selected device's profile is marked), `airm_*` Prometheus series with rm-core v0.1 names and units (vendor-derived `tok_s`/`req_s`/`power_w`/`accelerators` shown as `[vendor]` when no airm series exists), and the decisions in ConfigMap `airm-placement` (`LMD_AIRM_NS`, default `llm-d`). The device PWR column prefers `airm_power_w{scope="card"}`. Without the CRD, series and ConfigMap the view is unchanged and nothing is warned. Write actions are unchanged.
+
 ### Furiosa SDK 2026.4 readiness (2026-10-16)
 - The default furiosa-llm image for compile, serve and training Jobs is pinned to `furiosaai/furiosa-llm:2026.3.0` (`accel::furiosa::DEFAULT_IMAGE`) instead of `:latest`. 2026.4 removed `serve --tensor-parallel-size` and legacy artifacts, so a floating tag would break existing manifests on their next restart.
 - Furiosa serve manifests pass `--tensor-parallel-size` only to images before 2026.4; for 2026.4+ (and unversioned tags, which will become 2026.4) TP comes from the FXB artifact. Measured on one RNGD with Qwen3-4B-FP8: 2026.4 serves +27–29% tok/s over 2026.3 (106→137 c1, 1146→1459 c16), so moving to it is a matter of setting `LMD_COMPILE_IMAGE_FURIOSA` once a 2026.4 image is published.

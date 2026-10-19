@@ -12,6 +12,7 @@ pub struct Config {
     pub interval_full: u64, // full collection interval (seconds)
     pub interval_fast: u64, // fast-tier (accelerator/node) interval (seconds)
     pub theme: usize,       // startup theme: 0 default·1 high-contrast·2 colorblind·3 soft
+    pub airm_ns: String,    // namespace of ai-rm ConfigMap `airm-placement` (read-only)
 }
 
 impl Default for Config {
@@ -51,6 +52,7 @@ impl Default for Config {
             interval_full: u("LMD_INTERVAL", "interval_full", 3).max(1),
             interval_fast: u("LMD_FAST_INTERVAL", "interval_fast", 1).max(1),
             theme,
+            airm_ns: s("LMD_AIRM_NS", "airm_namespace", "llm-d"),
         }
     }
 }
