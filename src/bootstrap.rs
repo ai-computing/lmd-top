@@ -109,6 +109,7 @@ mod tests {
             interval_full: 3,
             interval_fast: 1,
             theme: 3,
+            airm_ns: "llm-d".into(),
         }
     }
     #[test]
