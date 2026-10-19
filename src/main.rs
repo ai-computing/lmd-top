@@ -144,7 +144,7 @@ ENVIRONMENT:
     LMD_PROM         Prometheus host:port
     LMD_NS           namespace (default: llm-serving)
     LMD_GRAFANA      Grafana base URL (opened via the `:graf` palette command)
-    LMD_AIRM_NS      namespace of the ai-rm ConfigMap airm-placement (default: llm-d)
+    LMD_AIRM_NS      namespace of the ai-rm ConfigMap airm-placement (default: LMD_NS)
     LMD_THEME        startup theme: soft | default | high-contrast | colorblind
     LMD_AUDIT        audit log path (default: ~/.config/lmd-top/audit.log)
     LMD_HISTORY      compile/serving history path (default: ~/.config/lmd-top/history.jsonl)
