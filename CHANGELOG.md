@@ -7,6 +7,13 @@
 ### ai-rm protocol v0.1 (read-only, 2026-10-19)
 - Infra ▸ Devices shows an ai-rm panel when the cluster has any ai-rm source: `AcceleratorProfile` (`airm.ai-computing.io/v1alpha1`) vendor·model·memory·peak with its source (the selected device's profile is marked), `airm_*` Prometheus series with rm-core v0.1 names and units (vendor-derived `tok_s`/`req_s`/`power_w`/`accelerators` shown as `[vendor]` when no airm series exists), and the decisions in ConfigMap `airm-placement` (`LMD_AIRM_NS`, default `llm-d`). The device PWR column prefers `airm_power_w{scope="card"}`. Without the CRD, series and ConfigMap the view is unchanged and nothing is warned. Write actions are unchanged.
 
+### Failing containers explain themselves (2026-10-19)
+- Containers that are crash-looping, failing to pull, OOMKilled, or restarted in the last 10 minutes are found cluster-wide (from the pod list the inventory already reads) and shown with the line that explains them: the waiting message, the termination message, or — for a few pods per cycle, cached per restart — `logs --previous`. Fatal/panic lines win over later noise; logfmt `msg=… error=…` is reduced to its message.
+- Known causes get a fix: image without a build for the node's architecture (`exec format error`), inotify instances exhausted, disk full, config apiVersion or CLI flag rejected by the image (noting a floating tag), the node unable to reach the API server, OOMKilled, missing tag / denied pull. Failures on a NotReady node blame the node and sort last.
+- Floating image tags (`:latest`, `:main`, untagged …) running as more than one digest are reported as image drift.
+- Generated EPP Deployments use the endpoint-picker image pinned by digest (the build the cluster runs and the emitted `llm-d.ai/v1alpha1` config was verified against) instead of the moving `:main` tag.
+- Shown in the Status band (actionable failures only), a Pods view panel covering all namespaces, alerts, `--snapshot` (`[failing containers]`) and `--json` (`failing_containers`, `image_drift`). Regression tests replay the 2026-10-14 EPP, inotify and arm64-operator incidents and the 2026-10-19 cilium/NotReady case.
+
 ### Furiosa SDK 2026.4 readiness (2026-10-16)
 - The default furiosa-llm image for compile, serve and training Jobs is pinned to `furiosaai/furiosa-llm:2026.3.0` (`accel::furiosa::DEFAULT_IMAGE`) instead of `:latest`. 2026.4 removed `serve --tensor-parallel-size` and legacy artifacts, so a floating tag would break existing manifests on their next restart.
 - Furiosa serve manifests pass `--tensor-parallel-size` only to images before 2026.4; for 2026.4+ (and unversioned tags, which will become 2026.4) TP comes from the FXB artifact. Measured on one RNGD with Qwen3-4B-FP8: 2026.4 serves +27–29% tok/s over 2026.3 (106→137 c1, 1146→1459 c16), so moving to it is a matter of setting `LMD_COMPILE_IMAGE_FURIOSA` once a 2026.4 image is published.
@@ -124,7 +131,7 @@
 ## [0.21.0]
 ### Added — 모델 상세 pivot 미리보기 + 데모 asciicast 생성
 - **pivot 미리보기**: 모델 상세에서 pivot(p/i/r/e)이 이제 키 힌트뿐 아니라 **대상의 핵심 정보를 인라인 preview**로 — pods(수/running/이름), infra(디바이스·util), route, epp 경유 여부. 키 누르면 이동.
-*Demo recording omitted from the public export.*
+- **`--cast [out.cast]`**: 합성으로 값이 움직이는 프레임을 asciicast v2 로 출력(외부 녹화 도구 불필요). soft 테마·실측 구조 기반. `agg out.cast out.gif` 로 GIF 변환.
 - Model 상세 텍스트 패널 높이를 내용에 맞춰 가변화.
 
 ## [0.20.0]

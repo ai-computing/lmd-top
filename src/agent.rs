@@ -47,6 +47,10 @@ struct AgentState {
     /// and devices nodes declare that no exporter reports. An empty `accelerators` with a
     /// non-null `unknown` means "not observed", never "no devices".
     accelerator_coverage: Coverage,
+    /// Failing containers cluster-wide with their log-derived cause and fix, and floating
+    /// image tags running as more than one build. Empty when nothing is failing.
+    failing_containers: Vec<crate::pod_health::PodProblem>,
+    image_drift: Vec<crate::pod_health::ImageDrift>,
     models: Vec<Mdl>,
     workloads: Vec<crate::workload::Identity>,
     pods: Vec<Pod>,
@@ -663,6 +667,8 @@ fn build(s: &Snapshot, cfg: &Config) -> AgentState {
                 )
             })
             .collect(),
+        failing_containers: s.pod_problems.clone(),
+        image_drift: s.image_drift.clone(),
         accelerator_coverage: Coverage {
             unknown: crate::coverage::unknown_reason(s, crate::collect::now_secs()),
             gaps: crate::coverage::gaps(s, crate::collect::now_secs()),
@@ -982,6 +988,8 @@ mod tests {
         assert!(v["route_configuration"]["inference_pool_backend_observed"].is_null());
         assert_eq!(v["route_configuration"]["runtime_verified"], false);
         assert!(v["accelerator_coverage"]["unknown"].is_null());
+        assert_eq!(v["failing_containers"], serde_json::json!([]));
+        assert_eq!(v["image_drift"], serde_json::json!([]));
         assert_eq!(v["accelerator_coverage"]["gaps"], serde_json::json!([]));
         for k in ["cluster", "nodes", "artifacts", "stored", "models", "pods"] {
             assert!(v.get(k).is_some(), "top-level key '{}' present", k);

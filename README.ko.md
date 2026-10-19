@@ -17,9 +17,7 @@
 
 ## 데모
 
-*Demo recording omitted from the public history.*
-
-*Demo recording omitted from the public export.*
+데모는 로컬에서 `lmd-top --cast && agg docs/demo.cast lmd-top.gif`로 만든다(soft 테마, 실시간 braille 타임라인, 계층 간 드릴다운, 합성 데이터).
 
 ## 주요 기능
 

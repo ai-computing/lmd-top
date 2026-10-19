@@ -99,7 +99,7 @@ if [ "$FROM_SOURCE" = 1 ]; then
   mv -f "$staged" "$BIN_DIR/lmd-top"
   if [ "$WITH_DEMO" = 1 ]; then
     have agg || cargo install --git https://github.com/asciinema/agg
-*Demo recording omitted from the public export.*
+    "$BIN_DIR/lmd-top" --cast docs/demo.cast && agg docs/demo.cast docs/demo-local.gif
   fi
   green "✓ installed: $BIN_DIR/lmd-top"
   echo "  next: $BIN_DIR/lmd-top --init"
