@@ -191,59 +191,79 @@ pub struct Decision {
     pub reason: String,
 }
 
-/// Parse ConfigMap `airm-placement`. Each data key is a workload; its value is a JSON (or YAML)
-/// `PlacementDecision` — `{accelerator_ids, kv_transport, reason}` (camelCase accepted too).
-/// An empty ConfigMap (the v0.1 llm-d-setup default) yields no decisions. A value that does
-/// not parse is kept with the parse failure as its reason, so a bad write stays visible.
+/// Parse ConfigMap `airm-placement`. Two layouts are read:
+/// - llm-d-setup's documented one: key `decisions.json` holding
+///   `{protocol, generation, placement, decisions: [{pool, workload: {kind, ...}, acceleratorIds,
+///   kvTransport, reason}]}`; each decision is shown as `<pool>/<kind>`.
+/// - one key per workload whose value is a `PlacementDecision`
+///   `{accelerator_ids, kv_transport, reason}` (camelCase accepted too).
+///
+/// An empty ConfigMap or an empty `decisions` list (the v0.1 llm-d-setup default) yields no
+/// decisions. A value that does not parse is kept with the parse failure as its reason, so a bad
+/// write stays visible.
 pub fn parse_placement(cm: &serde_json::Value) -> Vec<Decision> {
     let Some(data) = cm["data"].as_object() else {
         return Vec::new();
     };
-    let mut out: Vec<Decision> = data
-        .iter()
-        .map(|(workload, raw)| {
-            let raw = raw.as_str().unwrap_or_default();
-            let parsed: Option<serde_json::Value> = serde_json::from_str(raw)
-                .ok()
-                .or_else(|| serde_yaml::from_str(raw).ok())
-                .filter(serde_json::Value::is_object);
-            let Some(v) = parsed else {
-                return Decision {
-                    workload: workload.clone(),
-                    accelerator_ids: Vec::new(),
-                    kv_transport: String::new(),
-                    reason: "unparsable decision".into(),
+    let mut out: Vec<Decision> = Vec::new();
+    for (key, raw) in data {
+        let raw = raw.as_str().unwrap_or_default();
+        let parsed: Option<serde_json::Value> = serde_json::from_str(raw)
+            .ok()
+            .or_else(|| serde_yaml::from_str(raw).ok())
+            .filter(serde_json::Value::is_object);
+        let Some(v) = parsed else {
+            out.push(Decision {
+                workload: key.clone(),
+                accelerator_ids: Vec::new(),
+                kv_transport: String::new(),
+                reason: "unparsable decision".into(),
+            });
+            continue;
+        };
+        if let Some(list) = v.get("decisions").and_then(serde_json::Value::as_array) {
+            for d in list.iter().filter(|d| d.is_object()) {
+                let kind = d["workload"]["kind"].as_str().unwrap_or("?");
+                let workload = match d["pool"].as_str() {
+                    Some(pool) if !pool.is_empty() => format!("{pool}/{kind}"),
+                    _ => kind.to_string(),
                 };
-            };
-            let field = |snake: &str, camel: &str| {
-                v.get(snake)
-                    .or_else(|| v.get(camel))
-                    .cloned()
-                    .unwrap_or_default()
-            };
-            Decision {
-                workload: workload.clone(),
-                accelerator_ids: field("accelerator_ids", "acceleratorIds")
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                kv_transport: field("kv_transport", "kvTransport")
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string(),
-                reason: field("reason", "reason")
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string(),
+                out.push(decision_from(workload, d));
             }
-        })
-        .collect();
+        } else {
+            out.push(decision_from(key.clone(), &v));
+        }
+    }
     out.sort_by(|a, b| a.workload.cmp(&b.workload));
     out
+}
+
+fn decision_from(workload: String, v: &serde_json::Value) -> Decision {
+    let field = |snake: &str, camel: &str| {
+        v.get(snake)
+            .or_else(|| v.get(camel))
+            .cloned()
+            .unwrap_or_default()
+    };
+    Decision {
+        workload,
+        accelerator_ids: field("accelerator_ids", "acceleratorIds")
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        kv_transport: field("kv_transport", "kvTransport")
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        reason: field("reason", "reason")
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    }
 }
 
 /// One `airm_*` sample, with only protocol tags kept.
@@ -576,6 +596,25 @@ mod tests {
         assert_eq!(d[2].accelerator_ids, vec!["node-b/nvidia:0".to_string()]);
         // the v0.1 default is an empty ConfigMap
         assert!(parse_placement(&json!({"metadata": {"name": "airm-placement"}})).is_empty());
+    }
+
+    #[test]
+    fn placement_configmap_reads_llm_d_setup_decisions_document() {
+        let doc = r#"{"protocol": "0.1", "generation": 1, "placement": "manual", "decisions": [
+            {"pool": "llama8b-pd-pool", "workload": {"kind": "prefill", "model": "m"},
+             "acceleratorIds": ["n/furiosa:0"], "kvTransport": "shm", "reason": "pinned"},
+            {"pool": "llama8b-pd-pool", "workload": {"kind": "decode", "model": "m"},
+             "acceleratorIds": ["n/furiosa:1"], "kvTransport": "shm", "reason": "next to prefill"}]}"#;
+        let got = parse_placement(&json!({"data": {"decisions.json": doc}}));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].workload, "llama8b-pd-pool/decode");
+        assert_eq!(got[0].accelerator_ids, vec!["n/furiosa:1".to_string()]);
+        assert_eq!(got[1].workload, "llama8b-pd-pool/prefill");
+        assert_eq!(got[1].kv_transport, "shm");
+        assert_eq!(got[1].reason, "pinned");
+        // the v0.1 default document has no decisions: nothing to show
+        let empty = r#"{"protocol": "0.1", "generation": 0, "updatedAt": null, "decisions": []}"#;
+        assert!(parse_placement(&json!({"data": {"decisions.json": empty}})).is_empty());
     }
 
     #[test]

@@ -235,7 +235,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'    # 설치 스크립트 �
 | `LMD_PROM` | Prometheus `host:port` (평문 HTTP, NodePort 또는 port-forward) |
 | `LMD_NS` | 모델 서버·EPP가 있는 네임스페이스 (기본 `llm-serving`) |
 | `LMD_GRAFANA` | Grafana 기본 URL (`:graf` 명령) |
-| `LMD_AIRM_NS` | ai-rm ConfigMap `airm-placement`의 네임스페이스 (기본 `llm-d`) |
+| `LMD_AIRM_NS` | ai-rm ConfigMap `airm-placement`의 네임스페이스 (기본 `LMD_NS`) |
 
 **ai-rm protocol v0.1 (읽기 전용).** Infra ▸ Devices 아래에 ai-rm 패널이 나온다: `AcceleratorProfile`(`airm.ai-computing.io/v1alpha1`)의 벤더·모델·메모리·peak(출처), Prometheus `airm_*` 지표(rm-core `metrics.py`의 이름·단위, 없으면 기존 vendor 값을 `[vendor]`로 표시), ConfigMap `airm-placement`의 배치 결정과 이유. 장치별 PWR 열은 `airm_power_w{scope="card"}`가 있으면 그 값을 쓴다. CRD·지표·ConfigMap이 모두 없으면 패널은 나오지 않는다. `airm-placement`의 각 data 키는 워크로드 이름, 값은 `{"accelerator_ids": [...], "kv_transport": "...", "reason": "..."}`(JSON 또는 YAML)이다.
 

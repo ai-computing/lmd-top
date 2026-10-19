@@ -45,14 +45,16 @@ impl Default for Config {
             "3" | "soft" | "catppuccin" => 3,
             _ => 0,
         };
+        let ns = s("LMD_NS", "namespace", "llm-serving");
         Config {
             prom: s("LMD_PROM", "prometheus", "localhost:9090"),
-            ns: s("LMD_NS", "namespace", "llm-serving"),
+            // llm-d-setup writes airm-placement into the llm-d namespace, so follow LMD_NS by default
+            airm_ns: s("LMD_AIRM_NS", "airm_namespace", &ns),
+            ns,
             grafana: s("LMD_GRAFANA", "grafana", "http://localhost:3000"),
             interval_full: u("LMD_INTERVAL", "interval_full", 3).max(1),
             interval_fast: u("LMD_FAST_INTERVAL", "interval_fast", 1).max(1),
             theme,
-            airm_ns: s("LMD_AIRM_NS", "airm_namespace", "llm-d"),
         }
     }
 }
