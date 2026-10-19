@@ -2562,6 +2562,12 @@ async fn collect_trainings(cfg: &Config, snap: &mut Snapshot, warn: &mut Vec<Str
                 metric.insert((m, sr.l("run").to_string()), sr.value);
             }
         }
+        // ai-rm v0.1: throughput under the shared name, keyed by run_id; preferred over the deprecated series.
+        if let Ok(rs) = prom::query(&cfg.prom, AIRM_TRAIN_TOK_S).await {
+            for sr in rs {
+                metric.insert(("airm_tok_s", sr.l("run_id").to_string()), sr.value);
+            }
+        }
     }
     let now = now_secs();
     for j in jobs["items"].as_array().into_iter().flatten() {
@@ -2602,12 +2608,15 @@ async fn collect_trainings(cfg: &Config, snap: &mut Snapshot, warn: &mut Vec<Str
             step: get("npu_lora_step"),
             steps_planned: get("npu_lora_steps_planned"),
             loss: get("npu_lora_loss"),
-            tokens_per_s: get("npu_lora_tokens_per_second"),
+            tokens_per_s: get("airm_tok_s").or(get("npu_lora_tokens_per_second")),
             run,
         });
     }
     snap.trainings.sort_by_key(|t| t.age_secs);
 }
+
+/// npu-lora training throughput under the rm-core v0.1 name (`npu_lora_tokens_per_second` is its deprecated alias).
+const AIRM_TRAIN_TOK_S: &str = r#"airm_tok_s{component="npu-lora"}"#;
 
 /// 진행/최근 컴파일 Job(`compile-*`)과 프리페치 Job(`prefetch-*`) → snap.compiles. 없으면 빈 값.
 /// 상태·경과·(완료 시)소요 + 활성 Job 은 파드 로그 마지막 줄을 진행 힌트로.
