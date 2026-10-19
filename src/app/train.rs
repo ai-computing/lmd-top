@@ -1,6 +1,6 @@
 //! LoRA training Job — `--plan train`.
 //!
-//! The trainer is npu-lora (upstream: `llm-d-setup/npu-lora`), vendored into
+//! The trainer is npu-lora (upstream: ai-computing/npu-train, package `npu-lora`), vendored into
 //! `assets/npu-lora/` by its `scripts/vendor-into-lmd-top.sh` and embedded here, so this
 //! binary alone can produce a runnable Job: the official furiosa-llm image already carries
 //! furiosa-torch, torch and transformers, and the package rides along as a ConfigMap.

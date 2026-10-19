@@ -266,7 +266,7 @@ dry-run은 적용 권한을 요구하지 않습니다. 이 모드는 조작 실�
 
 lmd-top은 [ai-rm](https://github.com/ai-computing/ai-rm)의 **`l5-ops` 계층, kind `tool`** 구성요소이자 관측 콘솔이며,
 메타데이터는 [`ai-rm.yaml`](ai-rm.yaml)에 있습니다. 예전 rm_monitor의 역할은 나뉘었습니다. 모니터링 스택(Prometheus,
-exporter, Grafana 대시보드)은 [llm-d-setup](https://github.com/ai-computing/llm-d-setup) `monitoring/`(L4)으로, 부하 도구는
+exporter, Grafana 대시보드)은 [hetero-llm-d](https://github.com/ai-computing/hetero-llm-d) `monitoring/`(L4)으로, 부하 도구는
 rm-bench(L5)로 옮겼습니다. lmd-top은 그 스택이 모은 지표를 읽습니다. rm-core를 import하지 않고 rm-core 형식을 읽습니다.
 
 **ai-rm 패널 (protocol v0.1, 읽기 전용).** 클러스터에 ai-rm 소스가 하나라도 있으면 Infra ▸ Devices 아래에 ai-rm 패널이 나옵니다.

@@ -48,7 +48,7 @@ impl Default for Config {
         let ns = s("LMD_NS", "namespace", "llm-serving");
         Config {
             prom: s("LMD_PROM", "prometheus", "localhost:9090"),
-            // llm-d-setup writes airm-placement into the llm-d namespace, so follow LMD_NS by default
+            // hetero-llm-d writes airm-placement into the llm-d namespace, so follow LMD_NS by default
             airm_ns: s("LMD_AIRM_NS", "airm_namespace", &ns),
             ns,
             grafana: s("LMD_GRAFANA", "grafana", "http://localhost:3000"),
