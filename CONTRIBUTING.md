@@ -2,6 +2,11 @@
 
 Thanks for your interest! Issues and pull requests are welcome.
 
+We follow the organization's [contributing workflow](https://github.com/ai-computing/.github/blob/main/CONTRIBUTING.md):
+Issue (problem, evidence, scope, done-when, owner) → purpose branch → PR with verification evidence → review and
+green checks → squash and merge → delete the branch. Small fixes can start at the PR. The sections below add what is
+specific to lmd-top.
+
 ## Reporting issues
 
 - For bugs, include the output of `lmd-top --doctor` (it summarizes which exporters and
