@@ -814,6 +814,7 @@ impl App {
         let images = Images {
             furiosa: self.img_furiosa.as_deref(),
             serving: self.img_serving.as_deref(),
+            rbln_host_site: self.rbln_host_site.as_deref(),
         };
 
         let mut manifest = serving::serving_manifest(&form, &plan, &images);

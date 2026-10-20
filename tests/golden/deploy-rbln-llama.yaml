@@ -67,7 +67,7 @@ spec:
           name: serve-meta-llama-llama-3-1-8b-instruct-serve-script
       - name: host-local-pkgs
         hostPath:
-          path: /home/user/.local/lib/python3.10/site-packages
+          path: /home/<user>/.local/lib/python3.10/site-packages
           type: Directory
       - name: host-sys-local-pkgs
         hostPath:
@@ -109,7 +109,7 @@ spec:
         - name: PORT
           value: '8000'
         - name: PYTHONPATH
-          value: /home/user/.local/lib/python3.10/site-packages:/host-sys-local-pkgs:/host-sys-pkgs
+          value: /home/<user>/.local/lib/python3.10/site-packages:/host-sys-local-pkgs:/host-sys-pkgs
         - name: PYTHONUNBUFFERED
           value: '1'
         - name: VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK
@@ -133,7 +133,7 @@ spec:
           mountPath: /scripts
           readOnly: true
         - name: host-local-pkgs
-          mountPath: /home/user/.local/lib/python3.10/site-packages
+          mountPath: /home/<user>/.local/lib/python3.10/site-packages
           readOnly: true
         - name: host-sys-local-pkgs
           mountPath: /host-sys-local-pkgs

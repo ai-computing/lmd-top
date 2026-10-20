@@ -1,5 +1,5 @@
-# title: provenance /home/user/rbln-gemma4-26b-a4b-tp4-s8192
-# Provenance probe — read /home/user/rbln-gemma4-26b-a4b-tp4-s8192 on node npu-node-1 (read-only)
+# title: provenance /home/<user>/rbln-gemma4-26b-a4b-tp4-s8192
+# Provenance probe — read /home/<user>/rbln-gemma4-26b-a4b-tp4-s8192 on node npu-node-1 (read-only)
 # Reads the toolchain the artifact recorded; changes nothing.
 # for deployment gemma4-rbln
 apiVersion: batch/v1
@@ -23,7 +23,7 @@ spec:
       volumes:
       - name: artifact
         hostPath:
-          path: /home/user/rbln-gemma4-26b-a4b-tp4-s8192
+          path: /home/<user>/rbln-gemma4-26b-a4b-tp4-s8192
           type: Directory
       containers:
       - name: read

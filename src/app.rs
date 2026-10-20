@@ -506,6 +506,9 @@ pub struct App {
     pub img_rbln: Option<String>, // LMD_COMPILE_IMAGE_RBLN — placeholder if absent
     pub img_furiosa: Option<String>, // LMD_COMPILE_IMAGE_FURIOSA — default accel::furiosa::DEFAULT_IMAGE
     pub img_serving: Option<String>, // LMD_SERVING_IMAGE — placeholder if absent
+    /// LMD_RBLN_HOST_SITE_PACKAGES — the RBLN node's user-level site-packages, mounted by the
+    /// hostPath fallback when the vendor stack was installed with `pip install --user`.
+    pub rbln_host_site: Option<String>,
     pub hist: HashMap<String, VecDeque<u64>>, // accel util history
     pub toast: Option<String>,
     pub detail: bool,    // whether to show the selected row's detail (drill-down)
@@ -706,6 +709,7 @@ impl App {
             img_furiosa: env("LMD_COMPILE_IMAGE_FURIOSA")
                 .or_else(|| Some(crate::accel::furiosa::DEFAULT_IMAGE.into())),
             img_serving: env("LMD_SERVING_IMAGE"),
+            rbln_host_site: env("LMD_RBLN_HOST_SITE_PACKAGES"),
             hist: HashMap::new(),
             toast: None,
             detail: false,

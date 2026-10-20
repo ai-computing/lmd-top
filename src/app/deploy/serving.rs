@@ -20,6 +20,8 @@ const STORE_PVC: &str = "model-store";
 pub struct Images<'a> {
     pub furiosa: Option<&'a str>,
     pub serving: Option<&'a str>,
+    /// The RBLN node's user-level site-packages (`LMD_RBLN_HOST_SITE_PACKAGES`), if any.
+    pub rbln_host_site: Option<&'a str>,
 }
 
 /// Inputs the caller has already normalised out of the form.
@@ -252,13 +254,13 @@ fn rbln(form: &DeployForm, plan: &ServePlan, images: &Images) -> Vendor {
         };
     }
 
-    // hostPath fallback: (volume name, host path, mount path).
-    let host = [
-        (
-            "host-local-pkgs",
-            "/home/user/.local/lib/python3.10/site-packages",
-            "/home/user/.local/lib/python3.10/site-packages",
-        ),
+    // hostPath fallback: (volume name, host path, mount path). The user-level site-packages is
+    // a site value (LMD_RBLN_HOST_SITE_PACKAGES) and is mounted at its own path when set.
+    let mut host: Vec<(&str, &str, &str)> = Vec::new();
+    if let Some(site) = images.rbln_host_site {
+        host.push(("host-local-pkgs", site, site));
+    }
+    host.extend([
         (
             "host-sys-local-pkgs",
             "/usr/local/lib/python3.10/dist-packages",
@@ -272,7 +274,12 @@ fn rbln(form: &DeployForm, plan: &ServePlan, images: &Images) -> Vendor {
         ("host-libs", "/usr/lib/x86_64-linux-gnu", "/host-libs"),
         ("host-rbln-lib", "/usr/lib", "/host-rbln-lib"),
         ("host-rbln-bin", "/usr/bin", "/host-rbln-bin"),
-    ];
+    ]);
+    let pythonpath = images
+        .rbln_host_site
+        .map(|site| format!("{site}:"))
+        .unwrap_or_default()
+        + "/host-sys-local-pkgs:/host-sys-pkgs";
     let cm_name = format!("{}-serve-script", plan.name);
     let mut volumes = vec![
         store_volume(),
@@ -312,10 +319,7 @@ fn rbln(form: &DeployForm, plan: &ServePlan, images: &Images) -> Vendor {
                     env_val("MOUNT", form.mount.clone()),
                     env_val("SERVED", plan.served.clone()),
                     env_val("PORT", plan.port.clone()),
-                    env_val(
-                        "PYTHONPATH",
-                        "/home/user/.local/lib/python3.10/site-packages:/host-sys-local-pkgs:/host-sys-pkgs",
-                    ),
+                    env_val("PYTHONPATH", pythonpath),
                     env_val("PYTHONUNBUFFERED", "1"),
                     env_val("VLLM_RBLN_NUM_DEVICES_PER_LOCAL_RANK", plan.devices.clone()),
                     env_val("LD_LIBRARY_PATH", "/host-rbln-lib:/host-libs"),

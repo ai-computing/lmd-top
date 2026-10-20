@@ -3183,8 +3183,8 @@ mod tests {
                 &[
                     (
                         "host-local-pkgs",
-                        "/home/user/.local/lib/python3.10/site-packages",
-                        "/home/user/.local/lib/python3.10/site-packages",
+                        "/home/<user>/.local/lib/python3.10/site-packages",
+                        "/home/<user>/.local/lib/python3.10/site-packages",
                     ),
                     (
                         "host-sys-local-pkgs",
@@ -3202,7 +3202,7 @@ mod tests {
                     (
                         "model",
                         "/model",
-                        "/home/user/rbln-gemma4-26b-a4b-tp4-s8192",
+                        "/home/<user>/rbln-gemma4-26b-a4b-tp4-s8192",
                     ),
                     ("shm", "/dev/shm", ""),
                 ],
@@ -3213,8 +3213,8 @@ mod tests {
                 &[
                     (
                         "local-pkgs",
-                        "/home/user/.local/lib/python3.10/site-packages",
-                        "/home/user/.local/lib/python3.10/site-packages",
+                        "/home/<user>/.local/lib/python3.10/site-packages",
+                        "/home/<user>/.local/lib/python3.10/site-packages",
                     ),
                     ("libs", "/host-libs", "/usr/lib/x86_64-linux-gnu"),
                     ("rbln-lib", "/host-rbln-lib", "/usr/lib"),
@@ -3222,11 +3222,11 @@ mod tests {
                     (
                         "app",
                         "/app",
-                        "/home/user/workspace/01_pd_disag/rngd_llmd",
+                        "/home/<user>/workspace/01_pd_disag/rngd_llmd",
                     ),
-                    ("hf", "/hf", "/home/user/.cache/huggingface"),
+                    ("hf", "/hf", "/home/<user>/.cache/huggingface"),
                     ("dshm", "/dev/shm", "/dev/shm"),
-                    ("artifacts", "/artifacts", "/home/user/rbln-llama8b-pd"),
+                    ("artifacts", "/artifacts", "/home/<user>/rbln-llama8b-pd"),
                 ],
                 "artifacts",
             ),
@@ -3238,9 +3238,9 @@ mod tests {
                     (
                         "app",
                         "/app",
-                        "/home/user/workspace/01_pd_disag/rngd_llmd",
+                        "/home/<user>/workspace/01_pd_disag/rngd_llmd",
                     ),
-                    ("hf", "/hf", "/home/user/.cache/huggingface"),
+                    ("hf", "/hf", "/home/<user>/.cache/huggingface"),
                     ("dshm", "/dev/shm", "/dev/shm"),
                     ("cfg", "/cfg", ""),
                 ],
@@ -3249,8 +3249,8 @@ mod tests {
             (
                 "ds4-v4flash-gb10",
                 &[
-                    ("ds4bin", "/ds4", "/home/user/ds4"),
-                    ("gguf", "/gguf", "/home/user/model-cache/ds4-gguf"),
+                    ("ds4bin", "/ds4", "/home/<user>/ds4"),
+                    ("gguf", "/gguf", "/home/<user>/model-cache/ds4-gguf"),
                     ("kv", "/tmp/ds4-kv", ""),
                     ("dshm", "/dev/shm", ""),
                 ],
@@ -3314,14 +3314,14 @@ mod tests {
             Some("/usr/lib/python3/dist-packages")
         ));
         assert!(is_system_mount(
-            "/home/user/.local/lib/python3.10/site-packages",
+            "/home/<user>/.local/lib/python3.10/site-packages",
             None
         ));
         assert!(is_system_mount("/dev/shm", None));
         // A real model directory under a home directory is not a system mount.
         assert!(!is_system_mount(
             "/model",
-            Some("/home/user/rbln-gemma4-26b-a4b-tp4-s8192")
+            Some("/home/<user>/rbln-gemma4-26b-a4b-tp4-s8192")
         ));
         assert!(!is_system_mount("/model-cache", None));
     }

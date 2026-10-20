@@ -234,10 +234,10 @@ mod tests {
     #[test]
     fn accepts_the_host_paths_this_cluster_actually_uses() {
         for p in [
-            "/home/user/rbln-gemma4-26b-a4b-tp4-s8192",
-            "/home/user/rbln-llama8b-pd",
-            "/home/user/model-cache/ds4-gguf",
-            "/home/user/.cache/huggingface",
+            "/home/<user>/rbln-gemma4-26b-a4b-tp4-s8192",
+            "/home/<user>/rbln-llama8b-pd",
+            "/home/<user>/model-cache/ds4-gguf",
+            "/home/<user>/.cache/huggingface",
         ] {
             assert_eq!(validate_host_path(p).as_deref(), Ok(p), "{}", p);
         }
@@ -258,7 +258,7 @@ mod tests {
             "llm-serving",
             "gemma4-rbln",
             "npu-node-1",
-            "/home/user/rbln-gemma4-26b-a4b-tp4-s8192",
+            "/home/<user>/rbln-gemma4-26b-a4b-tp4-s8192",
         );
         let v = job_of(&m);
         assert_eq!(
@@ -274,7 +274,7 @@ mod tests {
         );
         assert_eq!(
             pod["volumes"][0]["hostPath"]["path"].as_str(),
-            Some("/home/user/rbln-gemma4-26b-a4b-tp4-s8192")
+            Some("/home/<user>/rbln-gemma4-26b-a4b-tp4-s8192")
         );
         assert_eq!(
             pod["containers"][0]["volumeMounts"][0]["readOnly"].as_bool(),
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
         assert!(
-            !cmd[2].contains("/home/user"),
+            !cmd[2].contains("/home/<user>"),
             "the path must not be baked into the script"
         );
         assert!(cmd[2].contains("\"$DIR\""), "and must be expanded quoted");
