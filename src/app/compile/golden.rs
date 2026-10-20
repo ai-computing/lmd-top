@@ -422,9 +422,21 @@ fn rbln_host_fallback_assumes_no_user_site_when_unset() {
             .unwrap_or_else(|e| panic!("{}: {}", op, e))
             .1
         };
-        assert!(yaml.contains("hostPath"), "{}: still the hostPath fallback", op);
-        assert!(!yaml.contains("/home/"), "{}: no home directory assumed", op);
+        assert!(
+            yaml.contains("hostPath"),
+            "{}: still the hostPath fallback",
+            op
+        );
+        assert!(
+            !yaml.contains("/home/"),
+            "{}: no home directory assumed",
+            op
+        );
         assert!(!yaml.contains(".local/lib"), "{}: no user site mounted", op);
-        assert!(yaml.contains("PYTHONPATH"), "{}: system paths still set", op);
+        assert!(
+            yaml.contains("PYTHONPATH"),
+            "{}: system paths still set",
+            op
+        );
     }
 }

@@ -389,9 +389,7 @@ fn rbln_plan(host_stack: bool, form: &CompileForm, host_site: Option<&str>) -> C
         ("hp-lib", "/usr/lib", "/host-lib"),
         ("hp-bin", "/usr/bin", "/host-bin"),
     ]);
-    let pythonpath = host_site
-        .map(|site| format!("{site}:"))
-        .unwrap_or_default()
+    let pythonpath = host_site.map(|site| format!("{site}:")).unwrap_or_default()
         + "/host-sys:/host-lib/python3/dist-packages";
     ContainerPlan {
         recipe: (RECIPE_RBLN, "compile.py"),
