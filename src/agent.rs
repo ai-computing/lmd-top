@@ -1009,7 +1009,7 @@ mod tests {
             name: "vllm-rbln-koni-abc123".into(),
             phase: "Running".into(),
             ready: "1/1".into(),
-            node: "etri-001".into(),
+            node: "npu-node-1".into(),
             restarts: 2,
             age_secs: 3600,
         });
@@ -1028,7 +1028,7 @@ mod tests {
         assert_eq!(v["pods"][0]["name"], "vllm-rbln-koni-abc123");
         assert_eq!(v["pods"][0]["phase"], "Running");
         assert_eq!(v["pods"][0]["ready"], "1/1");
-        assert_eq!(v["pods"][0]["node"], "etri-001");
+        assert_eq!(v["pods"][0]["node"], "npu-node-1");
         assert_eq!(v["pods"][0]["restarts"], 2);
         assert_eq!(v["pods"][0]["age_secs"], 3600);
         assert!(

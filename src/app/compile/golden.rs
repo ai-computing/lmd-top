@@ -82,6 +82,8 @@ fn app() -> App {
     a.img_rbln = None;
     a.img_furiosa = Some(crate::accel::furiosa::DEFAULT_IMAGE.into());
     a.img_serving = None;
+    // Site value: the RBLN node's `pip install --user` site-packages, as on the reference cluster.
+    a.rbln_host_site = Some("/home/<user>/.local/lib/python3.10/site-packages".into());
     a.apply(fixture());
     a
 }
@@ -160,7 +162,7 @@ const CASES: &[(&str, &str, &str, &str)] = &[
         "probe-provenance",
         "probe",
         "",
-        "/home/gspark/rbln-gemma4-26b-a4b-tp4-s8192",
+        "/home/<user>/rbln-gemma4-26b-a4b-tp4-s8192",
     ),
 ];
 
@@ -190,7 +192,7 @@ fn generate(op: &str, vendor: &'static str, model: &str) -> Result<(String, Stri
         )),
         "probe" => Ok((
             format!("provenance {}", model),
-            crate::probe::provenance_manifest("llm-serving", "gemma4-rbln", "etri-001", model)
+            crate::probe::provenance_manifest("llm-serving", "gemma4-rbln", "npu-node-1", model)
                 .0
                 .to_yaml(),
         )),
@@ -398,5 +400,43 @@ fn manifests_carry_the_right_semantics() {
                 }
             }
         }
+    }
+}
+
+/// The user-level site-packages is a site value: without LMD_RBLN_HOST_SITE_PACKAGES the
+/// hostPath fallback mounts only the system Python locations and assumes no home directory.
+#[test]
+fn rbln_host_fallback_assumes_no_user_site_when_unset() {
+    for op in ["compile", "deploy"] {
+        let yaml = {
+            let _g = crate::audit::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let mut a = app();
+            a.rbln_host_site = None;
+            let model = "Qwen/Qwen2.5-0.5B-Instruct";
+            match op {
+                "compile" => a.plan_compile_for_model(model, "rbln", &[]),
+                _ => a.plan_deploy_for_model(model, "rbln", &[]),
+            }
+            .unwrap_or_else(|e| panic!("{}: {}", op, e))
+            .1
+        };
+        assert!(
+            yaml.contains("hostPath"),
+            "{}: still the hostPath fallback",
+            op
+        );
+        assert!(
+            !yaml.contains("/home/"),
+            "{}: no home directory assumed",
+            op
+        );
+        assert!(!yaml.contains(".local/lib"), "{}: no user site mounted", op);
+        assert!(
+            yaml.contains("PYTHONPATH"),
+            "{}: system paths still set",
+            op
+        );
     }
 }

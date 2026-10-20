@@ -63,6 +63,7 @@ pub fn build_compile_manifest(
     ns: &str,
     img_rbln: Option<&str>,
     img_furiosa: Option<&str>,
+    host_site: Option<&str>,
     nodes: &[NodeInfo],
 ) -> CompileManifestOutcome {
     let model_id = &form.model_id;
@@ -151,7 +152,7 @@ pub fn build_compile_manifest(
     } else if let Some(dir) = store_toolchain.clone() {
         rbln_store_plan(&dir, form)
     } else {
-        rbln_plan(rbln_host_stack, form)
+        rbln_plan(rbln_host_stack, form, host_site)
     };
 
     // Shared environment: where the weights come from and where the artifact goes.
@@ -350,7 +351,11 @@ fn rbln_store_plan(dir: &str, form: &CompileForm) -> ContainerPlan {
 }
 
 /// RBLN: optimum-rbln recipe. Without a registry image, borrow the node's own compiler stack.
-fn rbln_plan(host_stack: bool, form: &CompileForm) -> ContainerPlan {
+///
+/// `host_site` is the node's user-level site-packages (`LMD_RBLN_HOST_SITE_PACKAGES`), for
+/// nodes where the RBLN Python stack was installed with `pip install --user`. It is a site
+/// value, so nothing is assumed when it is unset: only the system locations are mounted.
+fn rbln_plan(host_stack: bool, form: &CompileForm, host_site: Option<&str>) -> ContainerPlan {
     let params = rbln_param_env(form);
     if !host_stack {
         return ContainerPlan {
@@ -370,12 +375,12 @@ fn rbln_plan(host_stack: bool, form: &CompileForm) -> ContainerPlan {
     }
     // hostPath fallback: a bare ubuntu image plus the node's python/rebel-compiler install.
     // tzdata is needed because pandas→pytz reads /usr/share/zoneinfo, which minimal images lack.
-    let host = [
-        (
-            "hp-local",
-            "/home/gspark/.local/lib/python3.10/site-packages",
-            "/home/gspark/.local/lib/python3.10/site-packages",
-        ),
+    // The user site is mounted at its own path so `.pth` files and RPATHs inside it resolve.
+    let mut host: Vec<(&str, &str, &str)> = Vec::new();
+    if let Some(site) = host_site {
+        host.push(("hp-local", site, site));
+    }
+    host.extend([
         (
             "hp-sys",
             "/usr/local/lib/python3.10/dist-packages",
@@ -383,7 +388,9 @@ fn rbln_plan(host_stack: bool, form: &CompileForm) -> ContainerPlan {
         ),
         ("hp-lib", "/usr/lib", "/host-lib"),
         ("hp-bin", "/usr/bin", "/host-bin"),
-    ];
+    ]);
+    let pythonpath = host_site.map(|site| format!("{site}:")).unwrap_or_default()
+        + "/host-sys:/host-lib/python3/dist-packages";
     ContainerPlan {
         recipe: (RECIPE_RBLN, "compile.py"),
         command: vec!["sh".into(), "/scripts/bootstrap.sh".into()],
@@ -391,10 +398,7 @@ fn rbln_plan(host_stack: bool, form: &CompileForm) -> ContainerPlan {
         extra_env: [
             vec![
                 env_val("HF_HOME", format!("{}/hub", STORE_MOUNT)),
-                env_val(
-                    "PYTHONPATH",
-                    "/home/gspark/.local/lib/python3.10/site-packages:/host-sys:/host-lib/python3/dist-packages",
-                ),
+                env_val("PYTHONPATH", pythonpath),
                 env_val("LD_LIBRARY_PATH", "/host-lib:/host-lib/x86_64-linux-gnu"),
                 env_val(
                     "PATH",

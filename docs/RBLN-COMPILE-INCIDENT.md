@@ -34,7 +34,7 @@ Traceback ...
 
 | 항목 | 값 |
 |---|---|
-| 노드 | `etri-001` (RBLN-CA22 ×4, 드라이버 3.0.0) |
+| 노드 | `npu-node-1` (RBLN-CA22 ×4, 드라이버 3.0.0) |
 | optimum-rbln | 0.11.0.post1 |
 | rebel-compiler | 0.11.0 |
 | transformers | 5.8.1 |
@@ -111,7 +111,7 @@ error: no model registry entry for architecture=Qwen2ForCausalLM, hidden_size=89
 ```
 InternalError: Check failed: (p.second != plevel) is false:
 Attribute target.rebel_descriptor of abs is already registered with same plevel=10
-  /home/gspark/.local/lib/python3.10/site-packages/tvm/librbln.so
+  /home/<user>/.local/lib/python3.10/site-packages/tvm/librbln.so
   tvm::OpRegEntry::UpdateAttr(...), tvm::runtime::detail::RebelException(...)
 ```
 
@@ -162,7 +162,7 @@ lmd-top 이 그 파일을 읽지 않았다.** 같은 실수가 반복되지 않�
 
 ## 검증된 스크립트를 찾았다 — 그리고 파라미터는 원인이 아니다
 
-노드 `etri-001` 에 **성공한 컴파일의 스크립트와 로그가 그대로 남아 있었다.** 처음에 봐야 했던 것이다.
+노드 `npu-node-1` 에 **성공한 컴파일의 스크립트와 로그가 그대로 남아 있었다.** 처음에 봐야 했던 것이다.
 
 ```python
 # ~/compile-koni-tp4.py  →  ~/rbln-KONI-Llama3.1-8B-Instruct-tp4-bs1-s8192 (동작 확인됨)
@@ -178,7 +178,7 @@ model = RBLNAutoModelForCausalLM.from_pretrained(
 2026-06-01 01:20:19 INFO [rebel-compiler] RBLN SDK compiler version: 0.10.2
 2026-06-01 01:20:19 WARNING [rebel-compiler] Could not determine the current machine's NPU. Skipping NPU mismatch check.
 2026-06-01 01:20:19 INFO [rebel-compiler] -- Tensor parallel size: 4
-...  [+] DONE → /home/gspark/rbln-KONI-Llama3.1-8B-Instruct-tp4-bs1-s8192
+...  [+] DONE → /home/<user>/rbln-KONI-Llama3.1-8B-Instruct-tp4-bs1-s8192
 ```
 
 **NPU 가 안 보이는 상태로도 컴파일이 끝났다.** 디바이스 가시성도, 이 클러스터도 원인이 아니다.
@@ -321,7 +321,7 @@ LMD_RBLN_TOOLCHAIN=/mnt/store/rbln-toolchain/0.10.2 lmd-top   # 그게 전부다
 
 ## 결정적 사실 — 동작하는 산출물이 스스로 버전을 기록하고 있다
 
-이 클러스터에서 **실제로 동작하는** RBLN 산출물(수동 컴파일, 노드 `/home/gspark/` 아래)의
+이 클러스터에서 **실제로 동작하는** RBLN 산출물(수동 컴파일, 노드 `/home/<user>/` 아래)의
 `rbln_config.json` 은 자신을 만든 버전을 담고 있다:
 
 ```json

@@ -171,6 +171,7 @@ impl App {
             &self.ns,
             self.img_rbln.as_deref(),
             self.img_furiosa.as_deref(),
+            self.rbln_host_site.as_deref(),
             &self.snap.nodes,
         ) {
             CompileManifestOutcome::Ready { title, yaml } => {

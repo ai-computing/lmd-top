@@ -452,7 +452,7 @@ fn evicted_vendor_devices_are_listed_not_dropped() {
         );
     }
     app.snap.nodes.push(NodeInfo {
-        name: "etri-001".into(),
+        name: "npu-node-1".into(),
         ready: true,
         pressure: true,
         pressure_kinds: vec!["DiskPressure".into()],
@@ -465,7 +465,7 @@ fn evicted_vendor_devices_are_listed_not_dropped() {
     });
     let text = render(&app, 140, 40);
     assert!(
-        text.contains("etri-001: RBLN 0/4 devices reporting — DiskPressure"),
+        text.contains("npu-node-1: RBLN 0/4 devices reporting — DiskPressure"),
         "status band names the gap and its cause:\n{text}"
     );
     assert!(
@@ -518,7 +518,7 @@ fn crash_loop_shows_its_cause_and_fix() {
         pod: "rbln-npu-operator-controller-manager-x".into(),
         container: "manager".into(),
         init: false,
-        node: "gx10-4744".into(),
+        node: "gb10-node-2".into(),
         state: "CrashLoopBackOff".into(),
         restarts: 40,
         exit_code: Some(255),

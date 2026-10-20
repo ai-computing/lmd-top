@@ -49,7 +49,7 @@ synthetic demos or narrowly scoped tests cannot prove real inference compatibili
   (Overview card/LED line, accelerator panel, Status band, alerts, `--snapshot`, `--json`
   `accelerator_coverage`) asks it instead of interpreting an empty list. Repeated collector
   errors collapse to one cause with a query count. Live read-only check on the cluster:
-  healthy state reports 11 devices and no gaps (no false positives; etri-001 RNGD label 3,
+  healthy state reports 11 devices and no gaps (no false positives; npu-node-1 RNGD label 3,
   reporting 3); `LMD_PROM=127.0.0.1:1` renders "accel unknown" with dashes and one-line
   errors. The eviction case is covered by unit and render tests only — reproducing it live
   means evicting vendor pods. Full suite: 424 unit + 11 CLI passed; strict Clippy and

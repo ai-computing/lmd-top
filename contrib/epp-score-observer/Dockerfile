@@ -2,7 +2,7 @@
 # Mirrors upstream llm-d Dockerfile.epp (distroless/static:nonroot, same ports/entrypoint),
 # but builds THIS module's main.go, which blank-registers our plugin then runs the stock runner.
 #
-# Build (on a Go+docker box, e.g. etri-001):
+# Build (on a Go+docker box, e.g. npu-node-1):
 #   docker build -t <registry>/epp-score-observer:<tag> .
 #   docker push  <registry>/epp-score-observer:<tag>
 ARG BASE_IMAGE=gcr.io/distroless/static:nonroot

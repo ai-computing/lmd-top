@@ -210,7 +210,7 @@ mod tests {
             Some("accelerator metrics unavailable — prometheus unreachable (probe failed this cycle)")
         );
         // A failing source must not also be reported as a device shortfall.
-        s.nodes.push(node("etri-001", vec![rbln(4, Some(4))]));
+        s.nodes.push(node("npu-node-1", vec![rbln(4, Some(4))]));
         assert!(gaps(&s, 100).is_empty());
     }
 
@@ -237,7 +237,7 @@ mod tests {
         // 2026-10-14: Prometheus fine, RNGD reporting, every RBLN pod evicted by DiskPressure.
         let mut s = snap();
         let mut n = node(
-            "etri-001",
+            "npu-node-1",
             vec![
                 rbln(4, None),
                 DeviceExpectation {
@@ -250,13 +250,13 @@ mod tests {
         n.pressure_kinds = vec!["DiskPressure".into()];
         n.pressure = true;
         s.nodes.push(n);
-        s.accel.push(device("etri-001", AccelKind::Rngd, "npu0"));
-        s.accel.push(device("etri-001", AccelKind::Rngd, "npu1"));
+        s.accel.push(device("npu-node-1", AccelKind::Rngd, "npu0"));
+        s.accel.push(device("npu-node-1", AccelKind::Rngd, "npu1"));
         let found = gaps(&s, 100);
         assert_eq!(found.len(), 1, "RNGD is complete, only RBLN is missing");
         assert_eq!(
             gap_line(&found[0]),
-            "etri-001: RBLN 0/4 devices reporting — DiskPressure — vendor pods likely evicted"
+            "npu-node-1: RBLN 0/4 devices reporting — DiskPressure — vendor pods likely evicted"
         );
     }
 

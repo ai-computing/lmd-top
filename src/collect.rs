@@ -3183,8 +3183,8 @@ mod tests {
                 &[
                     (
                         "host-local-pkgs",
-                        "/home/gspark/.local/lib/python3.10/site-packages",
-                        "/home/gspark/.local/lib/python3.10/site-packages",
+                        "/home/<user>/.local/lib/python3.10/site-packages",
+                        "/home/<user>/.local/lib/python3.10/site-packages",
                     ),
                     (
                         "host-sys-local-pkgs",
@@ -3202,7 +3202,7 @@ mod tests {
                     (
                         "model",
                         "/model",
-                        "/home/gspark/rbln-gemma4-26b-a4b-tp4-s8192",
+                        "/home/<user>/rbln-gemma4-26b-a4b-tp4-s8192",
                     ),
                     ("shm", "/dev/shm", ""),
                 ],
@@ -3213,8 +3213,8 @@ mod tests {
                 &[
                     (
                         "local-pkgs",
-                        "/home/gspark/.local/lib/python3.10/site-packages",
-                        "/home/gspark/.local/lib/python3.10/site-packages",
+                        "/home/<user>/.local/lib/python3.10/site-packages",
+                        "/home/<user>/.local/lib/python3.10/site-packages",
                     ),
                     ("libs", "/host-libs", "/usr/lib/x86_64-linux-gnu"),
                     ("rbln-lib", "/host-rbln-lib", "/usr/lib"),
@@ -3222,11 +3222,11 @@ mod tests {
                     (
                         "app",
                         "/app",
-                        "/home/gspark/workspace/01_pd_disag/rngd_llmd",
+                        "/home/<user>/workspace/01_pd_disag/rngd_llmd",
                     ),
-                    ("hf", "/hf", "/home/gspark/.cache/huggingface"),
+                    ("hf", "/hf", "/home/<user>/.cache/huggingface"),
                     ("dshm", "/dev/shm", "/dev/shm"),
-                    ("artifacts", "/artifacts", "/home/gspark/rbln-llama8b-pd"),
+                    ("artifacts", "/artifacts", "/home/<user>/rbln-llama8b-pd"),
                 ],
                 "artifacts",
             ),
@@ -3238,9 +3238,9 @@ mod tests {
                     (
                         "app",
                         "/app",
-                        "/home/gspark/workspace/01_pd_disag/rngd_llmd",
+                        "/home/<user>/workspace/01_pd_disag/rngd_llmd",
                     ),
-                    ("hf", "/hf", "/home/gspark/.cache/huggingface"),
+                    ("hf", "/hf", "/home/<user>/.cache/huggingface"),
                     ("dshm", "/dev/shm", "/dev/shm"),
                     ("cfg", "/cfg", ""),
                 ],
@@ -3249,8 +3249,8 @@ mod tests {
             (
                 "ds4-v4flash-gb10",
                 &[
-                    ("ds4bin", "/ds4", "/home/gspark/ds4"),
-                    ("gguf", "/gguf", "/home/gspark/model-cache/ds4-gguf"),
+                    ("ds4bin", "/ds4", "/home/<user>/ds4"),
+                    ("gguf", "/gguf", "/home/<user>/model-cache/ds4-gguf"),
                     ("kv", "/tmp/ds4-kv", ""),
                     ("dshm", "/dev/shm", ""),
                 ],
@@ -3314,14 +3314,14 @@ mod tests {
             Some("/usr/lib/python3/dist-packages")
         ));
         assert!(is_system_mount(
-            "/home/gspark/.local/lib/python3.10/site-packages",
+            "/home/<user>/.local/lib/python3.10/site-packages",
             None
         ));
         assert!(is_system_mount("/dev/shm", None));
         // A real model directory under a home directory is not a system mount.
         assert!(!is_system_mount(
             "/model",
-            Some("/home/gspark/rbln-gemma4-26b-a4b-tp4-s8192")
+            Some("/home/<user>/rbln-gemma4-26b-a4b-tp4-s8192")
         ));
         assert!(!is_system_mount("/model-cache", None));
     }
@@ -3483,14 +3483,14 @@ mod node_list_tests {
     }
     #[test]
     fn node_declares_devices_from_labels_even_when_the_plugin_is_gone() {
-        // etri-001 during the 2026-10-14 DiskPressure eviction: feature-discovery labels stay,
+        // npu-node-1 during the 2026-10-14 DiskPressure eviction: feature-discovery labels stay,
         // the RBLN device plugin is evicted so ATOM drops out of allocatable entirely.
-        let value = json!({"items":[{"metadata":{"name":"etri-001","labels":{
+        let value = json!({"items":[{"metadata":{"name":"npu-node-1","labels":{
                 "rebellions.ai/npu.count":"4","furiosa.ai/npu.count":"3","unrelated.count":"9"}},
             "status":{"allocatable":{"furiosa.ai/rngd":"3","cpu":"64"},
                 "conditions":[{"type":"Ready","status":"True"},{"type":"DiskPressure","status":"True"}]}}]});
         let (_, nodes) = parse_node_list(&value).unwrap();
-        let node = &nodes["etri-001"];
+        let node = &nodes["npu-node-1"];
         assert_eq!(node.pressure, vec!["DiskPressure".to_string()]);
         let rbln = node.devices.iter().find(|d| d.label == "RBLN").unwrap();
         assert_eq!((rbln.declared, rbln.allocatable), (4, None));

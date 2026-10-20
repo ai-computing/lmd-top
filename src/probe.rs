@@ -234,10 +234,10 @@ mod tests {
     #[test]
     fn accepts_the_host_paths_this_cluster_actually_uses() {
         for p in [
-            "/home/gspark/rbln-gemma4-26b-a4b-tp4-s8192",
-            "/home/gspark/rbln-llama8b-pd",
-            "/home/gspark/model-cache/ds4-gguf",
-            "/home/gspark/.cache/huggingface",
+            "/home/<user>/rbln-gemma4-26b-a4b-tp4-s8192",
+            "/home/<user>/rbln-llama8b-pd",
+            "/home/<user>/model-cache/ds4-gguf",
+            "/home/<user>/.cache/huggingface",
         ] {
             assert_eq!(validate_host_path(p).as_deref(), Ok(p), "{}", p);
         }
@@ -257,8 +257,8 @@ mod tests {
         let (m, name) = provenance_manifest(
             "llm-serving",
             "gemma4-rbln",
-            "etri-001",
-            "/home/gspark/rbln-gemma4-26b-a4b-tp4-s8192",
+            "npu-node-1",
+            "/home/<user>/rbln-gemma4-26b-a4b-tp4-s8192",
         );
         let v = job_of(&m);
         assert_eq!(
@@ -269,12 +269,12 @@ mod tests {
         let pod = &v["spec"]["template"]["spec"];
         assert_eq!(
             pod["nodeSelector"]["kubernetes.io/hostname"].as_str(),
-            Some("etri-001"),
+            Some("npu-node-1"),
             "a hostPath only exists on its own node"
         );
         assert_eq!(
             pod["volumes"][0]["hostPath"]["path"].as_str(),
-            Some("/home/gspark/rbln-gemma4-26b-a4b-tp4-s8192")
+            Some("/home/<user>/rbln-gemma4-26b-a4b-tp4-s8192")
         );
         assert_eq!(
             pod["containers"][0]["volumeMounts"][0]["readOnly"].as_bool(),
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
         assert!(
-            !cmd[2].contains("/home/gspark"),
+            !cmd[2].contains("/home/<user>"),
             "the path must not be baked into the script"
         );
         assert!(cmd[2].contains("\"$DIR\""), "and must be expanded quoted");

@@ -506,6 +506,9 @@ pub struct App {
     pub img_rbln: Option<String>, // LMD_COMPILE_IMAGE_RBLN — placeholder if absent
     pub img_furiosa: Option<String>, // LMD_COMPILE_IMAGE_FURIOSA — default accel::furiosa::DEFAULT_IMAGE
     pub img_serving: Option<String>, // LMD_SERVING_IMAGE — placeholder if absent
+    /// LMD_RBLN_HOST_SITE_PACKAGES — the RBLN node's user-level site-packages, mounted by the
+    /// hostPath fallback when the vendor stack was installed with `pip install --user`.
+    pub rbln_host_site: Option<String>,
     pub hist: HashMap<String, VecDeque<u64>>, // accel util history
     pub toast: Option<String>,
     pub detail: bool,    // whether to show the selected row's detail (drill-down)
@@ -706,6 +709,7 @@ impl App {
             img_furiosa: env("LMD_COMPILE_IMAGE_FURIOSA")
                 .or_else(|| Some(crate::accel::furiosa::DEFAULT_IMAGE.into())),
             img_serving: env("LMD_SERVING_IMAGE"),
+            rbln_host_site: env("LMD_RBLN_HOST_SITE_PACKAGES"),
             hist: HashMap::new(),
             toast: None,
             detail: false,
@@ -1506,7 +1510,7 @@ mod tests {
                 model: "koni-rbln".into(),
                 family: "kisti-koni/koni-llama3.1-8b".into(),
                 engine: "vLLM-RBLN".into(),
-                node: "etri-001".into(),
+                node: "npu-node-1".into(),
                 image: String::new(),
                 source: "KISTI-KONI/KONI-Llama3.1-8B-Instruct".into(),
                 mount: "/mnt/store ← PVC:model-store".into(),
@@ -1744,7 +1748,7 @@ mod tests {
                 model: "koni-rbln".into(),
                 family: "kisti-koni/koni-llama3.1-8b".into(),
                 engine: "vLLM-RBLN".into(),
-                node: "etri-001".into(),
+                node: "npu-node-1".into(),
                 source: "KISTI-KONI/KONI-Llama3.1-8B-Instruct".into(),
                 mount: "/mnt/store".into(),
                 opts: vec![],
@@ -1846,7 +1850,7 @@ mod tests {
                 model: "exaone-rngd".into(),
                 family: "lgai-exaone/exaone".into(),
                 engine: "Furiosa-LLM".into(),
-                node: "etri-001".into(),
+                node: "npu-node-1".into(),
                 image: String::new(),
                 source: "LGAI-EXAONE/EXAONE-4.0".into(),
                 mount: String::new(),
@@ -1925,7 +1929,7 @@ mod tests {
                     model: "m".into(),
                     family: "f".into(),
                     engine: engine.into(),
-                    node: "etri-001".into(),
+                    node: "npu-node-1".into(),
                     image: String::new(),
                     source: source.into(),
                     mount: "/mnt/store/compiled/x ← PVC:model-store".into(),
@@ -2099,7 +2103,7 @@ mod tests {
                     model: "m".into(),
                     family: "f".into(),
                     engine: "Furiosa-LLM".into(),
-                    node: "etri-001".into(),
+                    node: "npu-node-1".into(),
                     image: String::new(),
                     source: source.into(),
                     mount: String::new(),
@@ -2134,7 +2138,7 @@ mod tests {
                 model: "koni-rbln".into(),
                 family: "kisti-koni/koni".into(),
                 engine: "vLLM-RBLN".into(),
-                node: "etri-001".into(),
+                node: "npu-node-1".into(),
                 image: String::new(),
                 source: "KISTI-KONI/KONI".into(),
                 mount: String::new(),
@@ -2234,7 +2238,7 @@ mod tests {
         let mk = |source: &str| App {
             snap: Snapshot {
                 accel: vec![{
-                    let mut device = accel(crate::collect::AccelKind::Rbln, "etri-001", true, "");
+                    let mut device = accel(crate::collect::AccelKind::Rbln, "npu-node-1", true, "");
                     device.mem_total_gb = 15.7;
                     device
                 }],
@@ -2242,7 +2246,7 @@ mod tests {
                     model: "m".into(),
                     family: source.to_lowercase(),
                     engine: "vLLM-RBLN".into(),
-                    node: "etri-001".into(),
+                    node: "npu-node-1".into(),
                     image: String::new(),
                     source: source.into(),
                     mount: String::new(),
@@ -3101,7 +3105,7 @@ mod tests {
             model: model.into(),
             family: family.into(),
             engine: engine.into(),
-            node: "etri-001".into(),
+            node: "npu-node-1".into(),
             image: String::new(),
             source: source.into(),
             mount: String::new(),
@@ -3893,7 +3897,7 @@ mod tests {
         use ratatui::Terminal;
         let mut a = App::new();
         a.snap = Snapshot {
-            accel: vec![accel(Rbln, "etri-001", true, "")],
+            accel: vec![accel(Rbln, "npu-node-1", true, "")],
             ..Default::default()
         };
         a.view = View::Library;
@@ -3912,7 +3916,7 @@ mod tests {
             }
         }
         assert!(s.contains("NODE"), "picker 헤더\n{s}");
-        assert!(s.contains("etri-001"), "후보 노드 행");
+        assert!(s.contains("npu-node-1"), "후보 노드 행");
         assert!(s.contains("placement"), "picker 타이틀");
     }
 
