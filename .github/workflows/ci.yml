@@ -42,7 +42,7 @@ jobs:
         run: python3 scripts/build-inventory.py --output /tmp/lmd-build-inventory.json
       - name: Shell syntax
         run: |
-          bash -n install.sh scripts/validate-golden.sh scripts/check-release.sh
+          bash -n install.sh scripts/validate-golden.sh scripts/check-release.sh scripts/record-demo.sh
           for recipe in assets/recipes/*.sh; do sh -n "$recipe"; done
 
   epp-plugin:
