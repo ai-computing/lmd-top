@@ -20,22 +20,20 @@ import sys
 import termios
 import time
 
-# (seconds after start, keys, caption): sections 0-6, ←/→ sub-tabs and j (select). Views only;
-# nothing here opens an action menu, so the run changes nothing in the cluster.
+# (seconds after start, keys, caption): sections 0-3, ←/→ sub-tabs and O (sort direction). Views
+# only; nothing here opens an action menu, so the run changes nothing in the cluster.
+# Record while a model serves traffic (docs/DEMO.md): the tour stays longest on the views whose
+# numbers move under load — Overview, Serving: Perf and Infra: Devices.
 RIGHT = "\x1b[C"
 SCRIPT = [
-    (5.0, "1", "Traffic: Flow"),
-    (9.0, RIGHT, "Traffic: EPP"),
-    (13.0, "2", "Serving"),
-    (16.5, "3", "Infra: Nodes"),
-    (19.5, RIGHT, "Infra: Devices + ai-rm panel"),
-    (21.5, "j", "select next device"),
-    (22.2, "j", "select next device"),
-    (24.5, RIGHT, "Infra: Topology"),
-    (27.5, "4", "Deploy: Model List"),
-    (31.5, "6", "Setup"),
-    (34.5, "0", "Overview"),
-    (38.0, None, "stop (ends on Overview so the GIF loops cleanly)"),
+    (7.0, "1", "Traffic: Flow"),
+    (12.0, "2", "Serving"),
+    (16.0, RIGHT, "Serving: Perf (device utilisation over time)"),
+    (24.0, "3", "Infra: Nodes"),
+    (28.0, RIGHT, "Infra: Devices + ai-rm panel"),
+    (29.5, "O", "sort busiest device first"),
+    (37.0, "0", "Overview"),
+    (44.0, None, "stop (ends on Overview so the GIF loops cleanly)"),
 ]
 
 

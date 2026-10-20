@@ -4,7 +4,8 @@
 #   cargo build --release
 #   LMD_DEMO_ALIASES=/path/outside/the/repo/aliases.txt bash scripts/record-demo.sh
 #
-# lmd-top runs in observe mode with the key script in scripts/record-demo.py (views and selection
+# Run it while a model serves steady traffic (docs/DEMO.md, step 1), or the views stay empty.
+# lmd-top runs in observe mode with the key script in scripts/record-demo.py (views and sort order
 # only), so the cluster is not changed. The run uses a scratch HOME, history and audit log, and your
 # usual kubeconfig and lmd-top config. The alias file maps real names to public ones, one
 # `real -> alias` per line; keep it out of git. Needs python3 and agg (cargo install --locked agg).
