@@ -221,6 +221,7 @@ stop, restart, cordon, delete, route 편집, apply)은 시각·모드·작업·�
 - `LMD_HISTORY` — compile/serving 결과 기록(기본: `~/.config/lmd-top/history.jsonl`). `lmd-top --history`로 다시 읽습니다.
 - `LMD_COMPILE_ENV` — 생성되는 compile Job에 넣을 추가 환경 변수(`K=V,K=V`). 벤더 디버그 스위치용입니다. RBLN은 TVM 위에서 빌드하므로 `TVM_LOG_DEBUG=1` / `TVM_BACKTRACE=1`이 컴파일러까지 전달됩니다. SDK가 거부하는 플래그는 `vendor-flag`로 분류해 옵션 근거에서 제외하므로, 잘못된 스위치 때문에 advisor가 옵션이 실패한다고 학습하지 않습니다.
 - `LMD_RBLN_TOOLCHAIN` — RBLN toolchain을 설치할 공유 스토어의 wheel 디렉터리(예: `/mnt/store/rbln-toolchain/0.10.3`). compile Job은 `python:3.10-slim`에서 `pip install --no-index --find-links=<dir>`로 돌아, 모든 버전을 함께 고정하고 노드의 Python 환경을 물려받지 않습니다. hostPath, nodeSelector, 벤더 레지스트리 자격 증명이 필요 없고 wheel만 있으면 됩니다.
+- `LMD_RBLN_HOST_SITE_PACKAGES` — RBLN 노드의 사용자 Python site-packages(예: `/home/<user>/.local/lib/python3.10/site-packages`). 벤더 스택을 `pip install --user`로 설치한 노드에서 지정합니다. hostPath fallback(`LMD_COMPILE_IMAGE_RBLN`, `LMD_RBLN_TOOLCHAIN` 모두 없음)에서만 쓰이며, compile Job과 RBLN serving Deployment가 이 경로를 같은 경로로 마운트하고 `PYTHONPATH` 맨 앞에 둡니다. 지정하지 않으면 시스템 Python 경로만 마운트합니다.
 - 선택 사항인 `~/.config/lmd-top/lmd-top.yaml`로 컬럼 순서를 바꿀 수 있습니다.
 
 사이트 값: `cluster.example.env`를 `cluster.local.env`(untracked)로 복사해 채우고 `set -a; . ./cluster.local.env; set +a`로

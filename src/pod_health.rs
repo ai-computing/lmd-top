@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn config_reloader_out_of_inotify_instances_is_an_init_crash() {
-        // 2026-10-14: gx10-4744 had max_user_instances=128; prometheus never got past init.
+        // 2026-10-14: gb10-node-2 had max_user_instances=128; prometheus never got past init.
         let list = json!({"items":[pod("monitoring","prometheus-0","arm","initContainerStatuses",
             crash("quay.io/prometheus-operator/prometheus-config-reloader:v0.86.0", 12, json!({"exitCode":1,
               "message":"level=info msg=\"Starting\"\nlevel=error msg=\"Failed to run\" err=\"create watcher: too many open files\"\nfailed to create inotify watcher: no space left on device"})))]});
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn amd64_only_image_on_an_arm64_node() {
-        // 2026-10-14: rbln-npu-operator controller scheduled on gx10-4744.
+        // 2026-10-14: rbln-npu-operator controller scheduled on gb10-node-2.
         let list = json!({"items":[pod("rbln-system","rbln-npu-operator-controller-manager-x","arm","containerStatuses",
             crash("docker.io/rebellions/rbln-npu-operator:v0.2.0", 40,
                   json!({"exitCode":255,"message":"exec /manager: exec format error"})))]});

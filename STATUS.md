@@ -3,7 +3,7 @@
 <!-- research-hub:header:begin (maintained by .research/report.py; keep the "- **Key**: value" format) -->
 - **State**: idle
 - **Updated**: 2026-10-16 13:24+09:00
-- **Agent**: claude@gspark-PowerEdge-R7525
+- **Agent**: claude@control-node
 - **Task**: Furiosa SDK 2026.4 대응: 이미지 고정 + serve -tp 버전 분기 (done)
 - **Last result**: 기본 이미지 2026.3.0 고정, 2026.4+ 이미지는 --tensor-parallel-size 생략; 라이브 k-exaone/qwen3-4b 배포(replicas 0)도 2026.3.0 고정; 테스트 425+11, clippy, golden 12/12
 - **Next**: 2026.4 공식 이미지 나오면 FXB 재빌드 후 전환
@@ -55,22 +55,22 @@ llm-d 클러스터용 터미널 관측·운영 콘솔을 만든다. 'Kubernetes 
 
 - Result: 기본 이미지 2026.3.0 고정, 2026.4+ 이미지는 --tensor-parallel-size 생략; 라이브 k-exaone/qwen3-4b 배포(replicas 0)도 2026.3.0 고정; 테스트 425+11, clippy, golden 12/12
 - Next: 2026.4 공식 이미지 나오면 FXB 재빌드 후 전환
-- By: claude@gspark-PowerEdge-R7525 · main@1eb3665-dirty
+- By: claude@control-node · main@1eb3665-dirty
 
 ### 2026-10-16 11:57+09:00 — 가속기 커버리지: 수집 실패를 0이 아닌 unknown으로 ✅
 
 - Result: Prometheus 장애 시 Overview/snapshot/JSON이 'accel unknown'+원인 표시(0% 대신 –), 노드 라벨 대비 exporter 미보고 장치를 원인과 함께 표시(DiskPressure 등), 반복 에러 ×N 축약. 424+11 테스트·clippy 통과, 라이브 정상상태 오탐 0
 - Next: Furiosa 2026.4 serve --tensor-parallel-size 대응(serving.rs), CrashLoop 원인 로그 한 줄, 이미지 떠다니는 태그/arch 불일치 감지
-- By: claude@gspark-PowerEdge-R7525 · main@1eb3665-dirty
+- By: claude@control-node · main@1eb3665-dirty
 
 ### 2026-10-16 11:47+09:00 — STATUS.md 초기 작성 ✅
 
 - Result: 초안 검증·보완: v0.36.0 태그 없음(v0.35.0까지), 09-08 QA 18버그·리팩터링, 09-10 ACT-01..08, RBLN decoder-only 회귀(0.10.2만 성공), 미릴리스 133개 변경(routing policy 등), autoloop=main에 병합된 낡은 worktree로 정정
 - Next: Furiosa 2026.4 serve의 --tensor-parallel-size 거부 대응(serving.rs), 미릴리스 변경 정리·v0.36.0 태그, epp-score-observer 배포
-- By: claude@gspark-PowerEdge-R7525 · main@1eb3665-dirty
+- By: claude@control-node · main@1eb3665-dirty
 
 ### 2026-10-16 11:43+09:00 — STATUS.md 초기 작성 ✅
 
 - Result: STATUS.md 초안 작성(hub에서 저장소 스냅샷 기반, 노드 agent 검토 필요)
 - Next: epp-score-observer 플러그인을 클러스터에 배포해 EPP decision debugger의 score 열을 실데이터로 채우고, Track B의 PD 뷰를 스켈레톤부터 구현한다.
-- By: research-hub@gspark-PowerEdge-R7525 · main@1eb3665-dirty
+- By: research-hub@control-node · main@1eb3665-dirty
