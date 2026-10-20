@@ -17,7 +17,7 @@ python3 scripts/check-terminal.py --slow-zoo
 python3 scripts/check-terminal.py --manifest-review success
 python3 scripts/check-terminal.py --manifest-review conflict
 python3 -m unittest discover -s tests -p 'test_*.py'
-bash -n install.sh scripts/validate-golden.sh scripts/check-release.sh
+bash -n install.sh scripts/validate-golden.sh scripts/check-release.sh scripts/record-demo.sh
 for recipe in assets/recipes/*.sh; do
   sh -n "$recipe"
 done

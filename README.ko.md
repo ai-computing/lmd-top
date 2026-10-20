@@ -27,6 +27,12 @@
   <a href="#-로드맵"><b>로드맵</b></a>
 </p>
 
+<p>
+  <a href="assets/demo.cast"><img src="assets/demo.gif" width="900" alt="lmd-top 데모: GPU, RBLN, RNGD 노드가 있는 실제 클러스터에서 Overview, Traffic(Flow, EPP), Serving, Infra(Nodes, ai-rm 패널이 있는 Devices, Topology), Deploy, Setup 화면을 차례로 보여줍니다"></a>
+  <br>
+  <sub>GPU + RBLN + RNGD 클러스터 실제 녹화(노드 이름과 주소는 바꿈) · <a href="assets/demo.cast">asciicast</a> · <a href="docs/DEMO.md">만드는 방법</a></sub>
+</p>
+
 </div>
 
 ---
@@ -72,8 +78,9 @@ LED 디바이스 그리드, 스택형 VRAM 바, braille 타임라인, 알림, �
 </tr>
 </table>
 
-공개 레포는 정리된 export라 데모 녹화는 들어 있지 않습니다. 데모는 로컬에서
-`lmd-top --cast && agg docs/demo.cast lmd-top.gif`로 만듭니다(soft 테마, 실시간 braille 타임라인, 계층 간 드릴다운, 합성 데이터).
+맨 위 데모는 실제 클러스터 녹화이며, 다시 만드는 방법은 [docs/DEMO.md](docs/DEMO.md)(`scripts/record-demo.sh`)에 있습니다.
+합성 데이터로 만드는 오프라인 데모는 `lmd-top --cast && agg docs/demo.cast lmd-top.gif`로 로컬에서 만들 수 있습니다(soft 테마, 실시간
+braille 타임라인, 계층 간 드릴다운).
 
 ## 🚀 빠른 시작
 
