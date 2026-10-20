@@ -6,7 +6,7 @@ description = "Terminal observability & operations tool for llm-d clusters"
 license = "Apache-2.0"
 repository = "https://github.com/gspark-etri/lmd-top"
 readme = "README.md"
-exclude = [".claude/**", ".codex/**", ".orca/**"]
+exclude = [".claude/**", ".codex/**", ".orca/**", "assets/demo.*"]
 keywords = ["tui", "kubernetes", "llm", "observability", "monitoring"]
 categories = ["command-line-utilities"]
 

@@ -27,6 +27,12 @@
   <a href="#-roadmap"><b>Roadmap</b></a>
 </p>
 
+<p>
+  <a href="assets/demo.cast"><img src="assets/demo.gif" width="900" alt="lmd-top demo: a live cluster tour through Overview, Traffic (Flow, EPP), Serving, Infra (Nodes, Devices with the ai-rm panel, Topology), Deploy and Setup on GPU, RBLN and RNGD nodes"></a>
+  <br>
+  <sub>Live recording on a GPU + RBLN + RNGD cluster (node names and addresses replaced) · <a href="assets/demo.cast">asciicast</a> · <a href="docs/DEMO.md">how it is made</a></sub>
+</p>
+
 </div>
 
 ---
@@ -73,9 +79,9 @@ LED device grid, stacked VRAM bar, braille timelines, alerting, log tailing and 
 </tr>
 </table>
 
-The public repository is a sanitized export: the demo recording is not included. Record one locally with
-`lmd-top --cast && agg docs/demo.cast lmd-top.gif` (soft theme, live braille timelines and cross-layer drill-down,
-rendered from synthetic data).
+The demo at the top is a live recording; [docs/DEMO.md](docs/DEMO.md) explains how to regenerate it with
+`scripts/record-demo.sh`. For an offline demo from synthetic data, `lmd-top --cast && agg docs/demo.cast lmd-top.gif`
+renders one locally (soft theme, live braille timelines and cross-layer drill-down).
 
 ## 🚀 Quick start
 
